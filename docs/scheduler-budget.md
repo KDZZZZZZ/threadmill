@@ -49,7 +49,7 @@ Budget Model 负责约束系统可投入的 token、时间、并发、retry 和 
 1. blocked task 不调度。
 2. dependencies 未完成的 task 不调度。
 3. 高优先级 task 优先。
-4. verify 阶段优先于新 execute，因为 verify 可以释放 merge 和 unblock 父 task。
+4. verify 阶段优先于新 execute，因为 verify 可以释放 merge，并解除依赖它的 blocked task。
 5. merge queue 优先处理已验证结果。
 6. 有冲突风险的 task 降低并发。
 7. budget 不足时减少探索性 agent。
@@ -77,19 +77,20 @@ Scheduler 自动分配下一个合适 task phase。
 
 这不是给新 agent 手动分配任务，而是增加系统吞吐。
 
-### 创建新任务
+### 提交新需求
 
 用户输入：
 
 ```text
-“增加一个新任务：支持 Codex wrapper。”
+“需求：支持 Codex wrapper。”
 ```
 
 系统行为：
 
 ```text
-创建 task。
-根据依赖和预算排入 task graph。
+登记 requirement。
+由 Task Manager 编排 task / state node / edge。
+根据依赖、状态 endpoint 和预算排入 task graph。
 不一定立刻启动 agent。
 ```
 
@@ -156,7 +157,7 @@ Scheduler 应在以下情况触发重新 plan：
 2. verify 失败且不是局部修复可解决。
 3. ctxlib 检索到高置信架构约束与当前实现冲突。
 4. active conflict 影响当前 task 的 write set。
-5. child task 结果改变父 task 方案。
+5. 相关 task 结果改变当前 task 方案。
 6. 预算不足，需要缩小目标。
 ```
 
@@ -168,10 +169,10 @@ Scheduler 应在以下情况触发重新 plan：
 
 ```text
 1. merge queue 中已通过 verify 的 task。
-2. blocked 父 task 依赖的 child task。
-3. verify 阶段 task。
+2. 被 blocked task 或 phase endpoint 依赖的 task。
+3. verify 阶段 task，尤其是解锁其他 task.verify 的依赖。
 4. 已 planned 且无冲突风险的 execute task。
-5. root task 的 planning。
+5. 来自新 requirement 的 task planning。
 6. 探索性或低优先级任务。
 ```
 
@@ -184,6 +185,6 @@ Scheduler 应在以下情况触发重新 plan：
 2. 不把 task 分配给 capability 不匹配的 agent。
 3. 不让 execute 跳过 plan。
 4. 不让 merge 跳过 verify。
-5. agent capacity 只影响吞吐，不改变 task graph 语义。
+5. agent capacity 只影响吞吐，不改变 task graph 语义或 Task Manager 的依赖编排权。
 6. budget 不足时优先保护 verify 和 merge，而不是继续开新探索。
 ```

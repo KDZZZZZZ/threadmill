@@ -22,7 +22,7 @@ worktree 隔离本身不在这里单独实现。第一阶段 worktree、branch�
 4. task verify 通过后才允许进入 merge queue。
 5. merge 前需要基于最新 main 重新验证。
 6. merge 前需要检查 active conflicts。
-7. merge 后必须写入 Event Log，并通过 Ctx Agent 写入 Context Lib。
+7. merge 结果作为事件被自动记入 Event Log；ctxlib 由 Ctx Agent 从 log 提炼，merge 不直接写 ctxlib。
 ```
 
 ---
@@ -95,7 +95,7 @@ Merge Queue 负责把 verify passed 的 task 串行合入 main。
 1. 未通过 verify 的 task 不得 merge。
 2. merge 前必须基于最新 main 重新检查。
 3. merge 前必须检查 active conflict。
-4. merge 后必须写入 ctxlib。
+4. merge 结果记入 Event Log，ctxlib 由 Ctx Agent 从 log 提炼（merge 不直接写 ctxlib）。
 5. merge 后必须更新 task graph projection。
 ```
 
@@ -205,7 +205,7 @@ ConflictContext {
   target task -> continue execute with adaptation
 
 如果 conflict 使当前任务无效：
-  target task -> blocked / superseded / split child task
+  target task -> blocked / superseded / propose follow-up task / graph expansion
 
 如果 conflict 需要人类决策：
   target task -> waiting_human

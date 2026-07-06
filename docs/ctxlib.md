@@ -1,675 +1,180 @@
 # Context Lib 详细设计
 
-版本：v0.1  
+版本：v0.2
 状态：Draft
+定位：ctxlib 用结构化项目记忆取代 session memory。本文件给出一个**小内核 + 明确扩展缝**的原型：核心模型和接口尽量小而稳定，richer 能力(多维筛选、排序、embedding、过时判断等)都作为可插拔扩展，不进内核。
 
 ---
 
-## 1. 定位
-
-Context Lib 是项目级上下文库，用于取代传统 session memory。
-
-它不是聊天记录仓库，而是结构化记忆系统。它保存经过提取、标注和验证的项目事实、设计判断、失败经验、冲突信息和用户偏好。
-
-核心原则：
+## 1. 设计原则
 
 ```text
-不保存 session，保存结构化项目记忆。
-不全量注入，按 task、phase、scope、confidence、freshness 选择。
-不禁止运行时检索，但检索必须结构化、可审计、受预算限制。
+1. 小内核：ContextBlock 只保留少量稳定字段，其余用开放结构表达。
+2. 单一来源：ctxlib 只从 Event Log / Artifact 构建，不接受 agent 直接写。
+3. 单一入口：对外只有 Ctx Agent，且只暴露 pack / query 两个只读操作。
+4. 缝在接口上：抽取、评分、存储都是可替换接口，扩展不改内核。
+5. 一切可追溯：每个 block 都指回它的来源事件 / artifact。
 ```
 
-所有对 ctxlib 的读写都必须经过 Ctx Agent，见下一节。
+一句话：**内核只回答"有哪些记忆、怎么取"，"记忆有多好、怎么排"交给可替换的策略。**
 
 ---
 
-## 1.1 Ctx Agent
+## 2. 核心数据模型
 
-Ctx Agent 是 ctxlib 的唯一受控访问入口。其他 agent 不直接读取 ctxlib 底层存储，而是向 Ctx Agent 发请求。
-
-### 为什么需要一个专门的 agent
-
-ctxlib 是项目长期记忆，如果每个 agent 都能自由读写，会出现：
-
-```text
-- 上下文污染：把 superseded 或低置信内容当事实注入。
-- 越权读取：读到与当前 task 无关或敏感的上下文。
-- 预算失控：一次塞入过多 context block。
-- 无法审计：不知道谁在什么时候读了什么、写了什么。
-```
-
-因此 Ctx Agent 统一负责筛选、摘要、权限、预算和事件记录。
-
-### 职责
-
-```text
-1. 在新 agent 启动前，为其 task/phase 选择并渲染 context pack。
-2. 处理运行中其他 agent 的 ctxlib 查询（CtxQuery）。
-3. 按 scope、validity、visibility、risk、budget 过滤 context block。
-4. 决定注入哪一层摘要（one_line / short / long / body_ref）。
-5. 写入新的 context block，并做去重、supersede、标注。
-6. 记录所有读写为事件，便于追溯。
-7. 发现上下文矛盾时，返回 replan/human_decision 建议。
-```
-
-### 访问模型
-
-```ts
-CtxAccessRequest {
-  requester: { agent_id: string; task_id: string; phase: string }
-
-  op:
-    | "build_context_pack"  // 启动前构建 pack
-    | "query"               // 运行时查询（见 CtxQuery）
-    | "write_block"         // 写入新 context block
-    | "supersede_block"     // 标记旧 block 被替代
-
-  payload: unknown          // 对应 op 的具体参数
-}
-```
-
-### 边界
-
-```text
-- 只有 Ctx Agent 能直接访问 ctxlib 底层存储。
-- 运行中的 agent 只能通过 Ctx Agent 查询，不能扩大自身权限。
-- Ctx Agent 不把未经验证的猜测提升为高置信事实。
-- 每次访问都必须落事件日志。
-```
-
-运行时查询协议（CtxQuery / CtxQueryResult）见第 9 节。
-
----
-
-## 2. 存储内容
-
-ctxlib 存储：
-
-```text
-- 架构决策
-- 模块摘要
-- 任务摘要
-- 验收结果
-- 失败原因
-- 冲突分析
-- 用户偏好
-- API contract 约束
-- 风险说明
-- rejected approaches
-- implementation notes
-- test evidence
-```
-
-不直接存储：
-
-```text
-- 未过滤的完整 session
-- 原始 chain-of-thought
-- 无结构长日志
-- 与项目无关的聊天内容
-```
-
-原始日志可以进入 artifact store，但 ctxlib 中只保留摘要、证据引用和结构化元数据。
-
----
-
-## 3. Context Block 数据模型
+只有一个核心类型。可扩展性来自两处：`scope` 用**前缀约定的开放标签**，`attributes` 用**开放键值**。新增维度不改 schema。
 
 ```ts
 ContextBlock {
   id: string
+  kind: string            // 开放字符串。原型约定：decision / summary / failure /
+                          // conflict / preference / rejected …；新增类型不改内核。
 
-  title: string
-  summary: string
-  body_ref: string
+  text: string            // 可直接注入的内容（摘要）。更长的正文/原始日志放 refs。
 
-  type:
-    | "architecture_decision"
-    | "design_rationale"
-    | "module_summary"
-    | "task_summary"
-    | "verification_result"
-    | "failure_analysis"
-    | "conflict_note"
-    | "user_preference"
-    | "api_contract"
-    | "domain_rule"
-    | "risk_note"
-    | "implementation_note"
-    | "test_evidence"
-    | "rejected_approach"
+  scope: string[]         // 开放标签，用前缀表达"它关于什么"：
+                          //   task:T123  module:ctxlib  file:src/x.ts
+                          //   phase:plan tag:api  ...
+                          // 新增一个维度 = 约定一个新前缀，无需改字段。
 
-  source:
-    | "human"
-    | "agent_summary"
-    | "tool_log"
-    | "verification"
-    | "merge"
-    | "scheduler"
-    | "imported_doc"
+  outdated: boolean       // 是否已过时。原型不表达版本链路，只标记可用性。
 
-  confidence: number
-  importance: number
-  freshness: number
+  source_refs: string[]   // 指向 Event Log 事件 / Artifact 的证据，保证可追溯
 
-  validity:
-    | "active"
-    | "stale"
-    | "superseded"
-    | "disputed"
-    | "experimental"
-    | "deprecated"
-
-  repo_scope: string
-  module_scope: string[]
-  file_scope: string[]
-  symbol_scope: string[]
-
-  task_scope: string[]
-  phase_scope: ("plan" | "execute" | "verify" | "merge")[]
-
-  semantic_tags: string[]
-
-  supersedes: string[]
-  superseded_by?: string
-
-  visibility:
-    | "all_agents"
-    | "planner_only"
-    | "executor_only"
-    | "verifier_only"
-    | "human_only"
-    | "same_task_only"
-    | "same_module_only"
-
-  risk:
-    | "normal"
-    | "sensitive"
-    | "destructive"
-    | "credentials_related"
-
-  evidence_refs: string[]
+  attributes: Record<string, unknown>
+                          // 扩展位。confidence / freshness / importance /
+                          // visibility / risk 等都放这里。
+                          // 原型可以只填 confidence 和 created_at。
 
   created_at: string
-  updated_at: string
-
-  author_agent_id?: string
-  originating_task_id?: string
 }
 ```
 
----
-
-## 4. Context Block 表示层级
-
-每个 context block 应该有多层摘要：
+为什么这么设计：
 
 ```text
-1. one_line_summary
-2. short_summary
-3. long_summary
-4. body_ref
-5. raw_artifact_ref
-```
-
-调度器根据 token budget 选择合适粒度。
-
-例如：
-
-```text
-one_line_summary:
-Codex wrapper 不能假设 CLI 一定支持稳定 JSON output。
-
-short_summary:
-Codex CLI 在 headless 模式下可能只能稳定输出 text，因此统一 runtime 需要外层 parser、schema retry 和 fallback。
-
-long_summary:
-包含失败场景、命令、替代方案、对 Agent Runtime 的设计影响。
-
-raw_artifact_ref:
-原始运行日志。
+- 原来的 repo/module/file/symbol/task/phase_scope 六个字段 -> 合并成 scope 标签。
+- 原来的 confidence/importance/freshness/validity/visibility/risk 等 -> 放 attributes。
+- 结果：内核字段从 ~20 个降到 7 个；加新维度不再是 schema 变更。
 ```
 
 ---
 
-## 5. Context Curator
+## 3. Ctx Agent：唯一入口
 
-Context Curator 是 ctxlib 的记忆提取和维护逻辑，作为 Ctx Agent 的一部分或其下游组件运行。它负责“从事件里提炼出值得长期保存的记忆”，而 Ctx Agent 负责“对外的受控读写入口”。
-
-它可以由规则引擎、embedding 检索和 LLM agent 共同实现。
-
-### 职责
-
-1. 从 agent 输出中提取有价值的 context。
-2. 从 tool call summary 中提取操作日志。
-3. 从 verify failure 中提取失败经验。
-4. 从 merge result 中提取最终项目事实。
-5. 为 context block 打标签。
-6. 计算 confidence、freshness、importance。
-7. 识别 superseded context。
-8. 为新 task phase 生成 context pack。
-9. 发现上下文矛盾时触发 replan。
-10. 维护 active task conflict map。
-
-### Context 提取原则
-
-进入 ctxlib 的内容必须满足至少一个条件：
-
-```text
-1. 会影响未来架构选择。
-2. 会影响模块边界。
-3. 会影响验收策略。
-4. 解释了一次失败。
-5. 记录了一个已验证事实。
-6. 说明了一个被拒绝方案及原因。
-7. 捕获了用户长期偏好。
-8. 描述了活跃冲突。
-```
-
-不应进入 ctxlib 的内容：
-
-```text
-1. 临时闲聊。
-2. 单次无意义工具输出。
-3. 没有证据的猜测。
-4. 已被后续事实完全覆盖的旧结论。
-5. 大段未压缩日志。
-```
-
----
-
-## 6. Agent 启动时应拥有哪些记忆？
-
-每个 agent invocation 应该拥有五层上下文。
-
-```text
-L0: System / role rules
-L1: Current task contract
-L2: Phase-specific brief
-L3: Selected context pack
-L4: Retrieval protocol
-```
-
-### L0：System / Role Rules
-
-包括：
-
-```text
-- 当前 agent 角色
-- 可用工具
-- 禁止事项
-- 输出 schema
-- task 三阶段规则
-- worktree 规则
-- 高风险操作规则
-- 子 task 创建规则
-```
-
-### L1：Current Task Contract
-
-必须包含：
-
-```text
-- task id
-- task title
-- task description
-- parent task
-- current phase
-- delivery_type
-- acceptance criteria
-- blockers
-- dependencies
-- worktree id
-- base commit
-- owner module
-- declared write set
-```
-
-### L2：Phase-Specific Brief
-
-不同 phase 的上下文不同。
-
-#### Plan agent 需要：
-
-```text
-- 用户目标
-- 父 task 目标
-- 架构边界
-- 相关模块摘要
-- 已知风险
-- rejected approaches
-- 子 task 创建规则
-- 验收标准要求
-```
-
-#### Execute agent 需要：
-
-```text
-- approved plan
-- 文件范围
-- 实现约束
-- API contract
-- 相关 implementation notes
-- 不允许私自扩大 scope
-- 遇到计划错误时请求 replan
-```
-
-#### Verify agent 需要：
-
-```text
-- acceptance criteria
-- diff summary
-- observed write set
-- failure history
-- risk notes
-- active conflict context
-- test strategy
-```
-
-### L3：Selected Context Pack
-
-从 ctxlib 选择出的上下文包。
-
-它应包含：
-
-```text
-- 必须遵守的架构决策
-- 相关模块摘要
-- 相邻任务结果
-- 历史失败
-- 风险说明
-- 冲突上下文
-- 可选但未注入的 context 索引
-```
-
-### L4：Retrieval Protocol
-
-agent 不需要一开始看到所有 ctxlib，但必须知道如何在必要时查询。
-
----
-
-## 7. Context Block 筛选维度
-
-用于筛选 context 的维度至少包括：
-
-### A. 类型
-
-```text
-architecture_decision
-module_summary
-task_summary
-verification_result
-failure_analysis
-conflict_note
-user_preference
-api_contract
-risk_note
-implementation_note
-test_evidence
-rejected_approach
-```
-
-### B. 范围
-
-```text
-repo_scope
-module_scope
-file_scope
-symbol_scope
-api_scope
-database_scope
-ui_scope
-test_scope
-```
-
-### C. 生命周期
-
-```text
-validity
-freshness
-created_at
-updated_at
-supersedes
-superseded_by
-```
-
-### D. 置信度
-
-```text
-confidence
-importance
-evidence_refs
-verified_by
-```
-
-### E. 任务关系
-
-```text
-task_scope
-parent_task_id
-child_task_ids
-phase_scope
-related_failures
-blocked_tasks
-```
-
-### F. 冲突关系
-
-```text
-touched_files
-declared_write_set
-observed_write_set
-ownership_claims
-active_task_refs
-conflict_risk
-```
-
-### G. 可见性和风险
-
-```text
-visibility
-risk
-permission_required
-```
-
-### H. token 成本
-
-```text
-summary_token_cost
-long_body_token_cost
-raw_artifact_size
-```
-
----
-
-## 8. Context Pack 生成流程
-
-Context Pack 生成分为四步：
-
-```text
-1. hard filter
-2. candidate retrieval
-3. reranking
-4. context pack assembly
-```
-
-### Step 1：Hard Filter
-
-先排除不可用 context。
-
-排除条件：
-
-```text
-- validity = superseded
-- visibility 不允许当前 agent
-- risk 超出当前权限
-- scope 与当前 task 完全不匹配
-- freshness 太低且无 evidence
-```
-
-### Step 2：Candidate Retrieval
-
-多路召回：
-
-```text
-- task graph 邻近召回
-- module/file/symbol scope 召回
-- semantic embedding 召回
-- recent failure 召回
-- architecture decision 召回
-- user preference 召回
-- active conflict 召回
-```
-
-不要只依赖 embedding。
-
-### Step 3：Reranking
-
-打分公式：
-
-```text
-score =
-  task_relevance
-+ phase_relevance
-+ module_overlap
-+ file_overlap
-+ dependency_overlap
-+ freshness
-+ confidence
-+ importance
-+ failure_risk
-+ human_priority
-- staleness_penalty
-- token_cost_penalty
-- contradiction_penalty
-```
-
-### Step 4：Context Pack Assembly
+Ctx Agent 是 ctxlib 的唯一受控访问入口，也是唯一写入者。它以 **Event Log 为唯一数据来源**构建 ctxlib，对外只提供两个只读操作。其他 agent 不直接读写底层存储，也不推送内容——它们的活动被自动记入 log，由 Ctx Agent 从 log 提炼。
 
 ```ts
-ContextPack {
-  id: string
+// 启动前：为某个 task/phase 组装 context pack
+pack(req: {
   task_id: string
-  phase: "plan" | "execute" | "verify"
+  phase: string
+  budget: number          // token 预算
+}) -> ContextResult
 
-  included_blocks: ContextBlockRef[]
-
-  rendered_sections: {
-    must_follow: string
-    relevant_decisions: string
-    module_context: string
-    recent_task_history: string
-    known_failures: string
-    conflict_context: string
-    retrieval_instructions: string
-  }
-
-  omitted_but_available: ContextBlockRef[]
-
-  token_budget_used: number
-  generated_at: string
-}
-```
-
----
-
-## 9. 运行时 ctxlib 检索
-
-task 开始后允许检索 ctxlib，但必须受控。
-
-### 允许检索的场景
-
-```text
-1. 当前上下文不足以理解模块。
-2. 发现代码事实和 context 冲突。
-3. verify 失败，需要查历史失败。
-4. 检测到 active conflict。
-5. 需要创建 child tasks。
-6. 架构决策不明确。
-7. rebase 后发现相关文件被别人修改。
-```
-
-### 不允许检索的场景
-
-```text
-1. 用 ctxlib 替代阅读当前代码。
-2. 为了扩大 task scope。
-3. execute 阶段擅自推翻 approved plan。
-4. 查询与当前 task 无关的长期记忆。
-5. 重复查询同类信息但没有新证据。
-```
-
-### CtxQuery
-
-运行时检索必须结构化。
-
-```ts
-CtxQuery {
+// 运行中：其他 agent 受控查询
+query(req: {
   task_id: string
-  phase: "plan" | "execute" | "verify"
+  phase: string
+  intent?: string         // 可选，缩小检索目的（开放字符串）
+  scope?: string[]        // 可选，限定范围标签
+  budget: number
+}) -> ContextResult
 
-  intent:
-    | "find_architecture_decisions"
-    | "find_module_context"
-    | "find_failure_history"
-    | "find_conflict_context"
-    | "find_related_tasks"
-    | "find_user_preferences"
-    | "find_api_contract_notes"
-    | "find_verification_evidence"
-
-  scope: {
-    modules?: string[]
-    files?: string[]
-    symbols?: string[]
-    task_ids?: string[]
-  }
-
-  max_blocks: number
-  max_tokens: number
+ContextResult {
+  blocks: ContextBlock[]      // 已选中、可注入
+  omitted: string[]           // 相关但因预算未注入的 block id（agent 可按需再查）
+  note?: "replan" | "human_decision" | null   // 发现矛盾时的建议
 }
 ```
 
-### CtxQueryResult
+对外没有 write / outdated 标记操作。要沉淀记忆的 agent 只管正常做事,活动进 log,Ctx Agent 负责提炼；某条记忆是否过时也由 Ctx Agent 从 log 中判断。
+
+---
+
+## 4. 三个可替换接口（扩展缝）
+
+内核只依赖这三个接口的**签名**，不依赖其实现。原型给最简实现，之后各自独立演进。
+
+### 4.1 Extractor：log -> block（怎么产生记忆）
 
 ```ts
-CtxQueryResult {
-  blocks: ContextBlockPreview[]
+Extractor = (event: Event) => ContextBlock[]
+```
 
-  recommended_action:
-    | "continue"
-    | "append_context"
-    | "restart_phase"
-    | "replan_required"
-    | "human_decision_required"
+- 原型：几条规则型 extractor（verify 失败、merge 结果、人类需求）。
+- 扩展：新增来源 = 新增一个 extractor 注册进来，内核不变。
 
-  contradictions: Contradiction[]
-  token_estimate: number
+### 4.2 Selector：给定请求挑 block（怎么取记忆）
+
+```ts
+Selector = (candidates: ContextBlock[], req: Request) => Ranked[]
+```
+
+- 原型：`scope` 标签重叠 + 新鲜度 + 过滤 `outdated=true`，够用。
+- 扩展：换成多路召回 + 打分重排 + embedding，只替换 Selector，接口不变。
+
+### 4.3 Store：底层存取（记忆存哪）
+
+```ts
+Store {
+  put(block): void
+  get(id): ContextBlock
+  find(filter): ContextBlock[]   // 按 kind/scope/outdated 粗筛
 }
 ```
 
-### Replan 触发器
+- 原型：内存或单文件 / SQLite。
+- 扩展：换成向量库 / 外部服务，只替换 Store。
 
-以下情况应触发重新 plan：
+---
+
+## 5. 数据流
 
 ```text
-1. execute 发现 approved plan 依赖的事实是错的。
-2. verify 失败且不是局部修复可解决。
-3. ctxlib 检索到高置信架构约束与当前实现冲突。
-4. active conflict 影响当前 task 的 write set。
-5. child task 结果改变父 task 方案。
-6. 预算不足，需要缩小目标。
+runtime 自动记录 agent 活动 / 状态变化
+  -> Event Log
+       -> Extractor 提炼出 ContextBlock（去重、必要时标记旧 block 为 outdated）
+       -> Store 保存
+
+Ctx Agent.pack / query
+  -> Store.find 粗筛候选
+  -> Selector 排序 + 裁到 budget
+  -> ContextResult（blocks + omitted + note）
+```
+
+写入路径(Extractor->Store)只发生在 Ctx Agent 内部,由 log 驱动;对外只有 pack/query。
+
+---
+
+## 6. 不变量
+
+```text
+1. ctxlib 只从 Event Log / Artifact 构建，不接受 agent 直接写。
+2. 只有 Ctx Agent 能访问底层存储；对外只有 pack / query 两个只读操作。
+3. 每个 block 必须有 source_refs，可追溯到来源事件 / artifact。
+4. outdated block 默认不进 pack（除非显式查历史）。
+5. 扩展通过 Extractor / Selector / Store 三个接口完成，不改核心模型。
+6. 访问 ctxlib 的行为本身也被自动记入 log。
 ```
 
 ---
 
-## 10. Context 不变量
+## 7. 原型如何长成完整设计（扩展映射）
+
+说明"覆盖没减少"，只是从内核挪到了扩展缝：
 
 ```text
-1. agent 启动不加载全量 ctxlib。
-2. context block 必须有 type、scope、validity、confidence。
-3. superseded context 默认不可注入。
-4. raw logs 默认不直接进 prompt。
-5. 运行时 ctxlib 检索必须记录事件。
-6. 高影响 context 必须有 evidence。
+需要的能力            原型落点                       扩展方向
+------------------   ---------------------------   -----------------------------
+更多 context 类型     kind 加约定值                  分类体系 / 校验
+更多范围维度          scope 加前缀                   scope 索引 / 命名规范
+置信度/新鲜度/重要度   attributes 键                  打分权重、时间衰减
+可见性/风险控制        attributes 键                  Selector 里做权限过滤
+多路召回 + 重排        Selector 换实现                embedding + rerank
+过时判断              outdated 字段 + Selector       矛盾检测、历史保留
+运行时检索协议         query 的 intent/scope          结构化 intent 词表
+不同存储后端          Store 换实现                    向量库 / 外部服务
 ```
+
+内核（第 2、3 节）保持稳定；以上都在不改内核的前提下增量演进。

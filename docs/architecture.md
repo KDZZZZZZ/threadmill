@@ -23,7 +23,7 @@
 
 这个系统的产品判断是：
 
-> 用户不应该管理 session，也不应该手动调度每个 agent。用户只应该表达目标、预算和并发意图；系统负责把目标拆成 task graph，并调度可用 agent 完成、验证和合并。
+> 用户不应该管理 session，也不应该手动调度每个 agent。用户只应该表达需求、预算和并发意图；系统负责把需求登记为 requirement，再生成 task graph（统一 task 节点 + 图关系），并调度可用 agent 完成、验证和合并。
 
 因此，产品形态不是“多开几个 Claude/Codex 窗口”，而是一个 **Multi-Agent Control Plane**：
 
@@ -32,7 +32,7 @@
   我需要什么 + 我愿意投入多少钱/多少 agent/多少时间
 
 系统负责：
-  通过 Task Manager Agent 创建和拆解任务
+  通过 Task Manager Agent 登记 requirement、创建任务并编排依赖
   通过 Ctx Agent 控制上下文存取和运行时查询
   通过 Agent Runtime 包装 CLI agent 自身的 worktree/tool/git 能力
   调度 agent、验收、处理冲突、合并
@@ -51,11 +51,11 @@
 3. **worktree 属于 agent CLI 能力包装的一部分**  
    系统不在 task graph 里重新实现一套独立 worktree 抽象；Agent Runtime 负责包装 CLI agent 自身的 worktree、tool、git 和执行目录能力，并把结果归一化给上层调度。
 
-4. **用 task graph 管理工作，而不是用 session 管理工作**  
-   root task 表示用户目标；child task 表示系统拆出的可执行工作单元。
+4. **用 task graph 管理工作，而不是用 session 管理工作**
+   用户输入是 requirement；task graph 只包含统一的 task 节点，拆解、依赖、阻塞和冲突都通过图关系表达。
 
-5. **所有 task 创建都经过 Task Manager Agent**  
-   创建 task 需要看到当前所有 task 及其状态，避免重复、错误依赖和不可验收拆分；人类和其他 agent 都通过 Task Manager Agent 创建或修改 task。
+5. **所有 requirement 都经 Task Manager Agent 编排成 task graph**
+   创建或更新 task graph 需要看到当前所有 task 及其状态，避免重复、错误依赖和不可验收拆分；人类和其他 agent 都向 Task Manager Agent 提交 requirement，由它统一创建 task、state node、edge 或 blocker。
 
 6. **用 ctxlib 管理项目记忆，而不是依赖 session memory**  
    所有有价值的设计、判断、验收、失败和冲突信息沉淀到结构化上下文库。
@@ -66,8 +66,8 @@
 8. **每个 task 用 CLI agent 包装出来的 worktree 能力隔离执行**  
    agent 不直接修改 main；verify 通过后进入 merge queue。
 
-9. **复杂任务允许通过创建子任务作为交付**  
-   planner 不必一次性解决所有细节，可以把大任务拆成可验收的 child tasks。
+9. **复杂任务允许通过提交 requirement 扩展 task graph 作为交付**
+   执行 task 的 planner / executor / verifier 不必一次性解决所有细节，可以向 Task Manager Agent 提交新的 requirement；Task Manager Agent 负责把这些 requirement 编排成 task 节点、状态子图依赖、阻塞和拆解关系。
 
 10. **verify 是进入项目事实的闸门**  
    task 只有通过验收后才允许 merge；失败则回到 plan 循环。
@@ -95,7 +95,7 @@
 ```text
 ┌──────────────────────────────────────────────┐
 │                   Human UI                   │
-│  目标输入 / agent+1 / 预算 / 进度 / 验收       │
+│  需求输入 / agent+1 / 预算 / 进度 / 验收       │
 └───────────────────────┬──────────────────────┘
                         │
                         ▼
@@ -131,7 +131,7 @@
 一句话概括：
 
 ```text
-Task Manager Agent 决定 task 是否应该被创建、如何创建、依赖谁。
+Task Manager Agent 接收 requirement，并决定是否以及如何编排成 task / state node / edge / blocker。
 Task Graph 记录现在有哪些 task、状态是什么、谁阻塞谁。
 Ctx Agent 决定 agent 应该知道什么，以及运行中能查什么。
 Context Lib 保存可复用的项目记忆。
@@ -146,12 +146,12 @@ Event Log 决定系统如何追溯和复盘。
 
 ## 5.1 Human UI
 
-Human UI 面向用户，不暴露底层 session，而暴露目标、预算、agent capacity、task graph、active agents、verify 状态和 merge 状态。
+Human UI 面向用户，不暴露底层 session，而暴露需求、预算、agent capacity、task graph、active agents、verify 状态和 merge 状态。
 
 核心操作：
 
 ```text
-- 创建目标
+- 提交需求
 - 增加/减少 agent 数量
 - 调整预算
 - 查看 task graph
@@ -164,12 +164,12 @@ Human UI 面向用户，不暴露底层 session，而暴露目标、预算、age
 
 ## 5.2 Control Plane
 
-Control Plane 是调度中枢，负责把用户目标、预算和 agent capacity 转成可执行调度。
+Control Plane 是调度中枢，负责把用户需求、预算和 agent capacity 转成可执行调度。
 
 它不直接创建 task，也不直接读写 ctxlib；这些动作分别通过专门 agent 完成：
 
 ```text
-Control Plane -> Task Manager Agent：请求创建 root task / child task，或更新 task 状态。
+Control Plane -> Task Manager Agent：提交 / 登记 requirement，由 Task Manager 编排 task、state node、edge、blocker 或 task 状态更新。
 Control Plane -> Ctx Agent：请求为某个 task phase 选择 context pack，或处理运行时 ctx 查询。
 Control Plane -> Agent Runtime：启动 Claude Code planner / executor / verifier 等 CLI worker。
 Control Plane -> Merge Queue：提交 verify passed 的结果进入合并流程。
@@ -182,17 +182,18 @@ Control Plane -> Event Log：记录所有关键事件。
 
 ## 5.3 Task Manager Agent / Task Graph
 
-Task Manager Agent 是 task graph 的唯一写入口。创建 task 之前，它必须看到当前所有 task 及其状态，判断新 task 是否重复、是否应该拆分、依赖谁、会阻塞谁，以及验收标准是否足够清晰。
+Task Manager Agent 是 task graph 的唯一写入口。把 requirement 编排成 task graph 变更之前，它必须看到当前所有 task 及其状态，判断新 task 是否重复、是否应该拆分、依赖谁、会阻塞谁，以及验收标准是否足够清晰。
 
 Task Graph 是工作结构的存储和状态机。
 
-- **root task**：用户直接提出的顶层目标。
-- **child task**：Task Manager Agent 根据人类或其他 agent 的请求创建的子任务。
-- **blocked task**：等待子任务、依赖、冲突处理或人类决策的任务。
+- **requirement**：人类或 agent 提出的原始需求、目标、约束和验收意图；它是 provenance，不是可调度 task。
+- **task**：统一的工作节点，可计划、可执行、可验收，不区分 root / child 类型。
+- **edge**：task 之间的依赖、阻塞、拆解、重叠、冲突或替代关系。
+- **blocked task**：等待其他 task、依赖、冲突处理或人类决策的任务。
 
-复杂任务可以通过创建 child tasks 作为合法交付。父 task 不因为创建子任务而完成，而是进入 blocked/waiting 状态，等子任务完成后再重新验收整体目标。
+复杂任务可以通过扩展 task graph 作为合法交付。当前 task 不因为新增相关 task 而完成，而是通过 blocker / edge 进入 blocked 状态，等相关 task 完成后再重新验收自身目标。
 
-详见：[Task Graph 详细设计](./task-graph.md)。
+详见：[Task Manager Agent 详细设计](./task-manager-agent.md)、[Task Graph 详细设计](./task-graph.md)。
 
 ---
 
@@ -221,7 +222,7 @@ worktree 不作为独立于 agent 的抽象先行实现，而是先落在 Claude
 
 ## 5.5 Ctx Agent / Context Lib
 
-Ctx Agent 是 ctxlib 的唯一受控访问入口。它负责 context block 的写入、查询、筛选、摘要、权限和运行时检索协议。
+Ctx Agent 是 ctxlib 的唯一受控访问入口。它以 Event Log 为唯一数据来源构建 ctxlib（读 log、策展、去重、supersede、标注），对外只提供受控的 context pack 构建和查询。其他 agent 不直接读写 ctxlib，也不向 ctxlib 推送内容——它们的活动被自动记入 log，再由 Ctx Agent 从 log 中提炼。
 
 Context Lib 是项目级上下文库，用来替代 session memory。它存储经过提取、标注和验证的项目记忆，例如：
 
@@ -255,7 +256,7 @@ Merge Queue 仍然负责 verify passed 结果的合并与冲突协调。
 - agent 不直接修改 main。
 - verify 通过后才进入 merge queue。
 - merge 前检查 active conflicts。
-- merge 后产生新的项目事实并写入 ctxlib。
+- merge 结果记入 Event Log，成为新的项目事实；ctxlib 由 Ctx Agent 从 log 提炼。
 ```
 
 详见：[Workspace 与 Merge Queue 详细设计](./workspace-merge.md)。
@@ -304,17 +305,17 @@ Artifact Store 保存大对象：
 
 ## 6. 模块间关系
 
-## 6.1 创建新目标
+## 6.1 提交新需求
 
 ```text
 Human UI 或其他 agent
-  -> Task Manager Agent（查看全局 task，去重、判依赖）
-  -> Task Graph 写入 root task / child task
+  -> Task Manager Agent（查看全局 task，去重、编排依赖）
+  -> Task Graph 写入 requirement / task / state node / edge
   -> Ctx Agent 选择初始 context pack
   -> Scheduler 决定何时启动 planner
 ```
 
-关键判断：创建 task 只是把目标放入系统，且必须经过 Task Manager Agent，不等于立即开一个新 session。
+关键判断：提交需求只是把 requirement 放入系统，并由 Task Manager Agent 决定是否创建 / 更新 task graph；这不等于立即开一个新 session。
 
 ---
 
@@ -347,15 +348,15 @@ Task Graph 提供 task contract
 ## 6.4 复杂任务拆解
 
 ```text
-Planner 发现 root task 过大
-  -> 向 Task Manager Agent 请求创建 child tasks
-  -> Task Manager Agent 校验依赖/验收并写入
-  -> 父 task 进入 blocked / waiting_children
-  -> Scheduler 调度 child tasks
-  -> child tasks 完成后父 task 重新验收
+Planner / Executor / Verifier 发现当前 task 需要拆解、补工作或补验收
+  -> 向 Task Manager Agent 提交新的 requirement（严格模式，带 client_ref 和触发证据）
+  -> Task Manager Agent 校验 requirement，并编排 task / state node / edge / blocker
+  -> 当前 task 或当前 phase endpoint 进入 blocked（如果需要等待新增 task、特定状态或决策）
+  -> Scheduler 调度新增 task 或等待依赖 endpoint 满足
+  -> 相关 endpoint 满足后当前 task 回到 planning / executing / verifying
 ```
 
-关键判断：创建 child tasks 是复杂任务的合法交付，不是失败；但拆分仍由 Task Manager Agent 统一写入。
+关键判断：扩展 task graph 是复杂任务的合法交付，不是失败；但 planner / executor / verifier 提交的是 requirement，不是 task / edge。依赖关系由 Task Manager Agent 统一编排，并且可以细到状态子图，例如 `Task A.verify depends_on Task B.done`。
 
 ---
 
@@ -363,13 +364,13 @@ Planner 发现 root task 过大
 
 ```text
 Agent 输出 summary / verify failure / merge result
-  -> Event Log 保存原始事件
-  -> Ctx Agent（含 Context Curator）提取 context block
+  -> Event Log 自动记录这些活动（agent 无需显式写日志）
+  -> Ctx Agent（含 Context Curator）从 log 提取 context block
   -> Context Lib 标注、去重、supersede
   -> 后续 task phase 由 Ctx Agent 选择 context pack
 ```
 
-关键判断：长期记忆属于 ctxlib，不属于某个 agent session；且读写都经过 Ctx Agent。
+关键判断：长期记忆属于 ctxlib，不属于某个 agent session；ctxlib 只从 log 构建，读写都经过 Ctx Agent。
 
 ---
 
@@ -396,12 +397,14 @@ Task A verify passed
 4. 每个 task attempt 在 agent runtime 包装出的隔离环境执行。
 5. execute 不直接修改 main。
 6. verify agent 不自我批准 execute 结果。
-7. 创建 child tasks 是复杂任务的合法交付。
+7. 通过提交 requirement 扩展 task graph 是复杂任务的合法交付。
 8. blocked 不是 failed。
 9. merge 后必须产生可追溯事件和上下文沉淀。
-10. 用户控制目标和资源，系统控制调度细节。
+10. 用户控制需求和资源，系统控制调度细节。
 11. task graph 只能由 Task Manager Agent 写入。
-12. ctxlib 只能由 Ctx Agent 读写。
+12. planner / executor / verifier 不直接创建 task / edge；依赖关系由 Task Manager Agent 编排。
+13. task 状态变换可视为状态子图，依赖可以指向 task 的 phase / status endpoint。
+14. ctxlib 只能由 Ctx Agent 读写。
 ```
 
 ---
@@ -436,6 +439,7 @@ MVP 5：Context Curator
 
 ## 9. 详细设计文档
 
+- [Task Manager Agent 详细设计](./task-manager-agent.md)
 - [Task Graph 详细设计](./task-graph.md)
 - [Agent Runtime 详细设计](./agent-runtime.md)
 - [Context Lib 详细设计](./ctxlib.md)

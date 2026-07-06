@@ -128,7 +128,7 @@ AgentResult {
     | "succeeded"
     | "failed"
     | "needs_replan"
-    | "created_child_tasks"
+    | "expanded_task_graph"
     | "blocked"
     | "conflict_detected"
 
@@ -136,6 +136,7 @@ AgentResult {
   structured_output: unknown
 
   created_tasks: string[]
+  created_edges: string[]
   touched_files_declared: string[]
   touched_files_observed: string[]
 
@@ -171,8 +172,8 @@ AgentResult {
 ### Planner
 
 ```text
-- 可以拆 child tasks。
-- 可以定义 acceptance criteria。
+- 可以向 Task Manager 提交新的 requirement，用于触发 task graph 扩展。
+- 可以为 agent requirement 提供 acceptance intent。
 - 可以声明 write set。
 - 不应该直接修改代码。
 ```
@@ -182,7 +183,7 @@ AgentResult {
 ```text
 - 只能按照 approved plan 实现。
 - 不应私自扩大 scope。
-- 发现计划错误时请求 replan。
+- 发现计划错误时请求 replan；发现缺失工作时向 Task Manager 提交 requirement。
 - 输出 observed write set 和 self-check。
 ```
 
@@ -191,7 +192,7 @@ AgentResult {
 ```text
 - 根据 acceptance criteria 验收。
 - 默认不修改实现。
-- 输出 pass/fail、证据和 failure reason。
+- 输出 pass/fail、证据和 failure reason；发现 follow-up 缺口时向 Task Manager 提交 requirement。
 - 不能自我批准自己执行的结果。
 ```
 
@@ -211,7 +212,8 @@ AgentResult {
 1. agent 不拥有长期记忆，ctxlib 拥有长期记忆。
 2. agent 输出必须结构化摘要。
 3. agent 不能私自扩大 task scope。
-4. execute agent 发现计划错误时应请求 replan。
-5. verify agent 不能自我批准 execute 结果。
-6. agent 只能在分配的 worktree 和权限范围内执行。
+4. execute agent 发现计划错误时应请求 replan；发现缺失工作时提交 requirement，而不是私自扩大 scope。
+5. planner / executor / verifier 不直接创建 task / edge；依赖关系由 Task Manager Agent 编排。
+6. verify agent 不能自我批准 execute 结果。
+7. agent 只能在分配的 worktree 和权限范围内执行。
 ```
