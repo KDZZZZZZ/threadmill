@@ -11,6 +11,97 @@ Task Graph 管理所有任务、子任务、依赖、阻塞和验收状态。
 
 系统不使用 session 作为工作单元，而使用 task 作为工作单元。每个 task 都可以独立经历 plan、execute、verify，并可以被阻塞、重试、拆分或合并。
 
+所有对 task graph 的写入都必须经过 Task Manager Agent，见下一节。
+
+---
+
+## 1.1 Task Manager Agent
+
+Task Manager Agent 是 task graph 的唯一写入口。人类和其他 agent 都不直接创建或修改 task，而是向 Task Manager Agent 发请求。
+
+### 为什么需要一个专门的 agent
+
+创建 task 不是简单地追加一条记录。创建之前需要看到当前所有 task 及其状态，否则会出现：
+
+```text
+- 重复 task：已有等价 task 正在进行或已完成。
+- 错误依赖：新 task 应该依赖某个未完成 task，却没声明。
+- 错误阻塞：新 task 会阻塞别人，或应该被别人阻塞。
+- 不可验收拆分：拆出的 child task 没有清晰验收标准。
+- 边界重叠：多个 task 声明同一 owner module 或 write set。
+```
+
+因此 Task Manager Agent 在写入前拥有全局 task 视图，做去重、依赖推断、阻塞关系判断和验收标准检查。
+
+### 职责
+
+```text
+1. 维护并读取全部 task 及其状态的全局视图。
+2. 接收人类和其他 agent 的 task 创建/修改请求。
+3. 判断新请求是否重复、是否应合并到已有 task。
+4. 推断 dependencies 和 blockers。
+5. 校验 acceptance_criteria 是否足够明确。
+6. 决定 delivery_type（直接实现还是拆成 child tasks）。
+7. 写入 task graph 并记录相应事件。
+8. 拒绝或退回不清晰、冲突或越权的请求。
+```
+
+### 请求模型
+
+```ts
+TaskMutationRequest {
+  requester:
+    | "human"
+    | { agent_id: string; task_id?: string }   // 发起请求的 agent 及其所属 task
+
+  intent:
+    | "create_root_task"
+    | "create_child_task"
+    | "update_status"
+    | "add_dependency"
+    | "add_blocker"
+    | "split_task"
+    | "cancel_task"
+
+  proposed:
+    | { title: string; description: string; acceptance_criteria?: string[];
+        parent_task_id?: string; owner_module?: string;
+        declared_write_set?: string[] }
+    | { task_id: string; status?: string; dependencies?: string[]; blockers?: string[] }
+
+  rationale: string   // 为什么需要这次变更，供去重和依赖判断
+}
+```
+
+### 决策结果
+
+```ts
+TaskMutationResult {
+  decision:
+    | "created"            // 已创建新 task
+    | "updated"            // 已更新已有 task
+    | "merged_into"        // 判定与已有 task 重复，合并到现有 task
+    | "rejected"           // 不清晰、越权或无效
+    | "needs_clarification"// 需要补充验收标准或范围
+
+  task_id?: string
+  merged_into_task_id?: string
+  inferred_dependencies: string[]
+  inferred_blockers: string[]
+  reason: string
+}
+```
+
+### 不变量
+
+```text
+1. 除 Task Manager Agent 外，任何角色不得直接写 task graph。
+2. 创建 task 前必须基于当前全局 task 视图判断重复和依赖。
+3. 没有可验收标准的实现型 task 不得进入 planned。
+4. 父 task 拆出 child tasks 时，必须建立父子关系和阻塞关系。
+5. 所有 task 写入都要产生事件，便于追溯。
+```
+
 ---
 
 ## 2. Root Task 与 Child Task

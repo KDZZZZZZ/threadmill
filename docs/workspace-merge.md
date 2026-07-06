@@ -7,22 +7,22 @@
 
 ## 1. 定位
 
-Workspace / Git 模块负责 worktree、branch、diff、verify、merge queue 和并发冲突协调。
+Merge Queue 负责 verify passed 结果的合并、diff 观察和并发冲突协调，让 verify 成为进入项目事实的闸门。
 
-它保证 agent 的执行与 main branch 隔离，并让 verify 成为进入项目事实的闸门。
+worktree 隔离本身不在这里单独实现。第一阶段 worktree、branch、cwd、git 能力由 Agent Runtime 包装 CLI agent 得到（见 [Agent Runtime 详细设计](./agent-runtime.md)）。本文档描述这些隔离产出如何进入 verify 和 merge。
 
 ---
 
 ## 2. 基本规则
 
 ```text
-1. 每个 task attempt 创建独立 worktree。
-2. agent 只能在自己的 worktree 中执行修改。
+1. 每个 task attempt 在 Agent Runtime 包装出的 worktree/cwd 隔离环境中执行。
+2. agent 只能在自己被分配的隔离环境中修改。
 3. main branch 只能由 merge queue 修改。
 4. task verify 通过后才允许进入 merge queue。
 5. merge 前需要基于最新 main 重新验证。
 6. merge 前需要检查 active conflicts。
-7. merge 后必须写入 Event Log 和 Context Lib。
+7. merge 后必须写入 Event Log，并通过 Ctx Agent 写入 Context Lib。
 ```
 
 ---

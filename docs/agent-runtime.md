@@ -11,6 +11,21 @@ Agent Runtime 负责把 Claude Code、Codex、Gemini CLI 和其他 headless CLI 
 
 它的目标不是抹平所有 agent 的能力差异，而是用统一协议描述能力、启动任务、收集结果和记录事件。
 
+第一阶段只实现 Claude Code 的基本包装（headless 启动、输入输出、事件记录、能力声明）。
+
+### worktree/tool/git 属于 CLI 能力包装
+
+系统不先实现一套独立于 agent 的 worktree 抽象。worktree、git、cwd 隔离和 tool 权限先作为 CLI wrapper 能力的一部分包装：
+
+```text
+- 优先复用 CLI agent 自身的 worktree / cwd / git 能力。
+- 由 wrapper 决定 agent 的工作目录和可写范围。
+- 把隔离结果（分支、目录、diff）归一化后交给上层调度和 merge queue。
+- 如果某个 CLI 不支持 worktree，则由 wrapper 用 git worktree 或独立 clone 兜底。
+```
+
+这样上层 task graph 只关心“这个 attempt 在哪个隔离环境执行、产出什么 diff”，而不关心具体 CLI 如何实现隔离。
+
 ---
 
 ## 2. 支持对象

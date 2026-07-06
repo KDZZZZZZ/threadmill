@@ -19,6 +19,66 @@ Context Lib 是项目级上下文库，用于取代传统 session memory。
 不禁止运行时检索，但检索必须结构化、可审计、受预算限制。
 ```
 
+所有对 ctxlib 的读写都必须经过 Ctx Agent，见下一节。
+
+---
+
+## 1.1 Ctx Agent
+
+Ctx Agent 是 ctxlib 的唯一受控访问入口。其他 agent 不直接读取 ctxlib 底层存储，而是向 Ctx Agent 发请求。
+
+### 为什么需要一个专门的 agent
+
+ctxlib 是项目长期记忆，如果每个 agent 都能自由读写，会出现：
+
+```text
+- 上下文污染：把 superseded 或低置信内容当事实注入。
+- 越权读取：读到与当前 task 无关或敏感的上下文。
+- 预算失控：一次塞入过多 context block。
+- 无法审计：不知道谁在什么时候读了什么、写了什么。
+```
+
+因此 Ctx Agent 统一负责筛选、摘要、权限、预算和事件记录。
+
+### 职责
+
+```text
+1. 在新 agent 启动前，为其 task/phase 选择并渲染 context pack。
+2. 处理运行中其他 agent 的 ctxlib 查询（CtxQuery）。
+3. 按 scope、validity、visibility、risk、budget 过滤 context block。
+4. 决定注入哪一层摘要（one_line / short / long / body_ref）。
+5. 写入新的 context block，并做去重、supersede、标注。
+6. 记录所有读写为事件，便于追溯。
+7. 发现上下文矛盾时，返回 replan/human_decision 建议。
+```
+
+### 访问模型
+
+```ts
+CtxAccessRequest {
+  requester: { agent_id: string; task_id: string; phase: string }
+
+  op:
+    | "build_context_pack"  // 启动前构建 pack
+    | "query"               // 运行时查询（见 CtxQuery）
+    | "write_block"         // 写入新 context block
+    | "supersede_block"     // 标记旧 block 被替代
+
+  payload: unknown          // 对应 op 的具体参数
+}
+```
+
+### 边界
+
+```text
+- 只有 Ctx Agent 能直接访问 ctxlib 底层存储。
+- 运行中的 agent 只能通过 Ctx Agent 查询，不能扩大自身权限。
+- Ctx Agent 不把未经验证的猜测提升为高置信事实。
+- 每次访问都必须落事件日志。
+```
+
+运行时查询协议（CtxQuery / CtxQueryResult）见第 9 节。
+
 ---
 
 ## 2. 存储内容
@@ -174,7 +234,7 @@ raw_artifact_ref:
 
 ## 5. Context Curator
 
-Context Curator 是 ctxlib 的调度和维护组件。
+Context Curator 是 ctxlib 的记忆提取和维护逻辑，作为 Ctx Agent 的一部分或其下游组件运行。它负责“从事件里提炼出值得长期保存的记忆”，而 Ctx Agent 负责“对外的受控读写入口”。
 
 它可以由规则引擎、embedding 检索和 LLM agent 共同实现。
 

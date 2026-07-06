@@ -18,6 +18,8 @@
 4. 手动同步上下文。
 5. 手动避免 worktree 和代码冲突。
 6. 手动判断哪个结果可以合并。
+7. 手动判断新 task 是否重复、依赖谁、会阻塞谁。
+8. 手动判断运行中的 agent 应该看哪些上下文。
 
 这个系统的产品判断是：
 
@@ -30,7 +32,10 @@
   我需要什么 + 我愿意投入多少钱/多少 agent/多少时间
 
 系统负责：
-  拆任务、分配 agent、注入上下文、隔离 worktree、验收、处理冲突、合并
+  通过 Task Manager Agent 创建和拆解任务
+  通过 Ctx Agent 控制上下文存取和运行时查询
+  通过 Agent Runtime 包装 CLI agent 自身的 worktree/tool/git 能力
+  调度 agent、验收、处理冲突、合并
 ```
 
 ---
@@ -40,25 +45,34 @@
 1. **需求和并发解耦**  
    用户发布新任务，不等于手动开启新 agent；用户点击 `agent +1`，也不等于给某个 agent 分配具体任务。
 
-2. **统一 CLI agent runtime**  
-   系统扫描并接入 Claude Code、Codex、Gemini CLI 等 headless CLI agent，包装成统一 worker。
+2. **第一阶段先支持 Claude Code 基本包装**  
+   MVP 不先追求同时接入所有 CLI agent，而是先把 Claude Code CLI 的 headless 启动、输入输出、事件记录和能力声明跑通。
 
-3. **用 task graph 管理工作，而不是用 session 管理工作**  
+3. **worktree 属于 agent CLI 能力包装的一部分**  
+   系统不在 task graph 里重新实现一套独立 worktree 抽象；Agent Runtime 负责包装 CLI agent 自身的 worktree、tool、git 和执行目录能力，并把结果归一化给上层调度。
+
+4. **用 task graph 管理工作，而不是用 session 管理工作**  
    root task 表示用户目标；child task 表示系统拆出的可执行工作单元。
 
-4. **用 ctxlib 管理项目记忆，而不是依赖 session memory**  
+5. **所有 task 创建都经过 Task Manager Agent**  
+   创建 task 需要看到当前所有 task 及其状态，避免重复、错误依赖和不可验收拆分；人类和其他 agent 都通过 Task Manager Agent 创建或修改 task。
+
+6. **用 ctxlib 管理项目记忆，而不是依赖 session memory**  
    所有有价值的设计、判断、验收、失败和冲突信息沉淀到结构化上下文库。
 
-5. **每个 task 用 worktree 隔离执行**  
+7. **ctxlib 存取由 Ctx Agent 控制**  
+   新 agent 启动前的 context pack 和运行中其他 agent 的 ctxlib 查询，都通过 Ctx Agent 受控访问。
+
+8. **每个 task 用 CLI agent 包装出来的 worktree 能力隔离执行**  
    agent 不直接修改 main；verify 通过后进入 merge queue。
 
-6. **复杂任务允许通过创建子任务作为交付**  
+9. **复杂任务允许通过创建子任务作为交付**  
    planner 不必一次性解决所有细节，可以把大任务拆成可验收的 child tasks。
 
-7. **verify 是进入项目事实的闸门**  
+10. **verify 是进入项目事实的闸门**  
    task 只有通过验收后才允许 merge；失败则回到 plan 循环。
 
-8. **并发冲突由系统协调**  
+11. **并发冲突由系统协调**  
    verify/merge 阶段检查活跃 task，如果冲突则广播 conflict context 给相关 active task，避免互相等待和死锁。
 
 ---
@@ -92,14 +106,20 @@
         │              │              │
         ▼              ▼              ▼
 ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-│ Task Graph   │ │ Context Lib  │ │ Agent Runtime│
-│ 状态与依赖    │ │ 项目级记忆    │ │ CLI Wrappers │
+│ Task Manager │ │  Ctx Agent   │ │ Agent Runtime│
+│ Agent        │ │              │ │ CLI Wrappers │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+       │                │                │
+       ▼                ▼                ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ Task Graph   │ │ Context Lib  │ │ CLI Worktree │
+│ 状态与依赖    │ │ 项目级记忆    │ │ Tools / Git  │
 └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
        │                │                │
        ▼                ▼                ▼
 ┌──────────────────────────────────────────────┐
-│          Workspace / Git / Merge Queue       │
-│   Worktree Isolation / Verify / Conflict     │
+│              Verify / Merge Queue            │
+│        Diff / Conflict / Project Facts       │
 └───────────────────────┬──────────────────────┘
                         ▼
 ┌──────────────────────────────────────────────┐
@@ -111,10 +131,11 @@
 一句话概括：
 
 ```text
-Task Graph 决定现在该做什么。
-Context Lib 决定 agent 应该知道什么。
-Agent Runtime 决定谁来做。
-Workspace / Git 决定在哪里做。
+Task Manager Agent 决定 task 是否应该被创建、如何创建、依赖谁。
+Task Graph 记录现在有哪些 task、状态是什么、谁阻塞谁。
+Ctx Agent 决定 agent 应该知道什么，以及运行中能查什么。
+Context Lib 保存可复用的项目记忆。
+Agent Runtime 决定谁来做，并包装 CLI agent 自身的 worktree/tool/git 能力。
 Verifier 和 Merge Queue 决定什么能进入项目事实。
 Event Log 决定系统如何追溯和复盘。
 ```
@@ -143,26 +164,30 @@ Human UI 面向用户，不暴露底层 session，而暴露目标、预算、age
 
 ## 5.2 Control Plane
 
-Control Plane 是调度中枢，负责把用户目标转成 task graph，并根据预算、优先级、依赖和 agent capacity 启动具体 phase。
+Control Plane 是调度中枢，负责把用户目标、预算和 agent capacity 转成可执行调度。
 
-它不直接实现业务逻辑，而是协调这些模块：
+它不直接创建 task，也不直接读写 ctxlib；这些动作分别通过专门 agent 完成：
 
 ```text
-Control Plane -> Task Graph：创建 root task / child task，更新状态。
-Control Plane -> Context Lib：为某个 task phase 选择 context pack。
-Control Plane -> Agent Runtime：启动 planner / executor / verifier。
-Control Plane -> Workspace：创建 worktree，进入 verify 和 merge。
+Control Plane -> Task Manager Agent：请求创建 root task / child task，或更新 task 状态。
+Control Plane -> Ctx Agent：请求为某个 task phase 选择 context pack，或处理运行时 ctx 查询。
+Control Plane -> Agent Runtime：启动 Claude Code planner / executor / verifier 等 CLI worker。
+Control Plane -> Merge Queue：提交 verify passed 的结果进入合并流程。
 Control Plane -> Event Log：记录所有关键事件。
 ```
 
+第一阶段 Control Plane 的实现范围只需要覆盖：Claude Code wrapper、Task Manager Agent、Task Graph 调度、Ctx Agent、CtxLib 存取。
+
 ---
 
-## 5.3 Task Graph
+## 5.3 Task Manager Agent / Task Graph
 
-Task Graph 是工作结构的核心。
+Task Manager Agent 是 task graph 的唯一写入口。创建 task 之前，它必须看到当前所有 task 及其状态，判断新 task 是否重复、是否应该拆分、依赖谁、会阻塞谁，以及验收标准是否足够清晰。
+
+Task Graph 是工作结构的存储和状态机。
 
 - **root task**：用户直接提出的顶层目标。
-- **child task**：planner 或系统从 root task 拆出的可执行任务。
+- **child task**：Task Manager Agent 根据人类或其他 agent 的请求创建的子任务。
 - **blocked task**：等待子任务、依赖、冲突处理或人类决策的任务。
 
 复杂任务可以通过创建 child tasks 作为合法交付。父 task 不因为创建子任务而完成，而是进入 blocked/waiting 状态，等子任务完成后再重新验收整体目标。
@@ -173,9 +198,9 @@ Task Graph 是工作结构的核心。
 
 ## 5.4 Agent Runtime
 
-Agent Runtime 将 Claude Code、Codex、Gemini CLI 等不同 CLI agent 包装成统一 worker。
+Agent Runtime 将 Claude Code、Codex、Gemini CLI 等不同 CLI agent 包装成统一 worker。第一阶段只实现 Claude Code 的基本包装。
 
-统一不是指能力完全相同，而是每个 agent 暴露 capability profile：
+统一不是指能力完全相同，而是每个 agent 暴露 capability profile，并把 CLI 自身能力包装给上层：
 
 ```text
 - 是否支持 headless
@@ -183,19 +208,22 @@ Agent Runtime 将 Claude Code、Codex、Gemini CLI 等不同 CLI agent 包装成
 - 是否能编辑文件
 - 是否能运行 shell
 - 是否支持 MCP
+- 是否支持或可包装 worktree / git / cwd 隔离能力
 - 上下文窗口和成本模型
 - 适合承担 planner/executor/verifier 中哪些角色
 ```
+
+worktree 不作为独立于 agent 的抽象先行实现，而是先落在 Claude Code wrapper 的能力包装里。
 
 详见：[Agent Runtime 详细设计](./agent-runtime.md)。
 
 ---
 
-## 5.5 Context Lib
+## 5.5 Ctx Agent / Context Lib
 
-Context Lib 是项目级上下文库，用来替代 session memory。
+Ctx Agent 是 ctxlib 的唯一受控访问入口。它负责 context block 的写入、查询、筛选、摘要、权限和运行时检索协议。
 
-它存储经过提取、标注和验证的项目记忆，例如：
+Context Lib 是项目级上下文库，用来替代 session memory。它存储经过提取、标注和验证的项目记忆，例如：
 
 ```text
 - 架构决策
@@ -208,7 +236,7 @@ Context Lib 是项目级上下文库，用来替代 session memory。
 - rejected approaches
 ```
 
-新 agent 启动时不会加载全量 ctxlib，而是由 Context Curator 根据 task、phase、scope、confidence、freshness 和 risk 选择有限 context pack。
+新 agent 启动时不会加载全量 ctxlib，而是由 Ctx Agent 根据 task、phase、scope、confidence、freshness 和 risk 选择有限 context pack。运行中的其他 agent 也可以通过 Ctx Agent 查询 ctxlib，但不能直接读取 ctxlib 底层存储。
 
 详见：[Context Lib 详细设计](./ctxlib.md)。
 
@@ -216,12 +244,14 @@ Context Lib 是项目级上下文库，用来替代 session memory。
 
 ## 5.6 Workspace / Git / Merge Queue
 
-Workspace / Git 模块负责 worktree 隔离、diff 观察、verify、merge queue 和冲突协调。
+Workspace / Git 不再被视为独立于 agent runtime 的第一阶段核心模块。第一阶段先把 worktree、git、cwd 和 tool 权限作为 Claude Code wrapper 的一部分包装。
+
+Merge Queue 仍然负责 verify passed 结果的合并与冲突协调。
 
 基本原则：
 
 ```text
-- 每个 task attempt 独立 worktree。
+- 每个 task attempt 使用 agent runtime 包装出来的 worktree/cwd 隔离能力。
 - agent 不直接修改 main。
 - verify 通过后才进入 merge queue。
 - merge 前检查 active conflicts。
@@ -277,14 +307,14 @@ Artifact Store 保存大对象：
 ## 6.1 创建新目标
 
 ```text
-Human UI
-  -> Control Plane
-  -> Task Graph 创建 root task
-  -> Context Lib 选择初始上下文
+Human UI 或其他 agent
+  -> Task Manager Agent（查看全局 task，去重、判依赖）
+  -> Task Graph 写入 root task / child task
+  -> Ctx Agent 选择初始 context pack
   -> Scheduler 决定何时启动 planner
 ```
 
-关键判断：创建 root task 只是把用户目标放入系统，不等于立即开一个新 session。
+关键判断：创建 task 只是把目标放入系统，且必须经过 Task Manager Agent，不等于立即开一个新 session。
 
 ---
 
@@ -294,7 +324,7 @@ Human UI
 Human UI: agent +1
   -> Control Plane 增加 worker capacity
   -> Scheduler 选择下一个可运行 task phase
-  -> Agent Runtime 启动对应 CLI agent
+  -> Agent Runtime 启动对应 CLI agent（第一阶段为 Claude Code）
 ```
 
 关键判断：增加 agent 是增加系统吞吐，不是让用户手动指定“这个新 agent 去做什么”。
@@ -305,9 +335,9 @@ Human UI: agent +1
 
 ```text
 Task Graph 提供 task contract
-  -> Context Lib 生成 context pack
-  -> Workspace 创建 worktree
-  -> Agent Runtime 启动 plan / execute / verify agent
+  -> Ctx Agent 生成 context pack
+  -> Agent Runtime 在包装出的 worktree 隔离环境启动 plan / execute / verify agent
+  -> 运行中 agent 需要更多上下文时 -> 通过 Ctx Agent 查询 ctxlib
   -> Event Log 记录过程
   -> Verify 通过后进入 Merge Queue
 ```
@@ -318,13 +348,14 @@ Task Graph 提供 task contract
 
 ```text
 Planner 发现 root task 过大
-  -> 创建 child tasks
+  -> 向 Task Manager Agent 请求创建 child tasks
+  -> Task Manager Agent 校验依赖/验收并写入
   -> 父 task 进入 blocked / waiting_children
   -> Scheduler 调度 child tasks
   -> child tasks 完成后父 task 重新验收
 ```
 
-关键判断：创建 child tasks 是复杂任务的合法交付，不是失败。
+关键判断：创建 child tasks 是复杂任务的合法交付，不是失败；但拆分仍由 Task Manager Agent 统一写入。
 
 ---
 
@@ -333,12 +364,12 @@ Planner 发现 root task 过大
 ```text
 Agent 输出 summary / verify failure / merge result
   -> Event Log 保存原始事件
-  -> Context Curator 提取 context block
+  -> Ctx Agent（含 Context Curator）提取 context block
   -> Context Lib 标注、去重、supersede
-  -> 后续 task phase 选择 context pack
+  -> 后续 task phase 由 Ctx Agent 选择 context pack
 ```
 
-关键判断：长期记忆属于 ctxlib，不属于某个 agent session。
+关键判断：长期记忆属于 ctxlib，不属于某个 agent session；且读写都经过 Ctx Agent。
 
 ---
 
@@ -362,13 +393,15 @@ Task A verify passed
 1. task 未通过 verify 不得 merge。
 2. agent 不拥有长期记忆，ctxlib 拥有长期记忆。
 3. agent 启动不加载全量 ctxlib。
-4. 每个 task attempt 独立 worktree。
+4. 每个 task attempt 在 agent runtime 包装出的隔离环境执行。
 5. execute 不直接修改 main。
 6. verify agent 不自我批准 execute 结果。
 7. 创建 child tasks 是复杂任务的合法交付。
 8. blocked 不是 failed。
 9. merge 后必须产生可追溯事件和上下文沉淀。
 10. 用户控制目标和资源，系统控制调度细节。
+11. task graph 只能由 Task Manager Agent 写入。
+12. ctxlib 只能由 Ctx Agent 读写。
 ```
 
 ---
@@ -376,17 +409,21 @@ Task A verify passed
 ## 8. MVP 分期总览
 
 ```text
-MVP 0：单机 Task Graph + Worktree
-  跑通 task -> worktree -> plan -> execute -> verify -> merge 的最小闭环。
+MVP 0：Claude Code wrapper + Task Graph + CtxLib（第一步）
+  - 基本包装 Claude Code CLI（headless 启动、输入输出、事件记录、能力声明）。
+  - Task Manager Agent：能看到全部 task 及状态，作为 task 创建的唯一入口。
+  - Task Graph 调度：task 状态机、依赖、阻塞、基本推进。
+  - Ctx Agent + CtxLib：context block 的基本存取和受控查询。
+  worktree/tool/git 先作为 Claude Code wrapper 的能力包装，不单独抽象。
 
 MVP 1：Context Pack
-  用结构化 context block 替代人工 session handoff。
+  用结构化 context block 替代人工 session handoff，由 Ctx Agent 生成 pack。
 
 MVP 2：运行时 ctxlib 检索
-  允许 agent 在受控协议下补充上下文，并在必要时触发 replan。
+  允许运行中的其他 agent 通过 Ctx Agent 查询 ctxlib，并在必要时触发 replan。
 
-MVP 3：Agent Runtime + Worker Pool
-  接入多个 CLI agent，实现 agent+1。
+MVP 3：多 CLI Agent + Worker Pool
+  在 Claude Code 之外接入更多 CLI agent，实现 agent+1。
 
 MVP 4：Conflict-Aware Merge Queue
   支持多 agent 安全并发和冲突广播。
