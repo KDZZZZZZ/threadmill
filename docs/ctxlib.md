@@ -147,6 +147,32 @@ Ctx Agent.pack / query
 
 ---
 
+### 5.1 信息流图视角：生产者 / 消费者关系
+
+ctxlib 不把信息流建模成 agent 直接互发消息，而是从 Event Log / Artifact Store 投影出生产者和消费者关系：
+
+```text
+agent_attempt
+  --emits--> event
+  --produces--> artifact
+  --extracts_to--> context_block
+  --included_in--> context_pack
+  --consumed_by--> agent_attempt
+```
+
+和 Task Graph / Scheduler 以及 Agent Runtime IO 的关系：
+
+```text
+图节点执行体输出 Vec<Message>
+  -> Runtime 记录 AgentEvent / ArtifactRef
+  -> Ctx Agent 从 Event / Artifact 提炼 ContextBlock
+  -> pack / query 选择 ContextBlock，形成 ContextResult
+  -> 下游图节点或 agent invocation 以 Message 形式消费 context_ref / text block
+```
+
+因此，`Vec<Message>` 是运行时 IO 统一格式；ctxlib 的长期事实仍然来自 Event / Artifact 的可追溯投影。这样既能表达“谁生产、谁消费了哪段上下文”，又不允许 agent 绕过 Ctx Agent 直接写记忆。
+
+---
 ## 6. 不变量
 
 ```text

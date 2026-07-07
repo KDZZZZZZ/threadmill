@@ -1,6 +1,6 @@
 # Task Graph 设计（简化版）
 
-版本：v0.3
+版本：v0.4
 状态：Draft
 
 ---
@@ -55,6 +55,109 @@ Task Manager Agent 只负责任务契约和图编排：定义“做什么、为�
 
 ---
 
+### 3.1 Scheduler 视角的 Node / Edge 抽象
+
+Task Graph 的持久层仍然只保存 task、phase endpoint 和跨 phase 关系；Scheduler 在读取 Task Graph 后，可以把一批可运行 phase **物化**成更通用的运行图。这个图模型属于 Task Graph / Scheduler 边界，不属于 Agent Runtime。
+
+```rust
+struct NodeSpec {
+    // 根据入边控制信号决定 node 是否执行。
+    active: Active,
+    // node 的统一执行体引用。
+    runtime: RuntimeRef,
+}
+
+struct EdgeSpec {
+    from: PortRef,
+    to: PortRef,
+    // Message 数据传输规则。
+    data: Option<DataTransfer>,
+    // 控制信号规则；缺省时该边信号为 true。
+    signal: Option<SignalEmit>,
+}
+```
+
+边界划分：
+
+```text
+Task Manager Agent 写入：task / phase endpoint / dependency edge / blocker
+Scheduler 读取 Task Graph：把 ready phase 转成 NodeSpec / EdgeSpec，并计算 active / signal
+Graph runner 调用 RuntimeRef：把某个 node 变成一次 LLM / Tool / Subgraph 调用
+Agent Runtime 执行 agent invocation：管理输入输出、动作、权限、事件、artifact，不拥有图拓扑
+Runtime 过程事件：通过 ctx.emit(...) 进入 Event Log / Artifact Store
+```
+
+控制流拆成两级：
+
+1. **Edge.signal**：每条入边产生一个 `EdgeSignalValue`，默认 `true`。
+2. **Node.active**：目标 Node 收到 `Vec<EdgeSignalValue>` 后合成最终布尔值；只有返回 `true` 才调用 `runtime`。
+
+数据流和控制流分离：
+
+```text
+Edge.data   负责传递 Message
+Edge.signal 负责产生控制真值
+Node.active 负责合并多条入边的控制真值
+NodeRuntime 只处理 Vec<Message> -> Vec<Message>
+```
+
+统一执行体可以表达为：
+
+```rust
+trait NodeRuntime {
+    async fn invoke(
+        &self,
+        ctx: RunContext,
+        input: Vec<Message>,
+    ) -> Result<Vec<Message>>;
+
+    fn kind(&self) -> NodeKind;
+}
+
+enum NodeKind {
+    Llm,
+    Tool,
+    Subgraph,
+}
+```
+
+但这里的 `NodeRuntime` 是图节点执行体的接口，不等同于 Agent Runtime 模块。`Llm` 节点可以通过 `RuntimeRef` 调用 Agent Runtime；`Tool` 节点可以调用工具注册表；`Subgraph` 节点可以递归执行子图。
+
+Tool Node 分成两类：
+
+```rust
+enum ToolNodeRuntime {
+    Fixed {
+        // graph 拓扑里已经编排好的工具名。
+        tool_name: ToolName,
+    },
+
+    Dispatch {
+        // 按 function_tool_call.tool_name 查找工具。
+        registry: ToolRegistryRef,
+        // 控制多个 tool_call 的并行执行方式。
+        execution: ToolExecutionPolicy,
+    },
+}
+```
+
+含义：
+
+```text
+- Fixed Tool Node：拓扑已经确定调用哪个 tool；是否执行由 Edge.signal / Node.active 决定。
+- Dispatch Tool Node：解析 LLM 输出里的 function_tool_call，按 tool_name 分发；多个 tool_call 可以并行执行，但结果按原始 tool_call 顺序输出。
+- LLM 每轮可见哪些 tool schema 由 LLM node 的配置决定；Dispatch Tool Node 只执行已经产生的 tool call。
+```
+
+因此，复杂控制流不需要把 phase 继续拆成更多状态；它可以由边信号和 node active 表达。例如：
+
+```text
+B.verify --signal: passed--> A.verify
+B.verify --data: verification_summary--> A.verify
+A.verify.active = all(required signals are true)
+```
+
+---
 ## 4. Phase 职责
 
 | Phase | 职责 |
