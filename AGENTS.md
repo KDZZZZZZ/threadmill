@@ -17,6 +17,7 @@ Rules:
 - Do not work directly on `main`.
 - Do not work directly on long-lived `dev` unless explicitly asked.
 - Prefer short-lived branches from `dev` for implementation work.
+- New short-lived branches must be created from the latest `origin/dev`, not from a stale local `dev`.
 - Do not create a long-lived `develop` branch.
 - Do not keep long-lived `release/*` branches.
 
@@ -32,11 +33,20 @@ For the current early-stage repository, documentation-only changes may be made o
 
 ## 2. Short-lived work branches
 
-Create short-lived work branches from `dev` using this format:
+Create short-lived work branches from the latest `origin/dev` using this format:
 
 ```text
 <type>/<scope>/<short-kebab-description>
 ```
+
+Required freshness flow before creating a branch:
+
+```text
+git fetch origin dev
+git switch -c <type>/<scope>/<short-kebab-description> origin/dev
+```
+
+Do not branch from a stale local `dev`. If the branch already exists and `origin/dev` advanced, rebase the short-lived branch onto the latest `origin/dev` before opening or updating the PR.
 
 Allowed `type` values:
 
@@ -291,10 +301,19 @@ CI should also run on pushes to:
 Current known checks:
 
 ```text
-No project-specific required checks are defined yet.
+Branch Freshness / branch-freshness
 ```
 
-When checks are added, document them here with exact commands.
+Freshness CI verifies that every PR branch contains the current target branch tip in its history. For normal work branches targeting `dev`, this means the branch must be based on the latest `origin/dev`. For promote PRs targeting `main`, `dev` must contain the current `main` tip.
+
+If freshness fails, update the short-lived branch with:
+
+```text
+git fetch origin dev
+git rebase origin/dev
+```
+
+Do not rebase permanent branches (`main` or `dev`). For `dev -> main` promote freshness failures, update `dev` by merging or otherwise incorporating latest `main` through the approved release flow; never rebase `dev`.
 
 Recommended branch protection:
 

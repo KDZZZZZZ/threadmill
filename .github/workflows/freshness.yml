@@ -1,0 +1,42 @@
+name: Branch Freshness
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+
+permissions:
+  contents: read
+
+jobs:
+  branch-freshness:
+    name: branch-freshness
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout pull request branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify branch contains target branch tip
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          base_ref="${{ github.base_ref }}"
+          base_sha="${{ github.event.pull_request.base.sha }}"
+          head_sha="${{ github.event.pull_request.head.sha }}"
+
+          git fetch --no-tags origin "+refs/heads/${base_ref}:refs/remotes/origin/${base_ref}"
+
+          if git merge-base --is-ancestor "${base_sha}" "${head_sha}"; then
+            echo "Branch is fresh: ${head_sha} contains ${base_ref} at ${base_sha}."
+            exit 0
+          fi
+
+          echo "Branch is stale: ${head_sha} does not contain ${base_ref} at ${base_sha}." >&2
+          echo "Update the branch with the latest target branch before merging." >&2
+          echo "For normal PRs to dev: git fetch origin dev && git rebase origin/dev" >&2
+          echo "Do not rebase permanent branches such as main or dev." >&2
+          exit 1
