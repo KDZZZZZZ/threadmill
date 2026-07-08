@@ -27,6 +27,7 @@ prepare -> plan -> execute -> verify -> done
 - 跨 task 编排可以挂在 phase 粒度，例如 `A.plan -> B.prepare`、`B.verify -> A.verify`。
 - phase 的主要作用是划分 agent 责任和提供图编排锚点，不承载更细的 runtime 状态机。
 - `verify` 承担验收责任；merge 检查也在 verify gate 中实现。
+- 当前图编排走到 `verify` 但验收未通过时，视为异常 / 未满足验收；verifier 只能产出失败证据和后续 requirement，Task Manager Agent 继续编排 replan / execute / verify、blocker、follow-up 或 waiting_human。
 - `done` 只表示该 task 已经通过验收，并且相关编排条件已经满足。
 
 ---
@@ -241,5 +242,5 @@ flowchart LR
 2. phase 用于 agent 分工和图编排，不继续细拆 runtime 状态。
 3. 跨 task 依赖可以指向任意 phase endpoint。
 4. verify 是验收 gate；merge 检查在 verify gate 实现。
-5. task 未通过 verify 不得进入 done。
+5. task 未通过 verify 不得进入 done；verify 失败必须作为异常 / 未满足验收交回 Task Manager Agent 继续编排。
 ```
