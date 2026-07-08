@@ -7,9 +7,9 @@
 
 ## 1. 定位
 
-Task Manager Agent 是 task graph 的**唯一写入口**，也是所有 requirement intake 和 task graph 编排的网关。
+Task Manager Agent 是 task graph 的**唯一写入口**，也是所有 requirement intake 和 task graph 编排的网关。它不是绕过 runtime 的后台服务，而是经 Agent Runtime 启动、授权、观测和记录的系统 agent。
 
-人类和其他 agent 都不直接写 task graph，而是向 Task Manager Agent 提交 requirement。它在写入前拥有全局 task 视图，负责去重、依赖推断、阻塞关系判断、边界与验收校验。
+人类和其他 agent 都不直接写 task graph，而是通过 Agent Runtime(role=task_manager) 向 Task Manager Agent 提交 requirement。它在写入前拥有全局 task 视图，负责去重、依赖推断、阻塞关系判断、边界与验收校验。
 
 它的一个硬边界是：
 
@@ -120,47 +120,58 @@ reject          越权、无效、与硬约束冲突
 
 ### 6.1 Human Intent（宽松）
 
-```ts
-RequirementIntake {
-  requester: "human"
-
-  text: string                 // 自由文本需求
-  goal?: string                // 可选的显式目标
-  constraints?: string[]       // 硬约束 / 验收意图
-  priority_hint?: "low" | "medium" | "high"
+```go
+type RequirementIntake struct {
+	// Requester 固定为 human，表示来自用户的自然语言需求。
+	Requester string `json:"requester"`
+	// Text 是自由文本需求。
+	Text string `json:"text"`
+	// Goal 是可选的显式目标。
+	Goal string `json:"goal,omitempty"`
+	// Constraints 是硬约束或验收意图。
+	Constraints []string `json:"constraints,omitempty"`
+	// PriorityHint 是用户给出的优先级提示，不直接等于调度优先级。
+	PriorityHint PriorityHint `json:"priority_hint,omitempty"`
 }
 ```
 
 ### 6.2 Agent Requirement（严格）
 
-```ts
-AgentRequirementIntake {
-  requester: {
-    agent_id: string
-    role: "planner" | "executor" | "verifier"
-    task_id: string
-    source_phase: "plan" | "execute" | "verify"
-    source_status?: string
-  }
-  client_ref: string            // 发起方本地键，TM 必须回显 + 幂等
+```go
+type AgentRequirementIntake struct {
+	// Requester 描述发起 requirement 的 agent 与来源 phase。
+	Requester AgentRequirementRequester `json:"requester"`
+	// ClientRef 是发起方本地键；Task Manager 必须回显并保证幂等。
+	ClientRef string `json:"client_ref"`
 
-  title: string
-  description: string           // 已是 self-contained 的"需要什么"
-  acceptance_intent: string[]   // 发起方写，必须可测或可转成可测验收
-  declared_scope?: string[]     // owner_module / 文件边界 / 决策边界
+	Title string `json:"title"`
+	// Description 必须是 self-contained 的“需要什么”，不能只引用当前上下文。
+	Description string `json:"description"`
+	// AcceptanceIntent 由发起方填写，必须可测或可转换成可测验收。
+	AcceptanceIntent []string `json:"acceptance_intent"`
+	// DeclaredScope 描述 owner module、文件边界或决策边界。
+	DeclaredScope []string `json:"declared_scope,omitempty"`
 
-  dependency_intent?: {
-    local_from?: string          // 例如 "current.verify"，只是发起方视角的依赖意图
-    local_to?: string            // 例如 "new_requirement.done"
-    existing_task_id?: string
-    existing_endpoint?: string   // 例如 "task:B:done"
-    reason: string
-  }[]
+	// DependencyIntent 只是发起方视角的依赖意图，由 Task Manager 编译成真实 graph edge。
+	DependencyIntent []DependencyIntent `json:"dependency_intent,omitempty"`
+	// EvidenceRefs 指向触发该 requirement 的日志、失败、发现或计划节点。
+	EvidenceRefs []string `json:"evidence_refs"`
+}
 
-  evidence_refs: string[]        // 触发 requirement 的日志、失败、发现或计划节点
+type AgentRequirementRequester struct {
+	AgentID string `json:"agent_id"`
+	Role AgentRole `json:"role"`
+	TaskID string `json:"task_id"`
+	SourcePhase AgentPhase `json:"source_phase"`
+	SourceStatus string `json:"source_status,omitempty"`
+}
 
-  // 注意：不含 how / 实现步骤，也不直接提交 task / edge。
-  // Task Manager 基于全局视图把 requirement 编排成 task / state node / edge / blocker。
+type DependencyIntent struct {
+	LocalFrom string `json:"local_from,omitempty"`
+	LocalTo string `json:"local_to,omitempty"`
+	ExistingTaskID string `json:"existing_task_id,omitempty"`
+	ExistingEndpoint string `json:"existing_endpoint,omitempty"`
+	Reason string `json:"reason"`
 }
 ```
 
@@ -205,32 +216,24 @@ agent requirement -> 发起 agent 自己写 acceptance intent(要和它的 phase
 
 ## 9. 决策结果
 
-```ts
-TaskMutationResult {
-  // 严格模式必回显
-  client_ref?: string
-  task_id?: string
-  task_ids?: string[]              // 宽松模式可能从一个 requirement 创建多个 task
+```go
+type TaskMutationResult struct {
+	// ClientRef 严格模式必须回显，用于发起方幂等匹配。
+	ClientRef string `json:"client_ref,omitempty"`
+	TaskID string `json:"task_id,omitempty"`
+	// TaskIDs 在宽松模式下可能由一个 requirement 创建多个 task。
+	TaskIDs []string `json:"task_ids,omitempty"`
 
-  decision:
-    // 宽松模式(human)
-    | "created"
-    | "updated"
-    | "merged_into"
-    | "needs_clarification"
-    // 严格模式(agent requirement)
-    | "register"
-    | "needs_fix"
-    | "propose_change"
-    | "link_related"
-    | "compile_graph"
-    | "reject"
-
-  merged_into_task_id?: string     // 仅宽松模式
-  overlaps?: string[]              // 严格模式：全局重叠的 task_id，关联而非合并
-  inferred_edges: TaskEdge[]       // TM 新增的图关系，不改内容
-  inferred_blockers: string[]
-  reason: string
+	// Decision 记录 Task Manager 的编排决策。
+	Decision TaskMutationDecision `json:"decision"`
+	// MergedIntoTaskID 仅宽松 human 模式允许，用于合并重复需求。
+	MergedIntoTaskID string `json:"merged_into_task_id,omitempty"`
+	// Overlaps 严格 agent requirement 模式只关联重叠 task，不自动 merge 内容。
+	Overlaps []string `json:"overlaps,omitempty"`
+	// InferredEdges 是 Task Manager 新增的图关系，不改 requirement 内容。
+	InferredEdges []TaskEdge `json:"inferred_edges"`
+	InferredBlockers []string `json:"inferred_blockers"`
+	Reason string `json:"reason"`
 }
 ```
 
@@ -280,11 +283,11 @@ Task Manager 仍然要做全局层面的工作，但只能"新增关系"，不�
 - verifier：严格模式，验收发现缺口 / 需要 follow-up 时提交 requirement。
 ```
 
-planner、executor、verifier 三个阶段 agent 都能提交 requirement，但都走严格契约模式（带 client_ref、内容不可被改写）。它们不直接写 task graph，也不直接创建 task / edge；依赖关系由 Task Manager Agent 根据全局视图编排。
+planner、executor、verifier 三个阶段 agent 都能提交 requirement，但都走严格契约模式（带 client_ref、内容不可被改写）。它们不直接写 task graph，也不直接创建 task / edge；依赖关系由经 Agent Runtime 授权的 Task Manager Agent 根据全局视图编排。
 
 ### 12.2 事件解耦：活动自动进 log，ctxlib 只读 log
 
-Task Manager 唯一的权威写动作是**写 Task Graph**。它不主动"写"Event Log——Event Log 是 runtime 对 agent 活动和状态变化的**自动记录**，不是 agent 要调用的写接口。
+Task Manager 唯一的权威写动作是通过受控 graph_write service/tool **写 Task Graph**。它不主动"写"Event Log——Event Log 是 Agent Runtime 对 agent 活动和状态变化的**自动记录**，不是 agent 要调用的写接口。
 
 runtime 自动记入 log 的内容包括：
 
@@ -298,6 +301,7 @@ runtime 自动记入 log 的内容包括：
 
 ```text
 Human UI / planner / executor / verifier
+  -> Agent Runtime(role=task_manager, tool=graph_write)
   -> Task Manager Agent（intake + 校验 + 依赖编排）
        -> Task Graph（唯一权威写：requirement / task / state node / edge）
 
@@ -307,12 +311,13 @@ runtime（自动记录，无需 agent 显式写）
        - Task Manager 的 intake 决策
        - 各 agent 的工具调用 / 结论
 
-Ctx Agent
-  <- 只读 Event Log
-  -> ctxlib（据 log 构建 / 更新 context block，如把原始需求存为 provenance）
+Agent Runtime(role=ctx_manager, tool=ctx_write)
+  -> Ctx Manager Agent / Ctx Agent
+       <- 只读 Event Log
+       -> ctxlib（据 log 构建 / 更新 context block，如把原始需求存为 provenance）
 
 Scheduler
-  <- 读 Task Graph，决定何时启动 agent（新 task ≠ 立即启动）
+  <- 读 Task Graph，决定何时向 Agent Runtime 提交 AgentRunParams（新 task ≠ 立即启动）
 ```
 
 这样解耦的好处：
@@ -328,8 +333,8 @@ Scheduler
 ### 12.3 边界
 
 ```text
-- Task Manager 权威写 Task Graph；其活动被 runtime 自动记入 Event Log；不写 ctxlib。
-- Ctx Agent 读 Event Log 写 ctxlib，不写 Task Graph。
+- Task Manager 作为 Agent Runtime invocation 权威写 Task Graph；其活动被 runtime 自动记入 Event Log；不写 ctxlib。
+- Ctx Manager Agent / Ctx Agent 作为 Agent Runtime invocation 读 Event Log 写 ctxlib，不写 Task Graph。
 - 需求原话作为 provenance，由 Ctx Agent 从 log 中提取，而非任何 agent 直接塞入 ctxlib。
 ```
 
@@ -367,17 +372,18 @@ Task B
 ## 14. 不变量
 
 ```text
-1. 除 Task Manager Agent 外，任何角色不得直接写 task graph。
-2. Task Manager 不产出 how；how 属于 plan 阶段。
-3. 人类需求可规整；agent requirement 内容不可被改写。
-4. 严格模式必须回显 client_ref 且保证幂等。
-5. 严格模式对重复只 link_related，不 merge。
-6. 内容字段归发起方；依赖编排、图关系与元数据归 Task Manager，且只可新增。
-7. 实现型 task 无可验收标准不得进入 planned。
-8. 冲突与重复只暴露和关联，不由 Task Manager 替人决策。
-9. 所有 intake 决策都产生事件，便于追溯。
-10. planner / executor / verifier 都可提交 requirement，但都走严格契约模式。
-11. planner / executor / verifier 不直接创建 task / edge；依赖关系由 Task Manager Agent 编排。
-12. task 的状态变换可视为子图；Task Manager 可以创建指向 phase / status endpoint 的依赖，例如 A.verify 依赖 B.done。
-13. Task Manager 只权威写 Task Graph；其活动被 runtime 自动记入 Event Log；不写 ctxlib；ctxlib 只从 log 取数据。
+1. 所有 agent invocation 都必须经 Agent Runtime，包括 Task Manager Agent 和 Ctx Manager Agent。
+2. 除经 Agent Runtime 授权的 Task Manager Agent 外，任何角色不得直接写 task graph。
+3. Task Manager 不产出 how；how 属于 plan 阶段。
+4. 人类需求可规整；agent requirement 内容不可被改写。
+5. 严格模式必须回显 client_ref 且保证幂等。
+6. 严格模式对重复只 link_related，不 merge。
+7. 内容字段归发起方；依赖编排、图关系与元数据归 Task Manager，且只可新增。
+8. 实现型 task 无可验收标准不得进入 planned。
+9. 冲突与重复只暴露和关联，不由 Task Manager 替人决策。
+10. 所有 intake 决策都产生事件，便于追溯。
+11. planner / executor / verifier 都可提交 requirement，但都走严格契约模式。
+12. planner / executor / verifier 不直接创建 task / edge；依赖关系由 Task Manager Agent 编排。
+13. task 的状态变换可视为子图；Task Manager 可以创建指向 phase / status endpoint 的依赖，例如 A.verify 依赖 B.done。
+14. Task Manager 只通过 Agent Runtime 授权的 graph_write service/tool 权威写 Task Graph；其活动被 runtime 自动记入 Event Log；不写 ctxlib；ctxlib 只从 log 取数据。
 ```

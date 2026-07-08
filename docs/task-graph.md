@@ -33,11 +33,12 @@ prepare -> plan -> execute -> verify -> done
 
 ## 3. Requirement 到实时编排链路
 
-所有新增需求都先进入 Task Manager Agent，再由它实时更新 Task Graph：
+所有新增需求都先通过 Agent Runtime 进入 Task Manager Agent，再由它实时更新 Task Graph：
 
 ```text
 Human UI / planner / executor / verifier
   -> requirement
+  -> Agent Runtime(role=task_manager, tool=graph_write)
   -> Task Manager Agent（intake + 校验 + 去重/关联 + 依赖编排）
   -> Task Graph（task / phase endpoint / edge / blocker）
   -> Scheduler 读取新的可运行 phase
@@ -51,46 +52,48 @@ Human UI / planner / executor / verifier
 4. 如果 requirement 来自某个运行中的 phase，Task Manager Agent 可以把依赖挂到具体 phase endpoint，例如 `current.verify -> new_task.done`。
 5. Task Graph 更新后，Scheduler 只需要读取新的 phase 依赖关系，选择下一批可运行 phase。
 
-Task Manager Agent 只负责任务契约和图编排：定义“做什么、为什么、怎样算完成”，不生成“怎么做”的执行方案；具体 how 仍属于 `plan` 阶段。
+Task Manager Agent 只负责任务契约和图编排：定义“做什么、为什么、怎样算完成”，不生成“怎么做”的执行方案；具体 how 仍属于 `plan` 阶段。它本身也是经 Agent Runtime 启动的系统 agent，只是被授予 graph_read / graph_write capability。
 
 ---
 
 ### 3.1 Scheduler 视角的 Node / Edge 抽象
 
-Task Graph 的持久层仍然只保存 task、phase endpoint 和跨 phase 关系；Scheduler 在读取 Task Graph 后，可以把一批可运行 phase **物化**成更通用的运行图。这个图模型属于 Task Graph / Scheduler 边界，不属于 Agent Runtime。
+Task Graph 的持久层仍然只保存 task、phase endpoint 和跨 phase 关系；Scheduler 在读取 Task Graph 后，可以把一批可运行 phase **物化**成更通用的运行图。这个图模型属于 Task Graph / Scheduler 边界，不属于 Agent Runtime。Agent Runtime 只接收已经物化出的单次 invocation，包括系统 agent invocation。
 
-```rust
-struct NodeSpec {
-    // 根据入边控制信号决定 node 是否执行。
-    active: Active,
-    // node 的统一执行体引用。
-    runtime: RuntimeRef,
+```go
+type NodeSpec struct {
+	// Active 根据入边控制信号决定 node 是否执行。
+	Active Active `json:"active"`
+	// Runtime 是 node 的统一执行体引用。
+	Runtime RuntimeRef `json:"runtime"`
 }
 
-struct EdgeSpec {
-    from: PortRef,
-    to: PortRef,
-    // Message 数据传输规则。
-    data: Option<DataTransfer>,
-    // 控制信号规则；缺省时该边信号为 true。
-    signal: Option<SignalEmit>,
+type EdgeSpec struct {
+	// From 是源端口。
+	From PortRef `json:"from"`
+	// To 是目标端口。
+	To PortRef `json:"to"`
+	// Data 描述 Message 数据传输规则；nil 表示不传递数据。
+	Data *DataTransfer `json:"data,omitempty"`
+	// Signal 描述控制信号规则；nil 表示该边信号默认为 true。
+	Signal *SignalEmit `json:"signal,omitempty"`
 }
 ```
 
 边界划分：
 
 ```text
-Task Manager Agent 写入：task / phase endpoint / dependency edge / blocker
+Task Manager Agent 写入：经 Agent Runtime 授权后写 task / phase endpoint / dependency edge / blocker
 Scheduler 读取 Task Graph：把 ready phase 转成 NodeSpec / EdgeSpec，并计算 active / signal
 Graph runner 调用 RuntimeRef：把某个 node 变成一次 LLM / Tool / Subgraph 调用
-Agent Runtime 执行 agent invocation：管理输入输出、动作、权限、事件、artifact，不拥有图拓扑
+Agent Runtime 执行所有 agent invocation：包括 task_manager、ctx_manager、planner、executor、verifier；管理输入输出、动作、权限、事件、artifact，不拥有图拓扑
 Runtime 过程事件：通过 ctx.emit(...) 进入 Event Log / Artifact Store
 ```
 
 控制流拆成两级：
 
 1. **Edge.signal**：每条入边产生一个 `EdgeSignalValue`，默认 `true`。
-2. **Node.active**：目标 Node 收到 `Vec<EdgeSignalValue>` 后合成最终布尔值；只有返回 `true` 才调用 `runtime`。
+2. **Node.active**：目标 Node 收到 `[]EdgeSignalValue` 后合成最终布尔值；只有返回 `true` 才调用 `runtime`。
 
 数据流和控制流分离：
 
@@ -98,47 +101,55 @@ Runtime 过程事件：通过 ctx.emit(...) 进入 Event Log / Artifact Store
 Edge.data   负责传递 Message
 Edge.signal 负责产生控制真值
 Node.active 负责合并多条入边的控制真值
-NodeRuntime 只处理 Vec<Message> -> Vec<Message>
+NodeRuntime 只处理 []Message -> []Message
 ```
 
 统一执行体可以表达为：
 
-```rust
-trait NodeRuntime {
-    async fn invoke(
-        &self,
-        ctx: RunContext,
-        input: Vec<Message>,
-    ) -> Result<Vec<Message>>;
-
-    fn kind(&self) -> NodeKind;
+```go
+type NodeRuntime interface {
+	// Invoke 执行 node；输入输出统一使用 Message 列表表达。
+	Invoke(ctx context.Context, run RunContext, input []Message) ([]Message, error)
+	// Kind 返回 node 类型，供 Graph Runner 做调度和观测。
+	Kind() NodeKind
 }
 
-enum NodeKind {
-    Llm,
-    Tool,
-    Subgraph,
-}
+type NodeKind string
+
+const (
+	// NodeKindLLM 表示 LLM 节点，可通过 RuntimeRef 调用 Agent Runtime。
+	NodeKindLLM NodeKind = "llm"
+	// NodeKindTool 表示 Tool 节点，由工具注册表执行。
+	NodeKindTool NodeKind = "tool"
+	// NodeKindSubgraph 表示子图节点，由 Graph Runner 递归执行。
+	NodeKindSubgraph NodeKind = "subgraph"
+)
 ```
 
-但这里的 `NodeRuntime` 是图节点执行体的接口，不等同于 Agent Runtime 模块。`Llm` 节点可以通过 `RuntimeRef` 调用 Agent Runtime；`Tool` 节点可以调用工具注册表；`Subgraph` 节点可以递归执行子图。
+但这里的 `NodeRuntime` 是图节点执行体的接口，不等同于 Agent Runtime 模块。`Llm` 节点可以通过 `RuntimeRef` 调用 Agent Runtime；当目标角色是 task_manager 或 ctx_manager 时，也仍然通过 Agent Runtime 生成受控 invocation；`Tool` 节点可以调用工具注册表；`Subgraph` 节点可以递归执行子图。
 
 Tool Node 分成两类：
 
-```rust
-enum ToolNodeRuntime {
-    Fixed {
-        // graph 拓扑里已经编排好的工具名。
-        tool_name: ToolName,
-    },
-
-    Dispatch {
-        // 按 function_tool_call.tool_name 查找工具。
-        registry: ToolRegistryRef,
-        // 控制多个 tool_call 的并行执行方式。
-        execution: ToolExecutionPolicy,
-    },
+```go
+type ToolNodeRuntime struct {
+	// Mode 区分固定工具节点和分发工具节点。
+	Mode ToolNodeMode `json:"mode"`
+	// ToolName 仅在 fixed 模式下使用，表示 graph 拓扑里已经编排好的工具名。
+	ToolName ToolName `json:"tool_name,omitempty"`
+	// Registry 仅在 dispatch 模式下使用，按 function_tool_call.tool_name 查找工具。
+	Registry ToolRegistryRef `json:"registry,omitempty"`
+	// Execution 仅在 dispatch 模式下使用，控制多个 tool_call 的并行执行方式。
+	Execution ToolExecutionPolicy `json:"execution,omitempty"`
 }
+
+type ToolNodeMode string
+
+const (
+	// ToolNodeModeFixed 表示拓扑已固定具体工具。
+	ToolNodeModeFixed ToolNodeMode = "fixed"
+	// ToolNodeModeDispatch 表示按模型输出的 tool_name 动态分发。
+	ToolNodeModeDispatch ToolNodeMode = "dispatch"
+)
 ```
 
 含义：

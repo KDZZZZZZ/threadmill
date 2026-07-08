@@ -7,15 +7,16 @@
 
 ## 1. 定位
 
-Agent Runtime 负责把 Claude Code、Codex、Gemini CLI 和其他 headless CLI agent 包装成统一 worker，供 Control Plane 调度。
+Agent Runtime 负责把 Claude Code、Codex、Gemini CLI 和其他 headless CLI agent 包装成统一 worker，供 Control Plane 调度。系统内所有 agent 都经这条边界运行：Task Manager Agent、Ctx Manager Agent / Ctx Agent、planner、executor、verifier 都是 Agent Runtime 管理的 invocation。
 
 它的目标不是抹平所有 agent 的能力差异，而是提供一条稳定边界：
 
 ```text
 Control Plane / Scheduler
   -> Agent Runtime
-  -> Agent Adapter
+  -> Agent Adapter / System Agent Role
   -> Claude Code / Codex / Gemini / Custom CLI
+  -> Task Manager Agent / Ctx Manager Agent / planner / executor / verifier
 ```
 
 第一阶段只实现 Claude Code 的最小完整包装：
@@ -28,7 +29,8 @@ Control Plane / Scheduler
 - 控制允许工具和权限模式。
 - 解析 stream-json 输出为统一 AgentEvent。
 - 记录 Event Log 和 Artifact Store 引用。
-- 汇总 AgentResult 返回给 Control Plane；Task Manager Agent、Verifier 和 Merge Queue 分别按权责消费。
+- 汇总 AgentResult 返回给 Control Plane；Task Manager Agent、Ctx Manager Agent、Verifier 和 Merge Queue 分别按权责消费。
+- 对 Task Manager Agent / Ctx Manager Agent 也使用同一套启动、权限、事件、artifact 和取消语义。
 ```
 
 ---
@@ -75,6 +77,9 @@ Open Design product run               -> 本系统 Control Plane / Scheduler 管
 
 5. fallback 不能静默发生。
    从一个 adapter 切到另一个 adapter 必须显式记录，并受策略控制。
+
+6. Task Manager Agent 和 Ctx Manager Agent 不是 runtime 旁路。
+   它们是带有特殊 tool/capability 授权的系统 agent invocation；Task Graph / ctxlib 的实际写入由 Go backend 受控 service/tool 承接。
 ```
 
 ---
@@ -198,7 +203,7 @@ commit: 02c68415e29dcab659f1835e8a41ec1a37fce303
 ```text
 ┌──────────────────────────────────────────────┐
 │              Control Plane / Scheduler       │
-│  task phase / role / budget / capacity       │
+│  task phase / system role / budget / capacity│
 └───────────────────────┬──────────────────────┘
                         │
                         ▼
@@ -215,7 +220,8 @@ commit: 02c68415e29dcab659f1835e8a41ec1a37fce303
             │
             ▼
 ┌──────────────────────────────────────────────┐
-│       CLI Agent in isolated cwd/worktree     │
+│       Agent Invocation in controlled boundary│
+│ task_manager / ctx_manager / plan/exec/verify│
 │ Claude Code / Codex / Gemini / Custom        │
 └───────────────────────┬──────────────────────┘
                         │
@@ -229,7 +235,7 @@ commit: 02c68415e29dcab659f1835e8a41ec1a37fce303
 一句话概括：
 
 ```text
-Agent Runtime 从 Task Graph 接收一个 task phase attempt，准备 context 和 workspace，选择合适 adapter 运行 CLI agent，把 CLI 输出解析成统一事件，观察实际写入和 diff，最后返回可验收的 AgentResult。
+Agent Runtime 从 Control Plane / Scheduler 接收一个 AgentRunParams。这个 run 可以是普通 task phase attempt，也可以是 task_manager / ctx_manager 这类系统 agent invocation。Runtime 准备 context、workspace、权限和工具边界，选择合适 adapter 运行 agent，把输出解析成统一事件，观察实际写入和 diff，最后返回可验收的 AgentResult。
 ```
 
 ---
@@ -262,31 +268,43 @@ RuntimeAgentDef / provider spec
 
 `AgentProviderSpec` 对应 Open Design 源码里的 `RuntimeAgentDef` 思路，是 provider adapter 的主要实现单元。
 
-```ts
-AgentProviderSpec {
-  id: string
-  display_name: string
-  provider: "claude" | "codex" | "gemini" | "opencode" | "custom"
+```go
+type AgentProviderSpec struct {
+	// ID 是 runtime 内部稳定标识，例如 "claude-code" 或 "codex"。
+	ID string `json:"id"`
+	// DisplayName 是 Electron/React UI 展示名称。
+	DisplayName string `json:"display_name"`
+	// Provider 标记底层 CLI / stdio runtime 类型。
+	Provider ProviderKind `json:"provider"`
 
-  docs_url?: string
-  executable: ExecutableSpec
-  version_args?: string[]
+	// DocsURL 指向 provider 官方文档或本地说明。
+	DocsURL string `json:"docs_url,omitempty"`
+	// Executable 描述可执行文件查找方式；PATH 探测留在 adapter 内。
+	Executable ExecutableSpec `json:"executable"`
+	// VersionArgs 是版本探测参数，例如 ["--version"]。
+	VersionArgs []string `json:"version_args,omitempty"`
 
-  detect: DetectionSpec
-  auth_probe?: AuthProbeSpec
-  capability_probe?: CapabilityProbeSpec
-  model_probe?: ModelProbeSpec
+	// Detect / Probe 是声明式探测配置，不拥有 task 状态。
+	Detect DetectionSpec `json:"detect"`
+	AuthProbe *AuthProbeSpec `json:"auth_probe,omitempty"`
+	CapabilityProbe *CapabilityProbeSpec `json:"capability_probe,omitempty"`
+	ModelProbe *ModelProbeSpec `json:"model_probe,omitempty"`
 
-  prompt_transport: PromptTransport
-  stream_format: "jsonl" | "stream_json" | "plain_text" | "json_rpc" | "sse"
+	// PromptTransport 决定 prompt 通过 stdin、JSONL、文件还是 JSON-RPC 传入。
+	PromptTransport PromptTransport `json:"prompt_transport"`
+	// StreamFormat 决定 provider 原始输出格式，parser 据此转换成 AgentEvent。
+	StreamFormat StreamFormat `json:"stream_format"`
 
-  build_args(input: AgentCommandBuildInput): AgentCommand
-  parse_event(raw: RawProviderEvent, ctx: EventParseContext): AgentEvent[]
+	// BuildArgs 只把统一参数翻译成 argv/env/stdin，不直接调度 task。
+	BuildArgs func(input AgentCommandBuildInput) (AgentCommand, error) `json:"-"`
+	// ParseEvent 只做 raw provider event -> 统一 AgentEvent 的映射。
+	ParseEvent func(raw RawProviderEvent, ctx EventParseContext) ([]AgentEvent, error) `json:"-"`
 
-  session_policy: SessionPolicy
-  cancel_policy: CancelPolicy
-  permission_mapping: PermissionMapping
-  tool_injection_policy?: ToolInjectionPolicy
+	// 生命周期、权限和工具注入策略都在 runtime 边界收口。
+	SessionPolicy SessionPolicy `json:"session_policy"`
+	CancelPolicy CancelPolicy `json:"cancel_policy"`
+	PermissionMapping PermissionMapping `json:"permission_mapping"`
+	ToolInjectionPolicy *ToolInjectionPolicy `json:"tool_injection_policy,omitempty"`
 }
 ```
 
@@ -302,60 +320,97 @@ AgentProviderSpec {
 
 命令构建输入：
 
-```ts
-AgentCommandBuildInput {
-  params: AgentRunParams
-  detection: AgentDetection
-  capabilities: AgentCapabilities
-  runtime_context: AgentRuntimeContext
+```go
+type AgentCommandBuildInput struct {
+	// Params 是 Control Plane 传入的稳定运行意图。
+	Params AgentRunParams `json:"params"`
+	// Detection 是 detect/version/auth 结果，供 build args 做兼容判断。
+	Detection AgentDetection `json:"detection"`
+	// Capabilities 是已探测出的 provider 能力。
+	Capabilities AgentCapabilities `json:"capabilities"`
+	// RuntimeContext 是本次运行的 cwd、权限目录和 session 上下文。
+	RuntimeContext AgentRuntimeContext `json:"runtime_context"`
 }
 
-AgentRuntimeContext {
-  cwd: string
-  allowed_dirs: string[]
-  prompt_file?: string
-  resume_session_id?: string
-  new_session_id?: string
-  env_overrides?: Record<string, string>
+type AgentRuntimeContext struct {
+	// CWD 是 agent 进程启动目录，通常是 attempt worktree。
+	CWD string `json:"cwd"`
+	// AllowedDirs 是 wrapper 允许 provider 读取/写入的目录边界。
+	AllowedDirs []string `json:"allowed_dirs"`
+	// PromptFile 是大 prompt 的临时文件路径，避免塞进 argv。
+	PromptFile string `json:"prompt_file,omitempty"`
+	// ResumeSessionID 是恢复已有 provider session 的句柄。
+	ResumeSessionID string `json:"resume_session_id,omitempty"`
+	// NewSessionID 是 runtime 生成的新 session 标识。
+	NewSessionID string `json:"new_session_id,omitempty"`
+	// EnvOverrides 是本次运行允许注入的环境变量白名单。
+	EnvOverrides map[string]string `json:"env_overrides,omitempty"`
 }
 
-AgentCommand {
-  executable_path: string
-  args: string[]
-  env?: Record<string, string>
-  cwd: string
-  stdin?: StdinPlan
+type AgentCommand struct {
+	// ExecutablePath 是最终执行的 CLI 或 stdio runtime 路径。
+	ExecutablePath string `json:"executable_path"`
+	// Args 是 provider-specific 参数，只在 adapter 内生成。
+	Args []string `json:"args"`
+	// Env 是最小环境变量集合，不隐式泄漏全局环境。
+	Env map[string]string `json:"env,omitempty"`
+	// CWD 是进程工作目录。
+	CWD string `json:"cwd"`
+	// Stdin 描述 stdin_text / jsonl / json_rpc 等输入计划。
+	Stdin *StdinPlan `json:"stdin,omitempty"`
 }
 ```
 
 Prompt transport 参考 Open Design 的 stdin / JSONL / prompt file 策略：
 
-```ts
-PromptTransport =
-  | { kind: "stdin_text" }
-  | { kind: "stdin_jsonl"; message_shape: "user_message" | "provider_native" }
-  | { kind: "prompt_file" }
-  | { kind: "argv_small_only"; max_bytes: number }
-  | { kind: "json_rpc" }
+```go
+type PromptTransportKind string
+
+const (
+	PromptTransportStdinText PromptTransportKind = "stdin_text"
+	PromptTransportStdinJSONL PromptTransportKind = "stdin_jsonl"
+	PromptTransportPromptFile PromptTransportKind = "prompt_file"
+	PromptTransportArgvSmallOnly PromptTransportKind = "argv_small_only"
+	PromptTransportJSONRPC PromptTransportKind = "json_rpc"
+)
+
+type PromptTransport struct {
+	// Kind 决定 prompt 的传输方式；大 prompt 优先走 stdin 或文件。
+	Kind PromptTransportKind `json:"kind"`
+	// MessageShape 只在 JSONL 模式下使用。
+	MessageShape string `json:"message_shape,omitempty"`
+	// MaxBytes 只在 argv_small_only 模式下使用，超过必须失败或切换策略。
+	MaxBytes int `json:"max_bytes,omitempty"`
+}
 ```
 
 Session / cancel 也作为显式接口，而不是藏在 provider flags 里：
 
-```ts
-SessionPolicy {
-  mode: "none" | "daemon_minted" | "provider_captured" | "acp_load"
-  create_arg?: string
-  resume_arg?: string
-  load_method?: string
-  capture_from_event?: boolean
+```go
+type SessionPolicy struct {
+	// Mode 区分不支持 session、runtime 生成 session、provider 回传 session、ACP load 等模式。
+	Mode SessionMode `json:"mode"`
+	// CreateArg 是创建新 session 时使用的 provider 参数。
+	CreateArg string `json:"create_arg,omitempty"`
+	// ResumeArg 是恢复 session 时使用的 provider 参数。
+	ResumeArg string `json:"resume_arg,omitempty"`
+	// LoadMethod 是 JSON-RPC/ACP 类 runtime 的 session 加载方法名。
+	LoadMethod string `json:"load_method,omitempty"`
+	// CaptureFromEvent 表示 session id 需要从 provider event 中捕获。
+	CaptureFromEvent bool `json:"capture_from_event,omitempty"`
 }
 
-CancelPolicy {
-  prefer_adapter_cancel: boolean
-  close_stdin: boolean
-  terminate_signal?: "SIGTERM" | "CTRL_BREAK"
-  grace_ms: number
-  force_kill: boolean
+type CancelPolicy struct {
+	// PreferAdapterCancel 表示优先使用 provider 原生 cancel。
+	PreferAdapterCancel bool `json:"prefer_adapter_cancel"`
+	// CloseStdin 表示 cancel 时先关闭 stdin，让 provider 自行收尾。
+	CloseStdin bool `json:"close_stdin"`
+	// TerminateSignal 是平台相关的温和终止信号，例如 SIGTERM / CTRL_BREAK。
+	TerminateSignal string `json:"terminate_signal,omitempty"`
+	// GraceMS 是温和终止后的等待时间。
+	GraceMS int `json:"grace_ms"`
+	// ForceKill 表示超时后是否允许强杀进程树。
+	ForceKill bool `json:"force_kill"`
 }
 ```
 
@@ -365,49 +420,64 @@ CancelPolicy {
 
 `AgentRegistry` 对应 Open Design 的 runtime registry：集中注册 provider，并只向上暴露稳定 `AgentInfo`。
 
-```ts
-AgentRegistry {
-  list(): AgentInfo[]
-  get(provider_id: string): AgentProviderSpec | null
-  resolve(requirement: AgentRequirement): AgentProviderSpec[]
+```go
+type AgentRegistry interface {
+	// List 返回 UI / Scheduler 可见的 agent 摘要，不暴露 provider flags。
+	List(ctx context.Context) ([]AgentInfo, error)
+	// Get 按 provider_id 取声明式 provider spec。
+	Get(ctx context.Context, providerID string) (*AgentProviderSpec, error)
+	// Resolve 根据角色、能力和策略返回候选 provider。
+	Resolve(ctx context.Context, requirement AgentRequirement) ([]AgentProviderSpec, error)
 }
 
-AgentInfo {
-  id: string
-  display_name: string
-  provider: string
-  available: boolean
-  auth_state: "ok" | "missing" | "expired" | "unknown"
-  executable_path?: string
-  version?: string
-  diagnostics?: string[]
-  capabilities: AgentCapabilities
-  models?: AgentModelInfo[]
-  docs_url?: string
+type AgentInfo struct {
+	// ID 是 runtime 层 provider 标识。
+	ID string `json:"id"`
+	// DisplayName 是 UI 展示名称。
+	DisplayName string `json:"display_name"`
+	// Provider 是底层 agent 类型。
+	Provider ProviderKind `json:"provider"`
+	// Available 表示本机是否探测到可用 executable 和基础配置。
+	Available bool `json:"available"`
+	// AuthState 表示认证是否可用；unknown 不应静默当作 ok。
+	AuthState AuthState `json:"auth_state"`
+	ExecutablePath string `json:"executable_path,omitempty"`
+	Version string `json:"version,omitempty"`
+	Diagnostics []string `json:"diagnostics,omitempty"`
+	Capabilities AgentCapabilities `json:"capabilities"`
+	Models []AgentModelInfo `json:"models,omitempty"`
+	DocsURL string `json:"docs_url,omitempty"`
 }
 ```
 
 `AgentRunService` 对应 Open Design 的 centralized runner：它消费 `AgentProviderSpec`，而不是让每个 provider 自己管理完整 run lifecycle。
 
-```ts
-AgentRunService {
-  invoke(provider_id: string, params: AgentRunParams): AsyncIterable<AgentEvent>
-  resume(run_id: string, message: string): AsyncIterable<AgentEvent>
-  cancel(run_id: string, reason?: string): Promise<void>
-  get_run(run_id: string): AgentRunState | null
+```go
+type AgentRunService interface {
+	// Invoke 启动一次 agent run；事件通过只读 channel 流式返回。
+	Invoke(ctx context.Context, providerID string, params AgentRunParams) (<-chan AgentEvent, error)
+	// Resume 恢复已有 run/session；不支持时返回明确错误。
+	Resume(ctx context.Context, runID string, message string) (<-chan AgentEvent, error)
+	// Cancel 请求取消 run；实现必须记录 cancel 事件并清理进程资源。
+	Cancel(ctx context.Context, runID string, reason string) error
+	// GetRun 返回 runtime 维护的 run state 投影。
+	GetRun(ctx context.Context, runID string) (*AgentRunState, error)
 }
 
-AgentRunState {
-  run_id: string
-  provider_id: string
-  status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "timeout"
-  pid?: number
-  session_handle?: AgentSessionHandle
-  cwd: string
-  event_log_ref?: string
-  artifact_refs: string[]
-  started_at?: string
-  finished_at?: string
+type AgentRunState struct {
+	// RunID 是 runtime run 的唯一标识。
+	RunID string `json:"run_id"`
+	ProviderID string `json:"provider_id"`
+	// Status 是 run lifecycle 状态，不等于 task 状态。
+	Status AgentRunStatus `json:"status"`
+	PID int `json:"pid,omitempty"`
+	// SessionHandle 保存 provider session 的恢复信息。
+	SessionHandle *AgentSessionHandle `json:"session_handle,omitempty"`
+	CWD string `json:"cwd"`
+	EventLogRef string `json:"event_log_ref,omitempty"`
+	ArtifactRefs []string `json:"artifact_refs"`
+	StartedAt *time.Time `json:"started_at,omitempty"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
 ```
 
@@ -429,22 +499,26 @@ AgentRunState {
 
 `AgentAdapter` 是不同 CLI agent 的概念归一化边界。实际实现优先由 `AgentProviderSpec` 声明 provider 差异，再由统一 `AgentRunService` 执行。
 
-```ts
-AgentAdapter {
-  id: string
-  display_name: string
-  provider: "claude" | "codex" | "gemini" | "custom"
+```go
+type AgentAdapter interface {
+	// ID 返回 adapter 稳定标识。
+	ID() string
+	// DisplayName 返回 UI 展示名称。
+	DisplayName() string
+	// Provider 返回底层 agent 类型。
+	Provider() ProviderKind
 
-  detect(): Promise<AgentDetection | null>
-  capabilities(): AgentCapabilities
+	// Detect 探测 CLI 是否安装、版本和认证状态。
+	Detect(ctx context.Context) (*AgentDetection, error)
+	// Capabilities 返回 adapter 已知能力。
+	Capabilities(ctx context.Context) (AgentCapabilities, error)
 
-  run(params: AgentRunParams): AsyncIterable<AgentEvent>
-  cancel(run_id: string): Promise<void>
-
-  resume?(
-    run_id: string,
-    message: string
-  ): AsyncIterable<AgentEvent>
+	// Run 启动 provider 并流式返回统一 AgentEvent。
+	Run(ctx context.Context, params AgentRunParams) (<-chan AgentEvent, error)
+	// Cancel 取消正在运行的 provider session / process。
+	Cancel(ctx context.Context, runID string) error
+	// Resume 可选；不支持时返回明确错误，而不是静默新开 session。
+	Resume(ctx context.Context, runID string, message string) (<-chan AgentEvent, error)
 }
 ```
 
@@ -466,20 +540,24 @@ adapter / provider spec 负责：
 
 CLI 存在不代表可以无头运行，因此 detection 需要记录认证和配置状态。
 
-```ts
-AgentDetection {
-  provider: "claude" | "codex" | "gemini" | "custom"
-
-  executable_path: string
-  version: string
-
-  config_dir?: string
-  native_skills_dir?: string
-
-  auth_state: "ok" | "missing" | "expired" | "unknown"
-
-  install_hint?: string
-  error?: string
+```go
+type AgentDetection struct {
+	// Provider 是被探测的底层 agent 类型。
+	Provider ProviderKind `json:"provider"`
+	// ExecutablePath 是实际命中的可执行文件路径。
+	ExecutablePath string `json:"executable_path"`
+	// Version 是 provider 版本文本或规范化版本号。
+	Version string `json:"version"`
+	// ConfigDir 是 provider 本地配置目录。
+	ConfigDir string `json:"config_dir,omitempty"`
+	// NativeSkillsDir 是 provider 原生 skill/prompt 目录。
+	NativeSkillsDir string `json:"native_skills_dir,omitempty"`
+	// AuthState 是认证状态。
+	AuthState AuthState `json:"auth_state"`
+	// InstallHint 是不可用时给 UI 展示的安装/修复提示。
+	InstallHint string `json:"install_hint,omitempty"`
+	// Error 是探测失败的诊断文本。
+	Error string `json:"error,omitempty"`
 }
 ```
 
@@ -497,30 +575,33 @@ AgentDetection {
 
 Capability 不描述所有 CLI flags，只描述调度和上层产品需要知道的能力。
 
-```ts
-AgentCapabilities {
-  supports_headless: boolean
-  supports_streaming: boolean
-  supports_structured_output: boolean
-  supports_tool_calling: boolean
-  supports_file_edit: boolean
-  supports_shell: boolean
-  supports_mcp: boolean
+```go
+type AgentCapabilities struct {
+	// SupportsHeadless 表示是否可无交互运行。
+	SupportsHeadless bool `json:"supports_headless"`
+	// SupportsStreaming 表示是否能实时输出事件。
+	SupportsStreaming bool `json:"supports_streaming"`
+	// SupportsStructuredOutput 表示是否能约束结构化输出。
+	SupportsStructuredOutput bool `json:"supports_structured_output"`
+	SupportsToolCalling bool `json:"supports_tool_calling"`
+	SupportsFileEdit bool `json:"supports_file_edit"`
+	SupportsShell bool `json:"supports_shell"`
+	SupportsMCP bool `json:"supports_mcp"`
 
-  // worktree/cwd/git 隔离优先使用 CLI 自身能力；不支持时由 wrapper 兜底。
-  supports_git_worktree: boolean
-  supports_additional_directories: boolean
+	// Worktree/CWD/Git 隔离优先使用 CLI 自身能力；不支持时由 wrapper 兜底。
+	SupportsGitWorktree bool `json:"supports_git_worktree"`
+	SupportsAdditionalDirectories bool `json:"supports_additional_directories"`
 
-  supports_resume: boolean
-  supports_native_skill_loading: boolean
-  supports_surgical_edit: boolean
+	SupportsResume bool `json:"supports_resume"`
+	SupportsNativeSkillLoading bool `json:"supports_native_skill_loading"`
+	SupportsSurgicalEdit bool `json:"supports_surgical_edit"`
 
-  permission_mode: "strict" | "permissive" | "none"
-
-  context_window_hint?: number
-  cost_model?: CostModel
-
-  default_roles: AgentRole[]
+	// PermissionMode 是 provider 原生权限能力，不代表 runtime 一定允许使用。
+	PermissionMode PermissionMode `json:"permission_mode"`
+	ContextWindowHint int `json:"context_window_hint,omitempty"`
+	CostModel *CostModel `json:"cost_model,omitempty"`
+	// DefaultRoles 表示该 provider 默认适合承担哪些 agent 角色。
+	DefaultRoles []AgentRole `json:"default_roles"`
 }
 ```
 
@@ -539,34 +620,42 @@ AgentCapabilities {
 
 `AgentRunParams` 是 adapter 的稳定输入。它表达运行意图，不暴露 provider-specific flags。
 
-```ts
-AgentRunParams {
-  run_id: string
-  invocation_id: string
+```go
+type AgentRunParams struct {
+	// RunID 是 runtime run id；InvocationID 是上层 task phase invocation id。
+	RunID string `json:"run_id"`
+	InvocationID string `json:"invocation_id"`
 
-  cwd: string
-  worktree_id?: string
+	// CWD 是 agent 运行目录；WorktreeID 关联 Workspace/Merge 模块。
+	CWD string `json:"cwd"`
+	WorktreeID string `json:"worktree_id,omitempty"`
 
-  role: AgentRole
-  phase: "plan" | "execute" | "verify" | "conflict"
+	// Role / Phase 表达调度意图，不暴露 provider-specific flags。
+	Role AgentRole `json:"role"`
+	Phase AgentPhase `json:"phase"`
 
-  system_prompt: string
-  user_prompt: string
+	// SystemPrompt / UserPrompt 是 runtime 注入 provider 的最终提示词。
+	SystemPrompt string `json:"system_prompt"`
+	UserPrompt string `json:"user_prompt"`
 
-  context_pack_dir?: string
-  skill_dir?: string
+	// ContextPackDir 是 Ctx Agent 生成的只读上下文包目录。
+	ContextPackDir string `json:"context_pack_dir,omitempty"`
+	// SkillDir 是本次可注入 skill 的目录。
+	SkillDir string `json:"skill_dir,omitempty"`
 
-  allowed_tools?: ToolCapability[]
-  timeout_ms?: number
-  budget_limit?: BudgetLimit
+	AllowedTools []ToolCapability `json:"allowed_tools,omitempty"`
+	TimeoutMS int `json:"timeout_ms,omitempty"`
+	BudgetLimit *BudgetLimit `json:"budget_limit,omitempty"`
+	// OutputSchema 是 verifier/planner 等结构化输出的 JSON Schema。
+	OutputSchema *JSONSchema `json:"output_schema,omitempty"`
+	// Metadata 绑定 task graph provenance。
+	Metadata AgentRunMetadata `json:"metadata"`
+}
 
-  output_schema?: JsonSchema
-
-  metadata: {
-    task_id: string
-    attempt_id: string
-    requirement_refs: string[]
-  }
+type AgentRunMetadata struct {
+	TaskID string `json:"task_id"`
+	AttemptID string `json:"attempt_id"`
+	RequirementRefs []string `json:"requirement_refs"`
 }
 ```
 
@@ -584,62 +673,80 @@ claude -p --output-format stream-json --verbose --permission-mode <mode>
 
 `AgentEvent` 是 Runtime 向 Event Log、UI 和 projection 暴露的统一流式事件。
 
-```ts
-AgentEvent =
-  | AgentThinkingEvent
-  | AgentTextDeltaEvent
-  | AgentToolCallEvent
-  | AgentToolResultEvent
-  | AgentFileWriteEvent
-  | AgentErrorEvent
-  | AgentDoneEvent
+```go
+type AgentEventKind string
+
+const (
+	AgentEventThinking AgentEventKind = "thinking"
+	AgentEventTextDelta AgentEventKind = "text_delta"
+	AgentEventToolCall AgentEventKind = "tool_call"
+	AgentEventToolResult AgentEventKind = "tool_result"
+	AgentEventFileWrite AgentEventKind = "file_write"
+	AgentEventError AgentEventKind = "error"
+	AgentEventDone AgentEventKind = "done"
+)
+
+// AgentEvent 是 Go 后端持久化和推送给 Electron/React UI 的统一事件 envelope。
+type AgentEvent interface {
+	// Kind 返回事件类型，便于 Event Log、投影和前端渲染分发。
+	Kind() AgentEventKind
+	// RunID 返回所属 runtime run。
+	RunID() string
+}
 ```
 
 ### AgentThinkingEvent
 
-```ts
-AgentThinkingEvent {
-  type: "thinking"
-  run_id: string
-  text: string
-  raw?: unknown
+```go
+type AgentThinkingEvent struct {
+	// Type 固定为 "thinking"，表示模型思考或中间推理摘要。
+	Type AgentEventKind `json:"type"`
+	RunIDValue string `json:"run_id"`
+	Text string `json:"text"`
+	// Raw 保留 provider 原始事件，便于审计和 parser 修正。
+	Raw any `json:"raw,omitempty"`
 }
 ```
 
 ### AgentTextDeltaEvent
 
-```ts
-AgentTextDeltaEvent {
-  type: "text_delta"
-  run_id: string
-  text: string
-  raw?: unknown
+```go
+type AgentTextDeltaEvent struct {
+	// Type 固定为 "text_delta"，表示可展示文本增量。
+	Type AgentEventKind `json:"type"`
+	RunIDValue string `json:"run_id"`
+	Text string `json:"text"`
+	Raw any `json:"raw,omitempty"`
 }
 ```
 
 ### AgentToolCallEvent
 
-```ts
-AgentToolCallEvent {
-  type: "tool_call"
-  run_id: string
-  tool_call_id?: string
-  name: string
-  input?: unknown
-  raw?: unknown
+```go
+type AgentToolCallEvent struct {
+	// Type 固定为 "tool_call"，表示 agent 请求调用工具。
+	Type AgentEventKind `json:"type"`
+	RunIDValue string `json:"run_id"`
+	// ToolCallID 用于把 call 与 result 关联起来。
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	Name string `json:"name"`
+	Input any `json:"input,omitempty"`
+	Raw any `json:"raw,omitempty"`
 }
 ```
 
 ### AgentToolResultEvent
 
-```ts
-AgentToolResultEvent {
-  type: "tool_result"
-  run_id: string
-  tool_call_id?: string
-  output?: unknown
-  is_error?: boolean
-  raw?: unknown
+```go
+type AgentToolResultEvent struct {
+	// Type 固定为 "tool_result"，表示工具调用结果。
+	Type AgentEventKind `json:"type"`
+	RunIDValue string `json:"run_id"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	Output any `json:"output,omitempty"`
+	// IsError 表示工具执行失败，但不一定代表整个 run 失败。
+	IsError bool `json:"is_error,omitempty"`
+	Raw any `json:"raw,omitempty"`
 }
 ```
 
@@ -647,35 +754,38 @@ AgentToolResultEvent {
 
 如果 provider 没有原生 file write event，Runtime 可以通过 write-set 观察合成该事件。
 
-```ts
-AgentFileWriteEvent {
-  type: "file_write"
-  run_id: string
-  path: string
-  operation?: "create" | "modify" | "delete"
-  raw?: unknown
+```go
+type AgentFileWriteEvent struct {
+	// Type 固定为 "file_write"；provider 不支持时由 runtime write-set 观察合成。
+	Type AgentEventKind `json:"type"`
+	RunIDValue string `json:"run_id"`
+	Path string `json:"path"`
+	Operation FileOperation `json:"operation,omitempty"`
+	Raw any `json:"raw,omitempty"`
 }
 ```
 
 ### AgentErrorEvent
 
-```ts
-AgentErrorEvent {
-  type: "error"
-  run_id: string
-  message: string
-  raw?: unknown
+```go
+type AgentErrorEvent struct {
+	// Type 固定为 "error"，表示 provider/runtime 层错误。
+	Type AgentEventKind `json:"type"`
+	RunIDValue string `json:"run_id"`
+	Message string `json:"message"`
+	Raw any `json:"raw,omitempty"`
 }
 ```
 
 ### AgentDoneEvent
 
-```ts
-AgentDoneEvent {
-  type: "done"
-  run_id: string
-  reason: "completed" | "cancelled" | "error" | "timeout"
-  raw?: unknown
+```go
+type AgentDoneEvent struct {
+	// Type 固定为 "done"，表示 run 事件流结束。
+	Type AgentEventKind `json:"type"`
+	RunIDValue string `json:"run_id"`
+	Reason AgentDoneReason `json:"reason"`
+	Raw any `json:"raw,omitempty"`
 }
 ```
 
@@ -694,43 +804,38 @@ AgentDoneEvent {
 
 `AgentResult` 是一次 invocation 的最终汇总。
 
-```ts
-AgentResult {
-  invocation_id: string
-  run_id: string
-  task_id: string
-  attempt_id: string
-  phase: "plan" | "execute" | "verify" | "conflict"
+```go
+type AgentResult struct {
+	// InvocationID / RunID 连接 task phase invocation 与 runtime run。
+	InvocationID string `json:"invocation_id"`
+	RunID string `json:"run_id"`
+	TaskID string `json:"task_id"`
+	AttemptID string `json:"attempt_id"`
+	Phase AgentPhase `json:"phase"`
 
-  status:
-    | "succeeded"
-    | "failed"
-    | "needs_replan"
-    | "expanded_task_graph"
-    | "blocked"
-    | "conflict_detected"
-    | "cancelled"
-    | "timeout"
+	// Status 是本次 invocation 的业务汇总状态。
+	Status AgentResultStatus `json:"status"`
+	Summary string `json:"summary"`
+	// StructuredOutput 保存通过 output schema 解析出的结构化结果。
+	StructuredOutput any `json:"structured_output,omitempty"`
 
-  summary: string
-  structured_output?: unknown
+	// TouchedFilesDeclared 是 agent 自报的修改范围。
+	TouchedFilesDeclared []string `json:"touched_files_declared"`
+	// TouchedFilesObserved 是 Runtime 从 git/write-set 观察到的真实修改范围。
+	TouchedFilesObserved []string `json:"touched_files_observed"`
 
-  // agent 声明的修改范围和 Runtime 观察到的真实修改范围。
-  touched_files_declared: string[]
-  touched_files_observed: string[]
+	// SubmittedRequirementRefs 是 agent 提交给 Task Manager 的 requirement；agent 不直接写 task/edge。
+	SubmittedRequirementRefs []string `json:"submitted_requirement_refs"`
+	ContextQueries []string `json:"context_queries"`
+	ArtifactRefs []string `json:"artifact_refs"`
+	EventRefs []string `json:"event_refs"`
+	Usage *AgentUsage `json:"usage,omitempty"`
+}
 
-  // agent 不能直接创建 task / edge，只能提交 requirement 请求。
-  submitted_requirement_refs: string[]
-
-  context_queries: string[]
-  artifact_refs: string[]
-  event_refs: string[]
-
-  usage?: {
-    duration_ms?: number
-    token_usage?: unknown
-    cost_usd?: number
-  }
+type AgentUsage struct {
+	DurationMS int `json:"duration_ms,omitempty"`
+	TokenUsage any `json:"token_usage,omitempty"`
+	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 ```
 
@@ -788,26 +893,35 @@ Task Contract
 
 Workspace 绑定：
 
-```ts
-WorkspaceBinding {
-  worktree_id: string
-  cwd: string
-  base_ref: string
-  branch_name?: string
-  writable_roots: string[]
-  readable_roots: string[]
+```go
+type WorkspaceBinding struct {
+	// WorktreeID 关联 Workspace/Merge 模块中的隔离工作区。
+	WorktreeID string `json:"worktree_id"`
+	// CWD 是实际传给 CLI agent 的执行目录。
+	CWD string `json:"cwd"`
+	// BaseRef 是 attempt 起始 commit / ref。
+	BaseRef string `json:"base_ref"`
+	// BranchName 是可选的 git 分支名。
+	BranchName string `json:"branch_name,omitempty"`
+	// WritableRoots 是 agent 被允许写入的目录白名单。
+	WritableRoots []string `json:"writable_roots"`
+	// ReadableRoots 是 agent 被允许读取的目录白名单。
+	ReadableRoots []string `json:"readable_roots"`
 }
 ```
 
 观察结果：
 
-```ts
-ObservedWriteSet {
-  worktree_id: string
-  changed_files: string[]
-  created_files: string[]
-  deleted_files: string[]
-  diff_artifact_ref?: string
+```go
+type ObservedWriteSet struct {
+	// WorktreeID 标识被观察的隔离工作区。
+	WorktreeID string `json:"worktree_id"`
+	// ChangedFiles / CreatedFiles / DeletedFiles 来自 git diff 或文件系统观察。
+	ChangedFiles []string `json:"changed_files"`
+	CreatedFiles []string `json:"created_files"`
+	DeletedFiles []string `json:"deleted_files"`
+	// DiffArtifactRef 指向 Artifact Store 中的大 diff/patch。
+	DiffArtifactRef string `json:"diff_artifact_ref,omitempty"`
 }
 ```
 
@@ -831,12 +945,19 @@ Runtime 不依赖 agent session memory。每次 invocation 都显式注入必要
 
 Skill 注入支持多种模式：
 
-```ts
-SkillInjectionMode =
-  | "native"       // 安装或 symlink 到 agent 原生 skill 目录。
-  | "prompt"       // 将 SKILL.md / references inline 到 prompt。
-  | "project_file" // 写入 .cursorrules 等 agent-specific 文件。
-  | "unsupported"
+```go
+type SkillInjectionMode string
+
+const (
+	// SkillInjectionNative 表示安装或 symlink 到 agent 原生 skill 目录。
+	SkillInjectionNative SkillInjectionMode = "native"
+	// SkillInjectionPrompt 表示将 SKILL.md / references inline 到 prompt。
+	SkillInjectionPrompt SkillInjectionMode = "prompt"
+	// SkillInjectionProjectFile 表示写入 .cursorrules 等 agent-specific 项目文件。
+	SkillInjectionProjectFile SkillInjectionMode = "project_file"
+	// SkillInjectionUnsupported 表示该 provider 不支持 skill 注入。
+	SkillInjectionUnsupported SkillInjectionMode = "unsupported"
+)
 ```
 
 选择规则：
@@ -854,25 +975,23 @@ SkillInjectionMode =
 
 Runtime 用统一策略表达权限意图，adapter 负责翻译成具体 CLI flags。
 
-```ts
-ToolCapability {
-  name: string
-  matcher?: string
-  mode: "allow" | "deny"
+```go
+type ToolCapability struct {
+	// Name 是工具能力名，例如 shell、file_edit、mcp:server。
+	Name string `json:"name"`
+	// Matcher 是可选匹配规则，用于限制命令、路径或 MCP tool 名称。
+	Matcher string `json:"matcher,omitempty"`
+	// Mode 明确允许或拒绝；默认值不应被当作 allow。
+	Mode ToolCapabilityMode `json:"mode"`
 }
 ```
 
-```ts
-PermissionPolicy {
-  mode:
-    | "default"
-    | "plan"
-    | "accept_edits"
-    | "auto"
-    | "dont_ask"
-    | "bypass"
-
-  require_human_approval_for_high_risk: boolean
+```go
+type PermissionPolicy struct {
+	// Mode 是 runtime 允许的权限等级；危险 provider flag 必须经过这里收口。
+	Mode PermissionMode `json:"mode"`
+	// RequireHumanApprovalForHighRisk 表示 shell、跨目录写入、credential 访问等高风险动作需要人工批准。
+	RequireHumanApprovalForHighRisk bool `json:"require_human_approval_for_high_risk"`
 }
 ```
 
@@ -935,11 +1054,14 @@ MVP 不要求完整支持 Claude Code 的全部 flags，但必须保留 raw 事�
 
 Fallback 用于 adapter 不可用、认证失效、运行失败或 capability 不满足时。
 
-```ts
-FallbackPolicy {
-  allow_fallback: boolean
-  require_explicit_switch: boolean
-  candidates: string[]
+```go
+type FallbackPolicy struct {
+	// AllowFallback 表示当前 provider 不可用时是否允许切换候选 provider。
+	AllowFallback bool `json:"allow_fallback"`
+	// RequireExplicitSwitch 表示 fallback 必须产生显式事件，不能静默发生。
+	RequireExplicitSwitch bool `json:"require_explicit_switch"`
+	// Candidates 是按优先级排列的候选 provider id。
+	Candidates []string `json:"candidates"`
 }
 ```
 
@@ -961,15 +1083,15 @@ FallbackPolicy {
 ```text
 Task Graph 提供 task contract、phase、role、acceptance criteria 和状态。
 Agent Runtime 返回 AgentResult 和 event refs。
-Control Plane 只能路由结果；Task Graph 的状态、edge、blocker 写入仍由 Task Manager Agent 负责。
+Control Plane 只能路由结果；Task Graph 的状态、edge、blocker 写入仍由经 Agent Runtime 启动并授予 graph_write tool 的 Task Manager Agent 负责。
 ```
 
 ### Ctx Agent / Context Lib
 
 ```text
-Ctx Agent 为 invocation 选择 context pack。
+Ctx Manager Agent / Ctx Agent 也通过 Agent Runtime 运行，为 invocation 选择 context pack。
 Agent Runtime 只消费 context pack，不直接读写 ctxlib。
-agent 运行中需要更多上下文时，通过受控 ctx query 进入 Ctx Agent。
+agent 运行中需要更多上下文时，通过受控 ctx query 进入经 Agent Runtime 授权的 Ctx Manager Agent。
 ```
 
 ### Event Log / Artifact Store
@@ -993,16 +1115,18 @@ Merge Queue 只合并 verify passed 的 worktree diff；Agent Runtime 不执行 
 ```text
 1. Agent Runtime 是 CLI agent 的唯一启动入口。
 2. Scheduler / Task Graph 不依赖 provider-specific flags。
-3. agent 不直接写 Task Graph；只能提交 requirement。
-4. agent 不直接写 ctxlib；ctxlib 只从 Event Log / Artifact Store 提炼。
-5. agent 不直接修改 main branch。
-6. 每次 invocation 必须有 workspace/cwd 边界、role 边界和 tool/permission 边界。
-7. 每次 invocation 必须自动进入 Event Log。
-8. 大对象必须进入 Artifact Store，Event Log 只保存 ref。
-9. observed write set 以 Runtime 观察为准，agent 声明只能作为参考。
-10. verifier 不能自我批准同一 active context 的执行结果。
-11. fallback 不能静默发生。
-12. 第一阶段以 Claude Code adapter 跑通最小闭环，再扩展 Codex / Gemini / custom。
+3. 普通 worker agent 不直接写 Task Graph；只能提交 requirement。
+4. 只有经 Agent Runtime 授权的 Task Manager Agent 可以通过 graph_write service/tool 写 Task Graph。
+5. 普通 worker agent 不直接写 ctxlib；ctxlib 只从 Event Log / Artifact Store 提炼。
+6. 只有经 Agent Runtime 授权的 Ctx Manager Agent 可以通过 ctx service/tool 写 ctxlib。
+7. agent 不直接修改 main branch。
+8. 每次 invocation 必须有 workspace/cwd 边界、role 边界和 tool/permission 边界。
+9. 每次 invocation 必须自动进入 Event Log。
+10. 大对象必须进入 Artifact Store，Event Log 只保存 ref。
+11. observed write set 以 Runtime 观察为准，agent 声明只能作为参考。
+12. verifier 不能自我批准同一 active context 的执行结果。
+13. fallback 不能静默发生。
+14. 第一阶段以 Claude Code adapter 跑通最小闭环，再扩展 Codex / Gemini / custom。
 ```
 
 ---

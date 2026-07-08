@@ -1,7 +1,7 @@
 # Multi-Agent Vibe Coding Control Plane 总体架构
 
-版本：v0.2  
-状态：Draft  
+版本：v0.2
+状态：Draft
 定位：本文件只描述产品判断、总体架构、模块简述和模块间关系。各模块详细设计见文末链接。
 
 ---
@@ -32,9 +32,9 @@
   我需要什么 + 我愿意投入多少钱/多少 agent/多少时间
 
 系统负责：
-  通过 Task Manager Agent 登记 requirement、创建任务并编排依赖
-  通过 Ctx Agent 控制上下文存取和运行时查询
-  通过 Agent Runtime 包装 CLI agent 自身的 worktree/tool/git 能力
+  通过 Agent Runtime 启动 Task Manager Agent，登记 requirement、创建任务并编排依赖
+  通过 Agent Runtime 启动 Ctx Manager Agent / Ctx Agent，控制上下文存取和运行时查询
+  通过 Agent Runtime 启动 planner / executor / verifier，并包装 CLI agent 自身的 worktree/tool/git 能力
   调度 agent、验收、处理冲突、合并
 ```
 
@@ -42,37 +42,40 @@
 
 ## 2. 核心目标
 
-1. **需求和并发解耦**  
+1. **需求和并发解耦**
    用户发布新任务，不等于手动开启新 agent；用户点击 `agent +1`，也不等于给某个 agent 分配具体任务。
 
-2. **第一阶段先支持 Claude Code 基本包装**  
+2. **第一阶段先支持 Claude Code 基本包装**
    MVP 不先追求同时接入所有 CLI agent，而是先把 Claude Code CLI 的 headless 启动、输入输出、事件记录和能力声明跑通。
 
-3. **worktree 属于 agent CLI 能力包装的一部分**  
+3. **所有 agent 都经 Agent Runtime 运行**
+   Task Manager Agent、Ctx Manager Agent / Ctx Agent、planner、executor、verifier 都不是旁路服务；它们都是 Agent Runtime 管理的 agent invocation。差异只在 role、system prompt、context pack、tool/capability 授权和可调用的 backend service。
+
+4. **worktree 属于 agent CLI 能力包装的一部分**
    系统不在 task graph 里重新实现一套独立 worktree 抽象；Agent Runtime 负责包装 CLI agent 自身的 worktree、tool、git 和执行目录能力，并把结果归一化给上层调度。
 
-4. **用 task graph 管理工作，而不是用 session 管理工作**
+5. **用 task graph 管理工作，而不是用 session 管理工作**
    用户输入是 requirement；task graph 只包含统一的 task 节点，拆解、依赖、阻塞和冲突都通过图关系表达。
 
-5. **所有 requirement 都经 Task Manager Agent 编排成 task graph**
+6. **所有 requirement 都经 Task Manager Agent 编排成 task graph**
    创建或更新 task graph 需要看到当前所有 task 及其状态，避免重复、错误依赖和不可验收拆分；人类和其他 agent 都向 Task Manager Agent 提交 requirement，由它统一创建 task、state node、edge 或 blocker。
 
-6. **用 ctxlib 管理项目记忆，而不是依赖 session memory**  
+7. **用 ctxlib 管理项目记忆，而不是依赖 session memory**
    所有有价值的设计、判断、验收、失败和冲突信息沉淀到结构化上下文库。
 
-7. **ctxlib 存取由 Ctx Agent 控制**  
+8. **ctxlib 存取由 Ctx Manager Agent / Ctx Agent 控制**
    新 agent 启动前的 context pack 和运行中其他 agent 的 ctxlib 查询，都通过 Ctx Agent 受控访问。
 
-8. **每个 task 用 CLI agent 包装出来的 worktree 能力隔离执行**  
+9. **每个 task 用 CLI agent 包装出来的 worktree 能力隔离执行**
    agent 不直接修改 main；verify 通过后进入 merge queue。
 
-9. **复杂任务允许通过提交 requirement 扩展 task graph 作为交付**
+10. **复杂任务允许通过提交 requirement 扩展 task graph 作为交付**
    执行 task 的 planner / executor / verifier 不必一次性解决所有细节，可以向 Task Manager Agent 提交新的 requirement；Task Manager Agent 负责把这些 requirement 编排成 task 节点、状态子图依赖、阻塞和拆解关系。
 
-10. **verify 是进入项目事实的闸门**  
+11. **verify 是进入项目事实的闸门**
    task 只有通过验收后才允许 merge；失败则回到 plan 循环。
 
-11. **并发冲突由系统协调**  
+12. **并发冲突由系统协调**
    verify/merge 阶段检查活跃 task，如果冲突则广播 conflict context 给相关 active task，避免互相等待和死锁。
 
 ---
@@ -102,14 +105,20 @@
 ┌──────────────────────────────────────────────┐
 │                 Control Plane                │
 │  Scheduler / Policy / Budget / Orchestration │
+└───────────────────────┬──────────────────────┘
+                        │ AgentRunParams(role/capability/tool policy)
+                        ▼
+┌──────────────────────────────────────────────┐
+│                 Agent Runtime                │
+│  invoke / permission / tool boundary / events│
 └───────┬──────────────┬──────────────┬────────┘
         │              │              │
         ▼              ▼              ▼
 ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-│ Task Manager │ │  Ctx Agent   │ │ Agent Runtime│
-│ Agent        │ │              │ │ CLI Wrappers │
+│ Task Manager │ │ Ctx Manager  │ │ Worker Agents│
+│ Agent        │ │ Agent        │ │ plan/exec/ver│
 └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
-       │                │                │
+       │graph_write     │ctx_read/write  │worktree/tools
        ▼                ▼                ▼
 ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
 │ Task Graph   │ │ Context Lib  │ │ CLI Worktree │
@@ -131,9 +140,10 @@
 一句话概括：
 
 ```text
+Agent Runtime 是所有 agent invocation 的统一入口，包括 Task Manager Agent、Ctx Manager Agent 和 worker agents。
 Task Manager Agent 接收 requirement，并决定是否以及如何编排成 task / state node / edge / blocker。
 Task Graph 记录现在有哪些 task、状态是什么、谁阻塞谁。
-Ctx Agent 决定 agent 应该知道什么，以及运行中能查什么。
+Ctx Manager Agent / Ctx Agent 决定 agent 应该知道什么，以及运行中能查什么。
 Context Lib 保存可复用的项目记忆。
 Agent Runtime 决定谁来做，并包装 CLI agent 自身的 worktree/tool/git 能力。
 Verifier 和 Merge Queue 决定什么能进入项目事实。
@@ -142,11 +152,33 @@ Event Log 决定系统如何追溯和复盘。
 
 ---
 
+## 4.1 技术栈边界
+
+本项目技术栈确定为：**Go backend + Electron shell + React/TypeScript/Vite frontend**。
+
+```text
+Go backend
+  - 承载 Control Plane、Task Manager Agent、Task Graph、Ctx Agent、ctxlib、Agent Runtime、Event/Artifact Store、Workspace/Merge Queue。
+  - 后端接口、领域模型、调度状态机和权限策略以 Go 类型为设计源头。
+
+Electron shell
+  - 负责桌面壳、窗口生命周期、本地进程启动入口和与 Go backend 的本机通信边界。
+  - 不承载核心调度规则，不直接写 task graph / ctxlib。
+
+React + TypeScript + Vite frontend
+  - 负责需求输入、task graph 可视化、agent 状态、日志流、diff/test 证据和人工审批 UI。
+  - TypeScript 类型应从 Go backend API schema 生成或镜像，不作为核心领域模型的唯一事实来源。
+```
+
+文档中的接口设计代码块默认以 Go backend 为准；只有 Electron/React/Vite 专属 UI 代码才使用 TypeScript。
+
+---
+
 ## 5. 模块简述
 
 ## 5.1 Human UI
 
-Human UI 面向用户，不暴露底层 session，而暴露需求、预算、agent capacity、task graph、active agents、verify 状态和 merge 状态。
+Human UI 由 Electron shell 承载 React/TypeScript/Vite frontend，面向用户不暴露底层 session，而暴露需求、预算、agent capacity、task graph、active agents、verify 状态和 merge 状态。
 
 核心操作：
 
@@ -164,14 +196,14 @@ Human UI 面向用户，不暴露底层 session，而暴露需求、预算、age
 
 ## 5.2 Control Plane
 
-Control Plane 是调度中枢，负责把用户需求、预算和 agent capacity 转成可执行调度。
+Control Plane 是 Go backend 中的调度中枢，负责把用户需求、预算和 agent capacity 转成可执行调度。
 
-它不直接创建 task，也不直接读写 ctxlib；这些动作分别通过专门 agent 完成：
+它不直接创建 task，也不直接读写 ctxlib；这些动作分别通过 Agent Runtime 启动的专门 agent 完成：
 
 ```text
-Control Plane -> Task Manager Agent：提交 / 登记 requirement，由 Task Manager 编排 task、state node、edge、blocker 或 task 状态更新。
-Control Plane -> Ctx Agent：请求为某个 task phase 选择 context pack，或处理运行时 ctx 查询。
-Control Plane -> Agent Runtime：启动 Claude Code planner / executor / verifier 等 CLI worker。
+Control Plane -> Agent Runtime(role=task_manager)：提交 / 登记 requirement，由 Task Manager Agent 编排 task、state node、edge、blocker 或 task 状态更新。
+Control Plane -> Agent Runtime(role=ctx_manager)：请求 Ctx Manager Agent 为某个 task phase 选择 context pack，或处理运行时 ctx 查询。
+Control Plane -> Agent Runtime(role=planner/executor/verifier)：启动 Claude Code planner / executor / verifier 等 CLI worker。
 Control Plane -> Merge Queue：提交 verify passed 的结果进入合并流程。
 Control Plane -> Event Log：记录所有关键事件。
 ```
@@ -182,7 +214,7 @@ Control Plane -> Event Log：记录所有关键事件。
 
 ## 5.3 Task Manager Agent / Task Graph
 
-Task Manager Agent 是 task graph 的唯一写入口。把 requirement 编排成 task graph 变更之前，它必须看到当前所有 task 及其状态，判断新 task 是否重复、是否应该拆分、依赖谁、会阻塞谁，以及验收标准是否足够清晰。
+Task Manager Agent 是 task graph 的唯一写入口，同时它自己也是经 Agent Runtime 启动和记录的系统 agent。把 requirement 编排成 task graph 变更之前，它必须看到当前所有 task 及其状态，判断新 task 是否重复、是否应该拆分、依赖谁、会阻塞谁，以及验收标准是否足够清晰。
 
 Task Graph 是工作结构的存储和状态机。
 
@@ -199,7 +231,7 @@ Task Graph 是工作结构的存储和状态机。
 
 ## 5.4 Agent Runtime
 
-Agent Runtime 将 Claude Code、Codex、Gemini CLI 等不同 CLI agent 包装成统一 worker。第一阶段只实现 Claude Code 的基本包装。
+Agent Runtime 位于 Go backend，是所有 agent 的统一运行入口。它将 Claude Code、Codex、Gemini CLI 等不同 CLI agent 包装成统一 worker，也用同一套 invocation / permission / event / artifact 机制运行 Task Manager Agent 和 Ctx Manager Agent。第一阶段只实现 Claude Code 的基本包装。
 
 统一不是指能力完全相同，而是每个 agent 暴露 capability profile，并把 CLI 自身能力包装给上层：
 
@@ -222,7 +254,9 @@ worktree 不作为独立于 agent 的抽象先行实现，而是先落在 Claude
 
 ## 5.5 Ctx Agent / Context Lib
 
-Ctx Agent 是 ctxlib 的唯一受控访问入口。它以 Event Log 为唯一数据来源构建 ctxlib（读 log、策展、去重、supersede、标注），对外只提供受控的 context pack 构建和查询。其他 agent 不直接读写 ctxlib，也不向 ctxlib 推送内容——它们的活动被自动记入 log，再由 Ctx Agent 从 log 中提炼。
+Ctx Manager Agent 是 runtime role 名称；Ctx Agent 是早期文档沿用的模块简称。
+
+Ctx Manager Agent / Ctx Agent 是 ctxlib 的唯一受控访问入口，同时它自己也是经 Agent Runtime 启动和记录的系统 agent。它以 Event Log 为唯一数据来源构建 ctxlib（读 log、策展、去重、supersede、标注），对外只提供受控的 context pack 构建和查询。其他 agent 不直接读写 ctxlib，也不向 ctxlib 推送内容——它们的活动被自动记入 log，再由 Ctx Agent 从 log 中提炼。
 
 Context Lib 是项目级上下文库，用来替代 session memory。它存储经过提取、标注和验证的项目记忆，例如：
 
@@ -309,10 +343,11 @@ Artifact Store 保存大对象：
 
 ```text
 Human UI 或其他 agent
+  -> Agent Runtime(role=task_manager)
   -> Task Manager Agent（查看全局 task，去重、编排依赖）
   -> Task Graph 写入 requirement / task / state node / edge
   -> Ctx Agent 选择初始 context pack
-  -> Scheduler 决定何时启动 planner
+  -> Scheduler 决定何时向 Agent Runtime 提交 planner AgentRunParams
 ```
 
 关键判断：提交需求只是把 requirement 放入系统，并由 Task Manager Agent 决定是否创建 / 更新 task graph；这不等于立即开一个新 session。
@@ -336,9 +371,9 @@ Human UI: agent +1
 
 ```text
 Task Graph 提供 task contract
-  -> Ctx Agent 生成 context pack
+  -> Agent Runtime(role=ctx_manager) 启动 Ctx Manager Agent 生成 context pack
   -> Agent Runtime 在包装出的 worktree 隔离环境启动 plan / execute / verify agent
-  -> 运行中 agent 需要更多上下文时 -> 通过 Ctx Agent 查询 ctxlib
+  -> 运行中 agent 需要更多上下文时 -> 通过 Agent Runtime(role=ctx_manager) 受控查询 ctxlib
   -> Event Log 记录过程
   -> Verify 通过后进入 Merge Queue
 ```
@@ -349,7 +384,7 @@ Task Graph 提供 task contract
 
 ```text
 Planner / Executor / Verifier 发现当前 task 需要拆解、补工作或补验收
-  -> 向 Task Manager Agent 提交新的 requirement（严格模式，带 client_ref 和触发证据）
+  -> 通过 Agent Runtime(role=task_manager) 向 Task Manager Agent 提交新的 requirement（严格模式，带 client_ref 和触发证据）
   -> Task Manager Agent 校验 requirement，并编排 task / state node / edge / blocker
   -> 当前 task 或当前 phase endpoint 进入 blocked（如果需要等待新增 task、特定状态或决策）
   -> Scheduler 调度新增 task 或等待依赖 endpoint 满足
@@ -365,7 +400,7 @@ Planner / Executor / Verifier 发现当前 task 需要拆解、补工作或补�
 ```text
 Agent 输出 summary / verify failure / merge result
   -> Event Log 自动记录这些活动（agent 无需显式写日志）
-  -> Ctx Agent（含 Context Curator）从 log 提取 context block
+  -> Agent Runtime(role=ctx_manager) 启动 Ctx Manager Agent（含 Context Curator）从 log 提取 context block
   -> Context Lib 标注、去重、supersede
   -> 后续 task phase 由 Ctx Agent 选择 context pack
 ```
@@ -391,20 +426,21 @@ Task A verify passed
 ## 7. 架构不变量
 
 ```text
-1. task 未通过 verify 不得 merge。
-2. agent 不拥有长期记忆，ctxlib 拥有长期记忆。
-3. agent 启动不加载全量 ctxlib。
-4. 每个 task attempt 在 agent runtime 包装出的隔离环境执行。
-5. execute 不直接修改 main。
-6. verify agent 不自我批准 execute 结果。
-7. 通过提交 requirement 扩展 task graph 是复杂任务的合法交付。
-8. blocked 不是 failed。
-9. merge 后必须产生可追溯事件和上下文沉淀。
-10. 用户控制需求和资源，系统控制调度细节。
-11. task graph 只能由 Task Manager Agent 写入。
-12. planner / executor / verifier 不直接创建 task / edge；依赖关系由 Task Manager Agent 编排。
-13. task 状态变换可视为状态子图，依赖可以指向 task 的 phase / status endpoint。
-14. ctxlib 只能由 Ctx Agent 读写。
+1. 所有 agent invocation 都必须经 Agent Runtime，包括 Task Manager Agent、Ctx Manager Agent、planner、executor、verifier。
+2. task 未通过 verify 不得 merge。
+3. agent 不拥有长期记忆，ctxlib 拥有长期记忆。
+4. agent 启动不加载全量 ctxlib。
+5. 每个 task attempt 在 agent runtime 包装出的隔离环境执行。
+6. execute 不直接修改 main。
+7. verify agent 不自我批准 execute 结果。
+8. 通过提交 requirement 扩展 task graph 是复杂任务的合法交付。
+9. blocked 不是 failed。
+10. merge 后必须产生可追溯事件和上下文沉淀。
+11. 用户控制需求和资源，系统控制调度细节。
+12. task graph 只能由经 Agent Runtime 授权的 Task Manager Agent 写入。
+13. planner / executor / verifier 不直接创建 task / edge；依赖关系由 Task Manager Agent 编排。
+14. task 状态变换可视为状态子图，依赖可以指向 task 的 phase / status endpoint。
+15. ctxlib 只能由经 Agent Runtime 授权的 Ctx Manager Agent / Ctx Agent 读写。
 ```
 
 ---
@@ -414,9 +450,9 @@ Task A verify passed
 ```text
 MVP 0：Claude Code wrapper + Task Graph + CtxLib（第一步）
   - 基本包装 Claude Code CLI（headless 启动、输入输出、事件记录、能力声明）。
-  - Task Manager Agent：能看到全部 task 及状态，作为 task 创建的唯一入口。
+  - Task Manager Agent：经 Agent Runtime 启动，能看到全部 task 及状态，作为 task 创建的唯一入口。
   - Task Graph 调度：task 状态机、依赖、阻塞、基本推进。
-  - Ctx Agent + CtxLib：context block 的基本存取和受控查询。
+  - Ctx Manager Agent + CtxLib：经 Agent Runtime 启动，提供 context block 的基本存取和受控查询。
   worktree/tool/git 先作为 Claude Code wrapper 的能力包装，不单独抽象。
 
 MVP 1：Context Pack

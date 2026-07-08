@@ -1,6 +1,6 @@
 # Workspace / Git / Merge Queue 详细设计
 
-版本：v0.1  
+版本：v0.1
 状态：Draft
 
 ---
@@ -16,41 +16,38 @@ worktree 隔离本身不在这里单独实现。第一阶段 worktree、branch�
 ## 2. 基本规则
 
 ```text
-1. 每个 task attempt 在 Agent Runtime 包装出的 worktree/cwd 隔离环境中执行。
+1. 每个 task attempt 在 Agent Runtime 包装出的 worktree/cwd 隔离环境中执行；planner / executor / verifier 都是 Agent Runtime invocation。
 2. agent 只能在自己被分配的隔离环境中修改。
 3. main branch 只能由 merge queue 修改。
 4. task verify 通过后才允许进入 merge queue。
 5. merge 前需要基于最新 main 重新验证。
 6. merge 前需要检查 active conflicts。
-7. merge 结果作为事件被自动记入 Event Log；ctxlib 由 Ctx Agent 从 log 提炼，merge 不直接写 ctxlib。
+7. merge 结果作为事件被自动记入 Event Log；ctxlib 由经 Agent Runtime 启动的 Ctx Manager Agent 从 log 提炼，merge 不直接写 ctxlib。
 ```
 
 ---
 
 ## 3. Worktree 数据模型
 
-```ts
-Worktree {
-  id: string
-  task_id: string
-  attempt_id: string
+```go
+type Worktree struct {
+	// ID 是隔离工作区标识。
+	ID string `json:"id"`
+	TaskID string `json:"task_id"`
+	AttemptID string `json:"attempt_id"`
 
-  path: string
-  branch_name: string
+	// Path 是本地 worktree 路径，由 Go 后端管理，Electron UI 只展示。
+	Path string `json:"path"`
+	// BranchName 是该 attempt 对应的 git 分支名。
+	BranchName string `json:"branch_name"`
 
-  base_commit: string
-  head_commit?: string
+	BaseCommit string `json:"base_commit"`
+	HeadCommit string `json:"head_commit,omitempty"`
 
-  status:
-    | "created"
-    | "active"
-    | "verifying"
-    | "merge_queued"
-    | "merged"
-    | "abandoned"
-
-  created_at: string
-  updated_at: string
+	// Status 是 worktree 生命周期状态，不等于 task 状态。
+	Status WorktreeStatus `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 ```
 
@@ -95,7 +92,7 @@ Merge Queue 负责把 verify passed 的 task 串行合入 main。
 1. 未通过 verify 的 task 不得 merge。
 2. merge 前必须基于最新 main 重新检查。
 3. merge 前必须检查 active conflict。
-4. merge 结果记入 Event Log，ctxlib 由 Ctx Agent 从 log 提炼（merge 不直接写 ctxlib）。
+4. merge 结果记入 Event Log，ctxlib 由经 Agent Runtime 启动的 Ctx Manager Agent 从 log 提炼（merge 不直接写 ctxlib）。
 5. merge 后必须更新 task graph projection。
 ```
 
@@ -168,28 +165,27 @@ execute 后从 diff 中提取：
 
 当 Task A verify 通过并准备 merge，发现 Task B 仍活跃且有重叠，系统给 Task B 发送 conflict context。
 
-```ts
-ConflictContext {
-  source_task_id: string
-  target_task_id: string
+```go
+type ConflictContext struct {
+	// SourceTaskID 是已经 verify passed / queued / merged 的来源 task。
+	SourceTaskID string `json:"source_task_id"`
+	// TargetTaskID 是需要适配或重新规划的活跃 task。
+	TargetTaskID string `json:"target_task_id"`
 
-  source_status: "verify_passed" | "merge_queued" | "merged"
+	SourceStatus SourceMergeStatus `json:"source_status"`
 
-  changed_files: string[]
-  changed_modules: string[]
-  changed_contracts: string[]
+	// ChangedFiles / Modules / Contracts 描述冲突影响面。
+	ChangedFiles []string `json:"changed_files"`
+	ChangedModules []string `json:"changed_modules"`
+	ChangedContracts []string `json:"changed_contracts"`
 
-  diff_summary: string
-  decision_summary: string
+	DiffSummary string `json:"diff_summary"`
+	DecisionSummary string `json:"decision_summary"`
 
-  required_adaptation:
-    | "review_only"
-    | "rebase_required"
-    | "replan_required"
-    | "split_task_required"
-    | "stop_due_to_superseded"
-
-  evidence_refs: string[]
+	// RequiredAdaptation 是目标 task 必须采取的适配动作。
+	RequiredAdaptation RequiredAdaptation `json:"required_adaptation"`
+	// EvidenceRefs 指向 diff、test、merge decision 等证据。
+	EvidenceRefs []string `json:"evidence_refs"`
 }
 ```
 

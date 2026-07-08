@@ -1,13 +1,13 @@
 # Scheduler / Budget 详细设计
 
-版本：v0.1  
+版本：v0.1
 状态：Draft
 
 ---
 
 ## 1. 定位
 
-Scheduler 负责根据 task graph、agent capacity、预算、风险和依赖关系决定下一步启动什么。
+Scheduler 负责根据 task graph、agent capacity、预算、风险和依赖关系决定下一步启动什么。任何需要 agent 判断或生成的动作都不直接启动具体 agent，而是生成 AgentRunParams 交给 Agent Runtime。
 
 Budget Model 负责约束系统可投入的 token、时间、并发、retry 和 verify 强度。
 
@@ -34,7 +34,7 @@ Budget Model 负责约束系统可投入的 token、时间、并发、retry 和 
 - start planner
 - start executor
 - start verifier
-- create context pack
+- start ctx_manager to create context pack
 - create worktree
 - pause task
 - replan task
@@ -72,7 +72,7 @@ agent +1
 
 ```text
 增加 worker capacity。
-Scheduler 自动分配下一个合适 task phase。
+Scheduler 自动分配下一个合适 task phase，并通过 Agent Runtime 启动对应 role。
 ```
 
 这不是给新 agent 手动分配任务，而是增加系统吞吐。
@@ -89,7 +89,7 @@ Scheduler 自动分配下一个合适 task phase。
 
 ```text
 登记 requirement。
-由 Task Manager 编排 task / state node / edge。
+通过 Agent Runtime(role=task_manager) 由 Task Manager Agent 编排 task / state node / edge。
 根据依赖、状态 endpoint 和预算排入 task graph。
 不一定立刻启动 agent。
 ```
@@ -111,24 +111,23 @@ Scheduler 自动分配下一个合适 task phase。
 
 ### BudgetPolicy
 
-```ts
-BudgetPolicy {
-  max_tokens?: number
-  max_cost_usd?: number
-  max_wall_time_ms?: number
-  max_agent_invocations?: number
-  max_retries?: number
+```go
+type BudgetPolicy struct {
+	// MaxTokens 限制 prompt + completion token 总量。
+	MaxTokens int `json:"max_tokens,omitempty"`
+	// MaxCostUSD 限制本次任务或阶段预算。
+	MaxCostUSD float64 `json:"max_cost_usd,omitempty"`
+	// MaxWallTimeMS 限制墙钟时间。
+	MaxWallTimeMS int `json:"max_wall_time_ms,omitempty"`
+	// MaxAgentInvocations 限制可启动 agent 次数。
+	MaxAgentInvocations int `json:"max_agent_invocations,omitempty"`
+	// MaxRetries 限制失败重试次数。
+	MaxRetries int `json:"max_retries,omitempty"`
 
-  verify_level:
-    | "basic"
-    | "standard"
-    | "strict"
-    | "paranoid"
-
-  exploration_level:
-    | "low"
-    | "medium"
-    | "high"
+	// VerifyLevel 决定验收强度。
+	VerifyLevel VerifyLevel `json:"verify_level"`
+	// ExplorationLevel 决定探索/检索深度。
+	ExplorationLevel ExplorationLevel `json:"exploration_level"`
 }
 ```
 
@@ -186,5 +185,6 @@ Scheduler 应在以下情况触发重新 plan：
 3. 不让 execute 跳过 plan。
 4. 不让 merge 跳过 verify。
 5. agent capacity 只影响吞吐，不改变 task graph 语义或 Task Manager 的依赖编排权。
-6. budget 不足时优先保护 verify 和 merge，而不是继续开新探索。
+6. Scheduler 不直接启动任何 agent；它只向 Agent Runtime 提交 AgentRunParams，包括 task_manager、ctx_manager、planner、executor、verifier。
+7. budget 不足时优先保护 verify 和 merge，而不是继续开新探索。
 ```

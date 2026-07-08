@@ -11,7 +11,7 @@
 ```text
 1. 小内核：ContextBlock 只保留少量稳定字段，其余用开放结构表达。
 2. 单一来源：ctxlib 只从 Event Log / Artifact 构建，不接受 agent 直接写。
-3. 单一入口：对外只有 Ctx Agent，且只暴露 pack / query 两个只读操作。
+3. 单一入口：对外只有经 Agent Runtime 启动和授权的 Ctx Manager Agent / Ctx Agent，且只暴露 pack / query 两个只读操作。
 4. 缝在接口上：抽取、评分、存储都是可替换接口，扩展不改内核。
 5. 一切可追溯：每个 block 都指回它的来源事件 / artifact。
 ```
@@ -24,29 +24,23 @@
 
 只有一个核心类型。可扩展性来自两处：`scope` 用**前缀约定的开放标签**，`attributes` 用**开放键值**。新增维度不改 schema。
 
-```ts
-ContextBlock {
-  id: string
-  kind: string            // 开放字符串。原型约定：decision / summary / failure /
-                          // conflict / preference / rejected …；新增类型不改内核。
-
-  text: string            // 可直接注入的内容（摘要）。更长的正文/原始日志放 refs。
-
-  scope: string[]         // 开放标签，用前缀表达"它关于什么"：
-                          //   task:T123  module:ctxlib  file:src/x.ts
-                          //   phase:plan tag:api  ...
-                          // 新增一个维度 = 约定一个新前缀，无需改字段。
-
-  outdated: boolean       // 是否已过时。原型不表达版本链路，只标记可用性。
-
-  source_refs: string[]   // 指向 Event Log 事件 / Artifact 的证据，保证可追溯
-
-  attributes: Record<string, unknown>
-                          // 扩展位。confidence / freshness / importance /
-                          // visibility / risk 等都放这里。
-                          // 原型可以只填 confidence 和 created_at。
-
-  created_at: string
+```go
+type ContextBlock struct {
+	// ID 是上下文块稳定标识。
+	ID string `json:"id"`
+	// Kind 是开放字符串；原型约定 decision / summary / failure / conflict / preference / rejected 等。
+	Kind string `json:"kind"`
+	// Text 是可直接注入 prompt 的内容，通常是摘要、决策、失败原因或日志引用。
+	Text string `json:"text"`
+	// Scope 是轻量标签，用前缀表达“这段上下文关于什么”。
+	Scope []string `json:"scope"`
+	// Outdated 表示该 block 是否已过时。
+	Outdated bool `json:"outdated"`
+	// SourceRefs 指向 Event Log / Artifact 证据，保证上下文可追溯。
+	SourceRefs []string `json:"source_refs"`
+	// Attributes 是扩展位，例如 confidence、freshness、importance、visibility、risk。
+	Attributes map[string]any `json:"attributes"`
+	CreatedAt time.Time `json:"created_at"`
 }
 ```
 
@@ -62,33 +56,44 @@ ContextBlock {
 
 ## 3. Ctx Agent：唯一入口
 
-Ctx Agent 是 ctxlib 的唯一受控访问入口，也是唯一写入者。它以 **Event Log 为唯一数据来源**构建 ctxlib，对外只提供两个只读操作。其他 agent 不直接读写底层存储，也不推送内容——它们的活动被自动记入 log，由 Ctx Agent 从 log 提炼。
+Ctx Manager Agent / Ctx Agent 是 ctxlib 的唯一受控访问入口，也是唯一写入者。它本身经 Agent Runtime 启动、授权、观测和记录；它以 **Event Log 为唯一数据来源**构建 ctxlib，对外只提供两个只读操作。其他 agent 不直接读写底层存储，也不推送内容——它们的活动被自动记入 log，由 Ctx Agent 从 log 提炼。
 
-```ts
-// 启动前：为某个 task/phase 组装 context pack
-pack(req: {
-  task_id: string
-  phase: string
-  budget: number          // token 预算
-}) -> ContextResult
+```go
+type ContextService interface {
+	// Pack 在 agent 启动前为某个 task/phase 组装 context pack。
+	Pack(ctx context.Context, req ContextPackRequest) (ContextResult, error)
+	// Query 在运行中为受控 agent 提供按意图检索的上下文查询。
+	Query(ctx context.Context, req ContextQueryRequest) (ContextResult, error)
+}
 
-// 运行中：其他 agent 受控查询
-query(req: {
-  task_id: string
-  phase: string
-  intent?: string         // 可选，缩小检索目的（开放字符串）
-  scope?: string[]        // 可选，限定范围标签
-  budget: number
-}) -> ContextResult
+type ContextPackRequest struct {
+	TaskID string `json:"task_id"`
+	Phase string `json:"phase"`
+	// Budget 是 token/字符预算，由 Ctx Agent 用于裁剪注入内容。
+	Budget int `json:"budget"`
+}
 
-ContextResult {
-  blocks: ContextBlock[]      // 已选中、可注入
-  omitted: string[]           // 相关但因预算未注入的 block id（agent 可按需再查）
-  note?: "replan" | "human_decision" | null   // 发现矛盾时的建议
+type ContextQueryRequest struct {
+	TaskID string `json:"task_id"`
+	Phase string `json:"phase"`
+	// Intent 缩小检索目的，例如 api、conflict、decision。
+	Intent string `json:"intent,omitempty"`
+	// Scope 限定范围标签。
+	Scope []string `json:"scope,omitempty"`
+	Budget int `json:"budget"`
+}
+
+type ContextResult struct {
+	// Blocks 是已选中、可注入的上下文块。
+	Blocks []ContextBlock `json:"blocks"`
+	// Omitted 是相关但因预算未注入的 block id。
+	Omitted []string `json:"omitted"`
+	// Note 是发现矛盾时给调度层的建议，例如 replan 或 human_decision。
+	Note string `json:"note,omitempty"`
 }
 ```
 
-对外没有 write / outdated 标记操作。要沉淀记忆的 agent 只管正常做事,活动进 log,Ctx Agent 负责提炼；某条记忆是否过时也由 Ctx Agent 从 log 中判断。
+对外没有 write / outdated 标记操作。要沉淀记忆的 agent 只管正常做事，活动经 Agent Runtime 进入 log；Ctx Manager Agent 负责提炼；某条记忆是否过时也由 Ctx Agent 从 log 中判断。
 
 ---
 
@@ -98,8 +103,11 @@ ContextResult {
 
 ### 4.1 Extractor：log -> block（怎么产生记忆）
 
-```ts
-Extractor = (event: Event) => ContextBlock[]
+```go
+type Extractor interface {
+	// Extract 从 Event Log 事件中提炼可复用 ContextBlock。
+	Extract(ctx context.Context, event Event) ([]ContextBlock, error)
+}
 ```
 
 - 原型：几条规则型 extractor（verify 失败、merge 结果、人类需求）。
@@ -107,8 +115,11 @@ Extractor = (event: Event) => ContextBlock[]
 
 ### 4.2 Selector：给定请求挑 block（怎么取记忆）
 
-```ts
-Selector = (candidates: ContextBlock[], req: Request) => Ranked[]
+```go
+type Selector interface {
+	// Select 从候选上下文中按 task/phase/intent/budget 选择注入集合。
+	Select(ctx context.Context, candidates []ContextBlock, req ContextQueryRequest) ([]RankedContextBlock, error)
+}
 ```
 
 - 原型：`scope` 标签重叠 + 新鲜度 + 过滤 `outdated=true`，够用。
@@ -116,11 +127,14 @@ Selector = (candidates: ContextBlock[], req: Request) => Ranked[]
 
 ### 4.3 Store：底层存取（记忆存哪）
 
-```ts
-Store {
-  put(block): void
-  get(id): ContextBlock
-  find(filter): ContextBlock[]   // 按 kind/scope/outdated 粗筛
+```go
+type Store interface {
+	// Put 写入或更新上下文块；实现负责幂等和 supersede 关系。
+	Put(ctx context.Context, block ContextBlock) error
+	// Get 按 id 读取上下文块。
+	Get(ctx context.Context, id string) (ContextBlock, error)
+	// Find 按 kind/scope/outdated 等粗筛，排序交给 Selector。
+	Find(ctx context.Context, filter ContextFilter) ([]ContextBlock, error)
 }
 ```
 
@@ -132,12 +146,12 @@ Store {
 ## 5. 数据流
 
 ```text
-runtime 自动记录 agent 活动 / 状态变化
+Agent Runtime 自动记录所有 agent 活动 / 状态变化（包括 Ctx Manager Agent 自身）
   -> Event Log
        -> Extractor 提炼出 ContextBlock（去重、必要时标记旧 block 为 outdated）
        -> Store 保存
 
-Ctx Agent.pack / query
+Agent Runtime(role=ctx_manager) 调用 Ctx Agent.pack / query
   -> Store.find 粗筛候选
   -> Selector 排序 + 裁到 budget
   -> ContextResult（blocks + omitted + note）
@@ -164,8 +178,8 @@ agent_attempt
 
 ```text
 图节点执行体输出 Vec<Message>
-  -> Runtime 记录 AgentEvent / ArtifactRef
-  -> Ctx Agent 从 Event / Artifact 提炼 ContextBlock
+  -> Agent Runtime 记录 AgentEvent / ArtifactRef
+  -> Agent Runtime(role=ctx_manager) 启动 Ctx Manager Agent 从 Event / Artifact 提炼 ContextBlock
   -> pack / query 选择 ContextBlock，形成 ContextResult
   -> 下游图节点或 agent invocation 以 Message 形式消费 context_ref / text block
 ```
@@ -176,12 +190,13 @@ agent_attempt
 ## 6. 不变量
 
 ```text
-1. ctxlib 只从 Event Log / Artifact 构建，不接受 agent 直接写。
-2. 只有 Ctx Agent 能访问底层存储；对外只有 pack / query 两个只读操作。
+1. ctxlib 只从 Event Log / Artifact 构建，不接受普通 agent 直接写。
+2. 只有经 Agent Runtime 授权的 Ctx Manager Agent / Ctx Agent 能访问底层存储；对外只有 pack / query 两个只读操作。
 3. 每个 block 必须有 source_refs，可追溯到来源事件 / artifact。
 4. outdated block 默认不进 pack（除非显式查历史）。
 5. 扩展通过 Extractor / Selector / Store 三个接口完成，不改核心模型。
-6. 访问 ctxlib 的行为本身也被自动记入 log。
+6. 访问 ctxlib 的行为本身也被 Agent Runtime 自动记入 log。
+7. Ctx Manager Agent 不是 runtime 旁路；它与 planner / executor / verifier 一样是 Agent Runtime invocation，只是拥有 ctx_read / ctx_write capability。
 ```
 
 ---
