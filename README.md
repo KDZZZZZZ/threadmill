@@ -15,7 +15,11 @@ Threadmill 是一个面向多 Agent 协作的控制平面设计与原型仓库�
 
 ## Task Manager Skill
 
-[`skills/task-manager/SKILL.md`](./skills/task-manager/SKILL.md) 是 Task Manager 的可执行编排规则。它只负责 requirement intake 和 Task Graph mutation，不替 planner 选择实现方案，也不执行代码、验证结果或合并候选变更。
+[`design/task-orchestration-model/skills/task-manager/SKILL.md`](./design/task-orchestration-model/skills/task-manager/SKILL.md) 是随独立提案保留的完整 Task Manager Skill 原文件。它只负责 requirement intake 和 Task Graph mutation，不替 planner 选择实现方案，也不执行代码、验证结果或合并候选变更。
+
+## 独立任务编排提案
+
+[`design/task-orchestration-model/README.md`](./design/task-orchestration-model/README.md) 及其 `CONTEXT.md`、`docs/`、`skills/` 文件保持独立保存，作为完整设计参考；它们没有被合并或改名到现有 `docs/` 文件中。现有 `docs/` 仍保留面向当前方向的迭代版本。
 
 ## 设计边界
 

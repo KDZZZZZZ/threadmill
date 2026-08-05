@@ -1,13 +1,13 @@
 ---
 name: task-manager
-description: 把人类需求和运行中的新发现编排为 Threadmill Task Contract 与 Task Graph 变更，但不替 planner 发明实现方案。
+description: 把人类需求和运行中的新发现编排为 Threadmill Task Contract 与 Coordination Graph 变更，但不替 planner 发明实现方案。
 ---
 
 # Task Manager
 
-这个 Skill 只用于 requirement intake 和 Task Graph 变更。不要用它实现代码、编写执行计划、运行验证或合并候选变更。
+这个 Skill 只用于 requirement intake 和 Coordination Graph 变更。不要用它实现代码、编写执行计划、运行验证或合并候选变更。
 
-执行 graph mutation 前读取仓库的 [Task Graph 设计](../../docs/task-graph.md) 和 [Task Manager Agent 详细设计](../../docs/task-manager-agent.md)。如果两者冲突，停止写入并报告冲突，不能用 prompt 中的临时解释覆盖仓库契约。
+执行 graph mutation 前读取仓库的[领域语言](../../CONTEXT.md)和 [Task Graph 语义](../../docs/task-graph.md)。需要构造 intake 或 mutation 数据时，再读取 [Task Manager Agent 数据契约](../../docs/task-manager-agent.md)。如果三者冲突，停止写入并报告冲突，不能用 prompt 中的临时解释覆盖仓库契约。
 
 ## 需要先取得的信息
 
@@ -23,7 +23,7 @@ agent requirement 缺少验收意图或证据时返回 `needs_fix`，不要自�
 
 ## 判断是否需要新 task
 
-默认把工作留在当前 phase 的内部执行步骤。只有具备下列至少一项，才建立持久 task：
+默认把工作留在当前 phase 的 Execution Graph。只有具备下列至少一项，才建立持久 task：
 
 1. 可以独立验收；
 2. 可以独立失败或重试；
@@ -65,9 +65,9 @@ tool call、文件读取、局部摘要以及同一已批准计划中的连续�
 
 任何一项答不出来，就不要写 edge。
 
-## 扩展 task，但不要过度拆分
+## 扩展 phase，但不要过度拆分
 
-phase 内部可以有多个 Agent 调用、工具调用和连续步骤，但这些步骤默认属于当前 phase 的实现细节。只有内部工作通过前面的 task boundary 检查，才把它提升为持久 task。
+一个 phase 可以由包含 agent、tool 和 subgraph node 的 Execution Graph 执行，并允许递归。只有内部工作通过了前面的 task boundary 检查，才把它提升为持久 task。
 
 运行中的 planner 发现新的持久工作时：
 
@@ -81,10 +81,10 @@ graph expansion 成功不等于来源 task 完成。
 
 ## 处理失败
 
-- 局部实现或验证失败：为同一 task 创建新 attempt；
-- Task Contract 不完整或自相矛盾：阻塞受影响 endpoint，请求澄清或重新立约；
-- verify 暴露出独立工作：登记新 task，并连到消费其结果的 endpoint；
-- candidate 相对新 revision 已过期：使旧验证失效，按影响重新 verify 或重新 plan；
+- 局部实现或验证失败：为同一 task 创建新 attempt。
+- Task Contract 不完整或自相矛盾：阻塞受影响 endpoint，请求澄清或重新立约。
+- verify 暴露出独立工作：登记新 task，并连到消费其结果的 endpoint。
+- candidate 相对新 revision 已过期：使旧验证失效，按影响重新 verify 或重新 plan。
 - 高风险决定缺少权限：创建或关联 human decision endpoint，不得推断已经批准。
 
 重试不是新 task。Task Contract 发生变化时，可以创建替代 task 或显式版本，但不得静默修改已经接受的验收条件。

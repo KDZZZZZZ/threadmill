@@ -9,7 +9,7 @@
 
 Task Manager Agent 是 task graph 的**唯一写入口**，也是所有 requirement intake 和 task graph 编排的网关。它不是绕过 runtime 的后台服务，而是经 Agent Runtime 启动、授权、观测和记录的系统 agent。
 
-本文件定义权责和数据契约；实际运行时的拆分判断、endpoint 选取、失败处理和反例检查见 [`task-manager` Skill](../skills/task-manager/SKILL.md)。两者冲突时，应先修正文档和 Skill，不能依赖 prompt 中的临时解释。
+本文件定义权责和数据契约；完整的独立 `task-manager` Skill 原文件见 [`design/task-orchestration-model/skills/task-manager/SKILL.md`](../design/task-orchestration-model/skills/task-manager/SKILL.md)。实际运行时的拆分判断、endpoint 选取、失败处理和反例检查以本文件第 15 节为当前文档约束。两者冲突时，应先修正文档和独立 Skill，不能依赖 prompt 中的临时解释。
 
 人类和其他 agent 都不直接写 task graph，而是通过 Agent Runtime(role=task_manager) 向 Task Manager Agent 提交 requirement。它在写入前拥有全局 task 视图，负责去重、依赖推断、阻塞关系判断、边界与验收校验。
 
