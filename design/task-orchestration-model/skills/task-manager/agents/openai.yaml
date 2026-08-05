@@ -1,4 +1,0 @@
-interface:
-  display_name: "Threadmill Task Manager"
-  short_description: "将需求编排为可验收任务、阶段端点、依赖关系与失败路径"
-  default_prompt: "使用 $task-manager 将这个需求编排为 Task Contract 和精确的 Coordination Graph 变更。"
