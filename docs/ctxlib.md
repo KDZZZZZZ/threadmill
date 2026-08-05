@@ -18,6 +18,20 @@
 
 一句话：**内核只回答"有哪些记忆、怎么取"，"记忆有多好、怎么排"交给可替换的策略。**
 
+临时 invocation 带来一个直接问题：新的 agent 从哪里知道已经确认的项目事实？把历史 transcript 全部塞回 prompt 既昂贵，也会把猜测、旧结论和失败尝试混在一起。
+
+Threadmill 把三类信息分开：
+
+```text
+Event Log 保存发生过什么；
+Artifact Store 保存 diff、测试输出和 transcript 等大对象；
+ctxlib 保存从 event 和 artifact 中提炼、可追溯、可被后续工作复用的 Context Block。
+```
+
+ctxlib 不是聊天记录搜索，也不是自动正确的知识库。Context Block 仍可能过时或相互矛盾；Context Pack 必须绑定一次 invocation 的 Task Contract、phase endpoint、input revision、权限范围和预算。被省略的相关信息要可见，影响验收的矛盾不能被摘要掉。
+
+ctxlib 的作用不是让 agent 记得更多，而是让没有旧 session 的 agent 也能获得足够且有出处的项目状态，并知道哪些内容不应直接当成 Project Fact。
+
 ---
 
 ## 2. 核心数据模型

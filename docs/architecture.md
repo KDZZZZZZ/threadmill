@@ -70,7 +70,7 @@
    agent 不直接修改 main；verify 通过后进入 merge queue。
 
 10. **复杂任务允许通过提交 requirement 扩展 task graph 作为交付**
-   执行 task 的 planner / executor / verifier 不必一次性解决所有细节，可以向 Task Manager Agent 提交新的 requirement；Task Manager Agent 负责把这些 requirement 编排成 task 节点、状态子图依赖、阻塞和拆解关系。
+   执行 task 的 planner / executor / verifier 不必一次性解决所有细节，可以向 Task Manager Agent 提交新的 requirement；Task Manager Agent 负责把这些 requirement 编排成 task、phase endpoint、decision endpoint、依赖、阻塞和拆解关系。
 
 11. **verify 是进入项目事实的闸门**
    task 只有通过验收后才允许 merge；失败则回到 plan 循环。
@@ -171,6 +171,107 @@ React + TypeScript + Vite frontend
 ```
 
 文档中的接口设计代码块默认以 Go backend 为准；只有 Electron/React/Vite 专属 UI 代码才使用 TypeScript。
+
+## 4.2 设计基线：工作不属于 Agent Session
+
+Threadmill 管理的是尚未完成的工作，而不是某个 Agent 对话。即使一个 Agent 退出、换 provider 或被重试，下面这些问题仍然必须有明确答案：
+
+- 原始 requirement 是什么，哪些约束不能在转述中丢失；
+- 一个 task 是否必须等待另一个 task，以及等到哪个 phase endpoint；
+- 当前 attempt 基于哪个输入 revision，实际改动是否越过批准范围；
+- 哪一份验证结果仍然有效，谁有资格让结果进入主分支。
+
+工作沿着下面的链路逐步收敛：
+
+```text
+Requirement -> Task Contract -> Task -> Task Attempt -> Agent Invocation
+```
+
+它们不是同一个对象的不同名字：
+
+- `Requirement` 保存最初为什么要做；
+- `Task Contract` 固定要交付什么、边界在哪里、怎样算完成；
+- `Task` 是需要持续协调的工作身份；
+- `Task Attempt` 是对同一契约的一次有界尝试；
+- `Agent Invocation` 是某个阶段临时借用的一次计算能力。
+
+Agent Invocation 可以重建，Task Contract、Task 和未完成的依赖不能随 session 一起消失。一次 invocation 只拿到完成当前职责所需的 Task Contract、attempt、允许工具、工作区、Context Pack 和输出约束。
+
+### 领域术语边界
+
+```text
+Thread
+  provider 为一次 Agent Invocation 保留的局部对话状态；丢弃 Thread 不应丢失 Task 或已接受的项目事实。
+
+Worker Capacity
+  Scheduler 当前可以并发使用的 Agent Invocation 数量；只改变吞吐，不改变 Task Graph 的含义。
+
+Evidence
+  用于判断主张的可观察结果，例如 diff、测试结果、tool output 或 human decision，并且可以追溯来源。
+
+Project Fact
+  在验收或决策边界通过后，获准供后续工作复用的主张。
+
+Context Block
+  从 Event 或 Artifact 中提炼出的、可追溯且可复用的陈述；可能被替代，不能自动视为 Project Fact。
+
+Context Pack
+  针对一次 Agent Invocation 及其精确工作边界选出的有限 Context Block 快照，不等于全量项目历史。
+```
+
+把 Agent 视为临时执行资源解决四个问题：
+
+1. executor 崩溃后，新的 invocation 可以从显式状态恢复，而不是猜旧对话发生了什么；
+2. planner、executor 和 verifier 可以由不同 provider 承担，调度不依赖某个 CLI 的 session 语义；
+3. 并发 Agent 不会制造多个项目真相，任务依赖、验收结论和已合入事实仍有单一权威记录；
+4. 权限可以按 invocation 收口：规划可只读，执行只写指定工作区，验证默认不能修改实现。
+
+“临时”不等于每说一句话都新建 invocation。只要输入基线、角色、权限和目标没有变化，一个 invocation 可以持续完成它的局部工作；发生重规划、权限变化、上下文基线变化或角色切换时，才建立新的边界。
+
+### Plan、Execute、Verify 的分工
+
+三个阶段不是让不同 Agent 重复复述同一段话，而是分别固定三种不能由同一份输出证明的事实：
+
+```text
+Plan
+  在修改前声明影响面、依赖事实、权限需求和验收证据。
+  可以请求 Task Manager 扩展 graph，但不能按实现偏好改写 Task Contract。
+
+Execute
+  在隔离工作区内实施批准范围，产生候选 diff、测试输出、工具记录和新发现。
+  不能静默扩大范围、直接改 graph 或宣布自己已经完成。
+
+Verify
+  同时读取 Task Contract、批准的 plan、真实 diff、测试证据和输入 revision，
+  判断候选结果是否可接受，而不是判断 executor 是否看起来努力过。
+```
+
+验证失败通常为同一个 task 创建新 attempt；只有暴露出独立生命周期的工作时才创建新 task。`done` 不是执行阶段，而是验收、依赖和交付条件全部满足后的图结论。
+
+### 各模块各自拥有一个决定
+
+| 模块 | 它拥有的决定 | 它不能替谁决定 |
+| --- | --- | --- |
+| Task Manager Agent | requirement 是否形成 task，以及 endpoint 如何建立关系 | 不替 planner 选择实现方案 |
+| Scheduler | 当前哪些 endpoint 值得占用 worker capacity | 不改 Task Contract 和 graph 语义 |
+| Agent Runtime | invocation 如何在明确权限、工作区和预算内运行 | 不判断 task 是否完成 |
+| Ctx Manager Agent | invocation 应获得哪些可追溯上下文 | 不把摘要直接宣布为项目事实 |
+| Executor | 如何在批准范围内产生候选结果 | 不批准自己的结果，不写主分支 |
+| Verifier | 候选结果是否满足契约、证据是否新鲜 | 不修改实现来让验证通过 |
+| Merge Queue | 已获资格的候选是否能机械进入最新 main | 不修冲突，不重写 graph |
+
+如果一个实现让某个模块替另一个模块作决定，权威来源就会分叉。
+
+### 设计检查
+
+后续设计至少应能回答：
+
+1. 杀掉所有 Agent 进程后，哪些对象足以恢复未完成工作？
+2. 某个结论来自 Task Contract、Agent 推断，还是已经验证的 evidence？
+3. 每条 graph edge 阻止哪个 endpoint，携带什么数据，解除条件是什么？
+4. 失败是在重试同一 Task Contract，还是暴露了新的独立工作？
+5. Context Pack 绑定哪个 input revision，过期后谁触发重选或重验？
+6. 最终写入 main 的决定能否追溯到 requirement、真实 diff 和仍有效的验证结果？
 
 ---
 
@@ -442,7 +543,7 @@ Task A verify passed
 11. 用户控制需求和资源，系统控制调度细节。
 12. task graph 只能由经 Agent Runtime 授权的 Task Manager Agent 写入。
 13. planner / executor / verifier 不直接创建 task / edge；依赖关系由 Task Manager Agent 编排。
-14. task 状态变换可视为状态子图，依赖可以指向 task 的 phase / status endpoint。
+14. task 使用固定的 phase endpoint 表达生命周期，依赖可以指向具体的 phase endpoint 或 decision endpoint。
 15. ctxlib 只能由经 Agent Runtime 授权的 Ctx Manager Agent / Ctx Agent 读写。
 ```
 
