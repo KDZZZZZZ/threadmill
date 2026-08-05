@@ -5,6 +5,8 @@
 
 Task Graph 保存尚未完成工作的因果关系。它不是 agent 通信图，也不保存一次运行中的每个工具调用。工具调用、prompt 组装和进程管理属于 Agent Runtime 的实现细节；Task Graph 只保留跨时间、跨 agent 仍然成立的工作义务。
 
+设计基线见[设计基线](./design-rationale.md)，术语边界见[领域语言](./CONTEXT.md)。设计基线保留 Coordination Graph 与 Execution Graph 的分析区分；当前 MVP 将前者作为持久 Task Graph 的语义，将后者限制为 phase 内部的临时执行结构，不建立第二个持久图。
+
 ## 1. 设计定位
 
 Task Graph 负责两件事：
@@ -180,7 +182,30 @@ human.approved(plan_revision, scope) -> A.execute
 
 文件读取、一次 tool call、局部摘要以及同一批准计划中的连续命令，通常不应单独建 task。Task 数量衡量的是独立责任，不是运行步骤数量。
 
-## 9. 编排示意
+## 9. Phase 内部执行结构
+
+固定 endpoint 不限制 phase 内部的运行复杂度。一个 `plan` endpoint 可以包含：
+
+```text
+读取仓库约束(tool)
+  -> 分析影响面(planner invocation)
+  -> 校验计划结构(tool)
+  -> 提交新 requirement(task-manager invocation)
+```
+
+这些步骤属于当前 phase 的临时执行结构，不自动成为持久 Task。只有内部工作需要独立验收、独立重试、跨时间等待、不同权限边界，或者结果要被其他 task 直接依赖时，Task Manager 才将它提升为新的 Task Contract，并把关系写回 Task Graph。
+
+例如 `A.plan` 发现需要单独完成配置迁移时，可以登记 Task B，并只阻塞真正消费 B 结果的 endpoint：
+
+```text
+A.plan 产生 requirement B
+Task Manager 创建 B.prepare -> B.plan -> B.execute -> B.verify
+B.verify --passed + evidence--> A.execute
+```
+
+这次 phase 运行扩展了持久 Task Graph，但不因为“成功拆解”而让 A 完成。
+
+## 10. 编排示意
 
 下面的图只表达持久 Task Graph 中的 task、phase endpoint 和跨 task 依赖；不把 phase 内部的工具调用画成另一张图：
 
@@ -203,7 +228,7 @@ flowchart LR
 
 含义是：A 在 plan 阶段发现 B；B 通过验证后向 A 的 verify 提供结果；A 的 done 还需要满足 B 的完成条件。
 
-## 10. 不变量
+## 11. 不变量
 
 ```text
 1. Task 和 Task Graph 的寿命独立于 agent session。
