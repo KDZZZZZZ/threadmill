@@ -55,10 +55,10 @@
    系统不在 task graph 里重新实现一套独立 worktree 抽象；Agent Runtime 负责包装 CLI agent 自身的 worktree、tool、git 和执行目录能力，并把结果归一化给上层调度。
 
 5. **用 task graph 管理工作，而不是用 session 管理工作**
-   用户输入是 requirement；task graph 只包含统一的 task 节点，拆解、依赖、阻塞和冲突都通过图关系表达。
+   用户输入是 requirement；task graph 保存统一的 task、attempt 和 phase endpoint，拆解、依赖、阻塞、决策和冲突都通过图关系表达。
 
 6. **所有 requirement 都经 Task Manager Agent 编排成 task graph**
-   创建或更新 task graph 需要看到当前所有 task 及其状态，避免重复、错误依赖和不可验收拆分；人类和其他 agent 都向 Task Manager Agent 提交 requirement，由它统一创建 task、state node、edge 或 blocker。
+   创建或更新 task graph 需要看到当前所有 task 及其状态，避免重复、错误依赖和不可验收拆分；人类和其他 agent 都向 Task Manager Agent 提交 requirement，由它统一创建 task、phase endpoint、decision endpoint、edge 或 blocker。
 
 7. **用 ctxlib 管理项目记忆，而不是依赖 session memory**
    所有有价值的设计、判断、验收、失败和冲突信息沉淀到结构化上下文库。
@@ -141,7 +141,7 @@
 
 ```text
 Agent Runtime 是所有 agent invocation 的统一入口，包括 Task Manager Agent、Ctx Manager Agent 和 worker agents。
-Task Manager Agent 接收 requirement，并决定是否以及如何编排成 task / state node / edge / blocker。
+Task Manager Agent 接收 requirement，并决定是否以及如何编排成 task / phase endpoint / decision endpoint / edge / blocker。
 Task Graph 记录现在有哪些 task、状态是什么、谁阻塞谁。
 Ctx Manager Agent / Ctx Agent 决定 agent 应该知道什么，以及运行中能查什么。
 Context Lib 保存可复用的项目记忆。
@@ -201,7 +201,7 @@ Control Plane 是 Go backend 中的调度中枢，负责把用户需求、预算
 它不直接创建 task，也不直接读写 ctxlib；这些动作分别通过 Agent Runtime 启动的专门 agent 完成：
 
 ```text
-Control Plane -> Agent Runtime(role=task_manager)：提交 / 登记 requirement，由 Task Manager Agent 编排 task、state node、edge、blocker 或 task 状态更新。
+Control Plane -> Agent Runtime(role=task_manager)：提交 / 登记 requirement，由 Task Manager Agent 编排 task、phase endpoint、decision endpoint、edge、blocker 或 task 状态更新。
 Control Plane -> Agent Runtime(role=ctx_manager)：请求 Ctx Manager Agent 为某个 task phase 选择 context pack，或处理运行时 ctx 查询。
 Control Plane -> Agent Runtime(role=planner/executor/verifier)：启动 Claude Code planner / executor / verifier 等 CLI worker。
 Control Plane -> Merge Queue：提交 verify passed 的结果进入合并流程。
@@ -219,8 +219,11 @@ Task Manager Agent 是 task graph 的唯一写入口，同时它自己也是经 
 Task Graph 是工作结构的存储和状态机。
 
 - **requirement**：人类或 agent 提出的原始需求、目标、约束和验收意图；它是 provenance，不是可调度 task。
-- **task**：统一的工作节点，可计划、可执行、可验收，不区分 root / child 类型。
-- **edge**：task 之间的依赖、阻塞、拆解、重叠、冲突或替代关系。
+- **task contract**：固定要交付什么、为什么交付、允许的边界和怎样算完成；不包含 planner 的实现步骤。
+- **task**：由 task contract 约束的持久工作身份，不区分 root / child 类型。
+- **task attempt**：对同一个 task contract 的一次有界尝试；失败或输入过期通常创建新 attempt，而不是新 task。
+- **phase endpoint**：`prepare / plan / execute / verify / done` 的编排锚点。
+- **edge**：phase endpoint 之间的依赖、阻塞、冲突、替代或决策关系，并可携带 evidence。
 - **blocked task**：等待其他 task、依赖、冲突处理或人类决策的任务。
 
 复杂任务可以通过扩展 task graph 作为合法交付。当前 task 不因为新增相关 task 而完成，而是通过 blocker / edge 进入 blocked 状态，等相关 task 完成后再重新验收自身目标。
@@ -345,7 +348,7 @@ Artifact Store 保存大对象：
 Human UI 或其他 agent
   -> Agent Runtime(role=task_manager)
   -> Task Manager Agent（查看全局 task，去重、编排依赖）
-  -> Task Graph 写入 requirement / task / state node / edge
+  -> Task Graph 写入 requirement / task / phase endpoint / decision endpoint / edge
   -> Ctx Agent 选择初始 context pack
   -> Scheduler 决定何时向 Agent Runtime 提交 planner AgentRunParams
 ```
@@ -385,13 +388,13 @@ Task Graph 提供 task contract
 ```text
 Planner / Executor / Verifier 发现当前 task 需要拆解、补工作或补验收
   -> 通过 Agent Runtime(role=task_manager) 向 Task Manager Agent 提交新的 requirement（严格模式，带 client_ref 和触发证据）
-  -> Task Manager Agent 校验 requirement，并编排 task / state node / edge / blocker
+  -> Task Manager Agent 校验 requirement，并编排 task / phase endpoint / decision endpoint / edge / blocker
   -> 当前 task 或当前 phase endpoint 进入 blocked（如果需要等待新增 task、特定状态或决策）
   -> Scheduler 调度新增 task 或等待依赖 endpoint 满足
   -> 相关 endpoint 满足后当前 task 回到 planning / executing / verifying
 ```
 
-关键判断：扩展 task graph 是复杂任务的合法交付，不是失败；但 planner / executor / verifier 提交的是 requirement，不是 task / edge。依赖关系由 Task Manager Agent 统一编排，并且可以细到状态子图，例如 `Task A.verify depends_on Task B.done`。
+关键判断：扩展 task graph 是复杂任务的合法交付，不是失败；但 planner / executor / verifier 提交的是 requirement，不是 task / edge。依赖关系由 Task Manager Agent 统一编排，并且可以细到 phase endpoint，例如 `Task A.verify depends_on Task B.done`。
 
 ---
 

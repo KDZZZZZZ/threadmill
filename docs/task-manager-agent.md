@@ -1,6 +1,6 @@
 # Task Manager Agent 详细设计
 
-版本：v0.2
+版本：v0.3
 状态：Draft
 
 ---
@@ -78,7 +78,7 @@ agent requirement = 严格契约，Task Manager 登记、校验并负责编排�
 
 图关系与元数据(Task Manager 拥有，只能"新增"，不能改内容):
   - 全局 task_id
-  - task state node / endpoint
+  - task phase endpoint / decision endpoint
   - 跨 agent / 跨 task / 跨状态节点的依赖、阻塞
   - 全局重复的"关联标记"(link，不是合并)
   - 优先级、冲突 flag、调度信息
@@ -110,7 +110,7 @@ register        接受并登记 requirement(内容原样)
 needs_fix       字段不完整 / 验收不可测，退回发起方改(不代改)
 propose_change  Task Manager 有异议时"建议改动"，回给发起方决定，不自行落地
 link_related    发现全局重复 / 重叠，建立关联 + 触发决策，不静默合并
-compile_graph   将 requirement 编排为 task / state node / edge / blocker
+compile_graph   将 requirement 编排为 task / phase endpoint / decision endpoint / edge / blocker
 reject          越权、无效、与硬约束冲突
 ```
 
@@ -303,7 +303,7 @@ runtime 自动记入 log 的内容包括：
 Human UI / planner / executor / verifier
   -> Agent Runtime(role=task_manager, tool=graph_write)
   -> Task Manager Agent（intake + 校验 + 依赖编排）
-       -> Task Graph（唯一权威写：requirement / task / state node / edge）
+       -> Task Graph（唯一权威写：requirement / task / phase endpoint / decision endpoint / edge）
 
 runtime（自动记录，无需 agent 显式写）
   -> Event Log
@@ -365,7 +365,7 @@ Task B
   delivery_type: code_change
 ```
 
-而当 Task A 的 planner 中途发现需要 A1/A2/A3 三个独立工作单元时，它以**严格模式**把三个 requirement 发给 Task Manager，各带 `client_ref`、验收意图和依赖意图；Task Manager 只登记、校验，并基于全局视图编排 task / state node / edge。例如它可以生成 `Task A.verify depends_on Task A2.done`，并原样回显 `client_ref -> requirement_id / task_id`，不改动 A1/A2/A3 的内容。
+而当 Task A 的 planner 中途发现需要 A1/A2/A3 三个独立工作单元时，它以**严格模式**把三个 requirement 发给 Task Manager，各带 `client_ref`、验收意图和依赖意图；Task Manager 只登记、校验，并基于全局视图编排 task / phase endpoint / decision endpoint / edge。例如它可以生成 `Task A.verify depends_on Task A2.done`，并原样回显 `client_ref -> requirement_id / task_id`，不改动 A1/A2/A3 的内容。
 
 ---
 
@@ -384,6 +384,55 @@ Task B
 10. 所有 intake 决策都产生事件，便于追溯。
 11. planner / executor / verifier 都可提交 requirement，但都走严格契约模式。
 12. planner / executor / verifier 不直接创建 task / edge；依赖关系由 Task Manager Agent 编排。
-13. task 的状态变换可视为子图；Task Manager 可以创建指向 phase / status endpoint 的依赖，例如 A.verify 依赖 B.done。
+13. task 使用固定 phase endpoint 表达生命周期；Task Manager 可以创建指向具体 endpoint 的依赖，例如 A.verify 依赖 B.done。
 14. Task Manager 只通过 Agent Runtime 授权的 graph_write service/tool 权威写 Task Graph；其活动被 runtime 自动记入 Event Log；不写 ctxlib；ctxlib 只从 log 取数据。
 ```
+
+---
+
+## 15. 编排检查规则
+
+Task Manager 在写入 Task Graph 前，至少检查以下内容：
+
+### 15.1 是否真的需要新 task
+
+默认把工作留在当前 phase 的执行范围内。只有工作具备独立验收、独立失败或重试、跨时间等待、不同权限或 owner、被其他 task 直接依赖，或生命周期超过当前 phase invocation 时，才建立新 task。
+
+文件读取、一次工具调用、局部摘要和同一批准计划中的连续命令，不应仅因为可观察就被提升为 task。
+
+### 15.2 edge 是否连接到最早需要结果的位置
+
+依赖必须落到真正消费结果的 phase endpoint：
+
+```text
+B.verify -> A.plan     A 的方案依赖 B 的已验证结论
+B.verify -> A.execute  A 可以先规划，但实施必须等待 B
+B.verify -> A.verify   A 可以先实施，但最终验收必须包含 B
+```
+
+每条 edge 都必须说明 source endpoint、target endpoint、控制条件、传递的 evidence 或 message，以及条件为 false 或结果过期时的处理。
+
+### 15.3 如何处理失败和过期结果
+
+```text
+- 局部实现或验证失败：为同一 Task Contract 创建新的 attempt。
+- Task Contract 不完整或自相矛盾：阻塞受影响 endpoint，请求澄清或重新立约。
+- verify 暴露出独立工作：登记新 task，并连接到消费其结果的 endpoint。
+- candidate 相对新 revision 已过期：使旧验证失效，重新 verify 或重新 plan。
+- 高风险决定缺少权限：创建或关联 human decision endpoint，不得推断已经批准。
+```
+
+### 15.4 必须拒绝的模式
+
+```text
+- 每个 agent 或 tool call 建一个 task。
+- 只在 prompt 中描述依赖，不写入 graph。
+- 只有 execute 或 verify 受影响，却阻塞整个 task。
+- 为表达 parent/child 所有权而制造环。
+- 把 worker summary 当作验证 evidence。
+- 每次 attempt 失败都创建新 task。
+- acceptance 和 merge 条件未满足就标记 done。
+- 为迁就某个实现方案而修改 requirement 或 Task Contract 内容。
+```
+
+写入结果必须能回答：这次 mutation 接受了什么 requirement、创建或关联了哪个 task、增加了哪些 endpoint / edge / blocker、每项变更的理由是什么，以及哪些 endpoint 的 runnable 状态发生了变化。

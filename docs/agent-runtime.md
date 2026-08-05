@@ -119,7 +119,7 @@ PermissionPolicy / ToolInjectionPolicy
   决定 allowed dirs、shell/file edit 权限、MCP/tool config 注入方式和是否允许 provider 的 bypass/trust/yolo 参数。
 ```
 
-和 Task Graph 的边界保持不变：Open Design runtime 可以作为 Agent Runtime 的架构参考，但 Graph / Node / Edge / Active / Signal 仍属于 Task Graph / Scheduler / Graph Runner。Agent Runtime 只执行一个已经被调度出来的 `AgentRunParams`，不负责跨 task/phase 的控制流编排。
+和 Task Graph 的边界保持不变：Open Design runtime 可以作为 Agent Runtime 的架构参考，但跨 task/phase 的 phase endpoint、dependency edge 和 blocker 仍属于 Task Graph / Scheduler。Agent Runtime 只执行一个已经被调度出来的 `AgentRunParams`，不负责持久工作关系的编排；MVP 由 Scheduler 直接选择可运行 endpoint。
 
 ---
 
@@ -132,7 +132,7 @@ repo: https://github.com/nexu-io/open-design
 commit: 02c68415e29dcab659f1835e8a41ec1a37fce303
 ```
 
-注意边界：这些源码用于借鉴 **agent runtime / CLI wrapper / adapter**。Graph / Node / Edge / Active / Signal 不进入 Agent Runtime；这些仍属于 Task Graph / Scheduler / Graph Runner。
+注意边界：这些源码用于借鉴 **agent runtime / CLI wrapper / adapter**。Task Graph 的 task、phase endpoint、edge 和 blocker 不进入 Agent Runtime；它们仍由 Task Graph / Scheduler 管理，Runtime 只负责受控 invocation 的输入、输出、权限、事件和 artifact。
 
 | Open Design 源码 | 可以借鉴的内容 | 本系统落点 |
 |---|---|---|

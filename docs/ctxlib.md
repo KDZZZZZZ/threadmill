@@ -68,14 +68,28 @@ type ContextService interface {
 
 type ContextPackRequest struct {
 	TaskID string `json:"task_id"`
-	Phase string `json:"phase"`
+	// TaskContractRef 防止同一 task 的旧契约上下文混入新 attempt。
+	TaskContractRef string `json:"task_contract_ref"`
+	AttemptID string `json:"attempt_id"`
+	// PhaseEndpoint 是本次 pack 服务的精确编排点。
+	PhaseEndpoint string `json:"phase_endpoint"`
+	Role AgentRole `json:"role"`
+	// InputRevision 是代码、graph 和关键外部输入的组合 revision。
+	InputRevision string `json:"input_revision"`
+	// PermissionScope 用于在相关性排序前先做可见性过滤。
+	PermissionScope []string `json:"permission_scope,omitempty"`
 	// Budget 是 token/字符预算，由 Ctx Agent 用于裁剪注入内容。
 	Budget int `json:"budget"`
 }
 
 type ContextQueryRequest struct {
 	TaskID string `json:"task_id"`
-	Phase string `json:"phase"`
+	TaskContractRef string `json:"task_contract_ref"`
+	AttemptID string `json:"attempt_id"`
+	PhaseEndpoint string `json:"phase_endpoint"`
+	Role AgentRole `json:"role"`
+	InputRevision string `json:"input_revision"`
+	PermissionScope []string `json:"permission_scope,omitempty"`
 	// Intent 缩小检索目的，例如 api、conflict、decision。
 	Intent string `json:"intent,omitempty"`
 	// Scope 限定范围标签。
@@ -84,12 +98,30 @@ type ContextQueryRequest struct {
 }
 
 type ContextResult struct {
+	// Binding 回显 pack/query 所绑定的工作边界；消费者不能把结果挪给另一 revision 使用。
+	Binding ContextBinding `json:"binding"`
 	// Blocks 是已选中、可注入的上下文块。
 	Blocks []ContextBlock `json:"blocks"`
 	// Omitted 是相关但因预算未注入的 block id。
 	Omitted []string `json:"omitted"`
-	// Note 是发现矛盾时给调度层的建议，例如 replan 或 human_decision。
+	// Conflicts 保留相互矛盾或可能过时的候选；不得在摘要时静默择一。
+	Conflicts []ContextConflict `json:"conflicts,omitempty"`
+	// Note 是发现矛盾或输入过期时给调度层的建议，例如 replan 或 human_decision。
 	Note string `json:"note,omitempty"`
+}
+
+type ContextBinding struct {
+	TaskID string `json:"task_id"`
+	TaskContractRef string `json:"task_contract_ref"`
+	AttemptID string `json:"attempt_id"`
+	PhaseEndpoint string `json:"phase_endpoint"`
+	Role AgentRole `json:"role"`
+	InputRevision string `json:"input_revision"`
+}
+
+type ContextConflict struct {
+	BlockIDs []string `json:"block_ids"`
+	Reason string `json:"reason"`
 }
 ```
 
@@ -177,14 +209,14 @@ agent_attempt
 和 Task Graph / Scheduler 以及 Agent Runtime IO 的关系：
 
 ```text
-图节点执行体输出 Vec<Message>
+Agent invocation 输出结果和 artifact refs
   -> Agent Runtime 记录 AgentEvent / ArtifactRef
   -> Agent Runtime(role=ctx_manager) 启动 Ctx Manager Agent 从 Event / Artifact 提炼 ContextBlock
   -> pack / query 选择 ContextBlock，形成 ContextResult
-  -> 下游图节点或 agent invocation 以 Message 形式消费 context_ref / text block
+  -> 下一个 phase invocation 以 context_ref / text block 消费
 ```
 
-因此，`Vec<Message>` 是运行时 IO 统一格式；ctxlib 的长期事实仍然来自 Event / Artifact 的可追溯投影。这样既能表达“谁生产、谁消费了哪段上下文”，又不允许 agent 绕过 Ctx Agent 直接写记忆。
+因此，ctxlib 的长期事实仍然来自 Event / Artifact 的可追溯投影；具体 invocation 的输入输出格式由 Agent Runtime 负责。这样既能表达“谁生产、谁消费了哪段上下文”，又不允许 agent 绕过 Ctx Agent 直接写记忆。
 
 ---
 ## 6. 不变量
@@ -197,6 +229,8 @@ agent_attempt
 5. 扩展通过 Extractor / Selector / Store 三个接口完成，不改核心模型。
 6. 访问 ctxlib 的行为本身也被 Agent Runtime 自动记入 log。
 7. Ctx Manager Agent 不是 runtime 旁路；它与 planner / executor / verifier 一样是 Agent Runtime invocation，只是拥有 ctx_read / ctx_write capability。
+8. 每个 ContextResult 必须绑定 Task Contract、attempt、phase endpoint、role 和 input revision；绑定变化后必须重新选择。
+9. 相关但被预算省略的 block 和相互矛盾的 block 必须显式返回，不能在摘要时静默消失。
 ```
 
 ---
