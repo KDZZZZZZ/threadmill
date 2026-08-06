@@ -89,7 +89,7 @@ Scheduler 自动分配下一个合适 task phase，并通过 Agent Runtime 启�
 
 ```text
 登记 requirement。
-通过 Agent Runtime(role=task_manager) 由 Task Manager Agent 编排 task / state node / edge。
+通过 Agent Runtime(role=task_manager) 由 Task Manager Agent 编排 task / phase endpoint / decision endpoint / edge。
 根据依赖、状态 endpoint 和预算排入 task graph。
 不一定立刻启动 agent。
 ```
