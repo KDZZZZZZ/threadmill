@@ -67,7 +67,11 @@ func TestLiveReActWithUserInputAndTool(t *testing.T) {
 		t.Fatal("locate integration test")
 	}
 	root := filepath.Clean(filepath.Join(filepath.Dir(filename), "../.."))
-	llm, err := provider.NewFromRoot(root, nil)
+	cfg, err := provider.LoadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm, err := provider.NewResponses(cfg.LLM, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,8 +83,9 @@ func TestLiveReActWithUserInputAndTool(t *testing.T) {
 
 	var turnResult agent.TurnResult
 	loop, err := agent.NewLoop(agent.Config{
-		Provider: llm,
-		Tools:    []agenttool.Tool{tool},
+		Provider:      llm,
+		ContextWindow: cfg.LLM.ContextWindow,
+		Tools:         []agenttool.Tool{tool},
 		Hooks: agent.Hooks{
 			BeforeModel: []agent.BeforeModelHook{
 				func(ctx context.Context, request agent.Request) error {

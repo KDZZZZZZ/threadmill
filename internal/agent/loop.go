@@ -6,11 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
+	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
 const defaultMaxSteps = 512
+
+var nextAgentID atomic.Uint64
 
 var (
 	// ErrNilProvider 表示循环没有可调用的 LLM Provider。
@@ -28,31 +32,38 @@ type Provider interface {
 	Generate(ctx context.Context, request Request) (AssistantMessage, error)
 }
 
-// Config 配置 LLM Provider、工具、生命周期钩子和单次迭代上限。
+// Config 配置 LLM Provider、工具、生命周期钩子、单次迭代上限和上下文窗口。
 type Config struct {
-	Provider Provider
-	Tools    []agenttool.Tool
-	Hooks    Hooks
-	MaxSteps int
+	AgentID       string
+	Provider      Provider
+	Tools         []agenttool.Tool
+	Hooks         Hooks
+	MaxSteps      int
+	ContextWindow int
+	SystemPrompt  string
 }
 
 // Loop 串行执行 ReAct 迭代，其公开方法可安全地并发调用。
 type Loop struct {
-	agentConfig agentConfig
-	provider    Provider
-	tools       map[string]agenttool.Tool
-	definitions []agenttool.Definition
-	hooks       Hooks
-	maxSteps    int
-	wake        chan struct{}
+	agentConfig   agentConfig
+	provider      Provider
+	tools         map[string]agenttool.Tool
+	definitions   []agenttool.Definition
+	hooks         Hooks
+	maxSteps      int
+	contextWindow int
+	wake          chan struct{}
 
-	mu              sync.Mutex
-	queue           []UserMessage
-	messages        []Message
-	usedToolCallIDs map[string]struct{}
-	running         bool
-	turnCancel      context.CancelFunc
-	turnPreempted   bool
+	mu                  sync.Mutex
+	queue               []UserMessage
+	messages            []Message
+	usedToolCallIDs     map[string]struct{}
+	subscribedSubgraphs []string
+	agentID             string
+	graphCopy           ctxgraph.Copy
+	running             bool
+	turnCancel          context.CancelFunc
+	turnPreempted       bool
 }
 
 // NewLoop 校验并复制配置，创建一个尚未运行的 ReAct 循环。
@@ -71,24 +82,67 @@ func NewLoop(config Config) (*Loop, error) {
 	if maxSteps < 0 {
 		return nil, fmt.Errorf("%w: max steps must not be negative", ErrInvalidConfig)
 	}
+	if config.ContextWindow < 0 {
+		return nil, fmt.Errorf("%w: context window must not be negative", ErrInvalidConfig)
+	}
+
+	agentID := config.AgentID
+	if agentID == "" {
+		agentID = fmt.Sprintf("agent-%d", nextAgentID.Add(1))
+	}
+
+	cfg := newAgentConfig()
+	if config.SystemPrompt != "" {
+		cfg.systemPrompt = config.SystemPrompt
+	}
+
+	loop := &Loop{
+		agentConfig:         cfg,
+		provider:            config.Provider,
+		hooks:               cloneHooks(config.Hooks),
+		maxSteps:            maxSteps,
+		contextWindow:       config.ContextWindow,
+		wake:                make(chan struct{}, 1),
+		queue:               []UserMessage{},
+		messages:            []Message{},
+		usedToolCallIDs:     make(map[string]struct{}),
+		subscribedSubgraphs: []string{},
+		agentID:             agentID,
+		graphCopy:           ctxgraph.Clone(agentID),
+	}
 
 	tools, definitions, err := prepareTools(config.Tools)
 	if err != nil {
 		return nil, err
 	}
+	loop.tools = tools
+	loop.definitions = definitions
+	bindRequesters(loop, tools)
+	return loop, nil
+}
 
-	return &Loop{
-		agentConfig:     newAgentConfig(),
-		provider:        config.Provider,
-		tools:           tools,
-		definitions:     definitions,
-		hooks:           cloneHooks(config.Hooks),
-		maxSteps:        maxSteps,
-		wake:            make(chan struct{}, 1),
-		queue:           []UserMessage{},
-		messages:        []Message{},
-		usedToolCallIDs: make(map[string]struct{}),
-	}, nil
+// AddHooks 在已有生命周期钩子之后追加 extra；不得在 Run 期间调用。
+func (l *Loop) AddHooks(extra Hooks) error {
+	merged := mergeHooks(l.hooks, extra)
+	if err := validateHooks(merged); err != nil {
+		return err
+	}
+	l.hooks = merged
+	return nil
+}
+
+// Ask 处理一条查询并返回最后一条助手回复；与 Run 互斥。
+func (l *Loop) Ask(ctx context.Context, query string) (string, error) {
+	if ctx == nil {
+		panic("nil context")
+	}
+	if !l.startRun() {
+		return "", ErrRunActive
+	}
+	defer l.finishRun()
+
+	answer, err := l.runTurn(ctx, UserMessage{Content: query})
+	return answer, err
 }
 
 // Enqueue 将用户消息追加到先进先出队列，并唤醒正在等待的 Run。
@@ -142,14 +196,14 @@ func (l *Loop) Run(ctx context.Context) (runErr error) {
 		if err != nil {
 			return err
 		}
-		if err := l.runTurn(ctx, message); err != nil {
+		if _, err := l.runTurn(ctx, message); err != nil {
 			return err
 		}
 	}
 }
 
 // runTurn 对一条用户消息执行“模型生成—工具执行—结果回填”的 ReAct 循环。
-func (l *Loop) runTurn(ctx context.Context, input UserMessage) error {
+func (l *Loop) runTurn(ctx context.Context, input UserMessage) (string, error) {
 	turnCtx, cancel := context.WithCancel(ctx)
 	l.startTurn(cancel)
 
@@ -157,7 +211,11 @@ func (l *Loop) runTurn(ctx context.Context, input UserMessage) error {
 	steps := 0
 	completed := false
 	if turnErr == nil {
-		l.appendMessage(Message{Role: RoleUser, Content: input.Content})
+		l.appendMessage(Message{
+			Role:      RoleUser,
+			Content:   input.Content,
+			Timestamp: input.Timestamp,
+		})
 		for steps < l.maxSteps {
 			if err := turnCtx.Err(); err != nil {
 				turnErr = err
@@ -170,12 +228,17 @@ func (l *Loop) runTurn(ctx context.Context, input UserMessage) error {
 				turnErr = fmt.Errorf("generating model response: %w", err)
 				break
 			}
+			response = stampAssistant(response)
 
 			if err := l.validateToolCallIDs(response.ToolCalls); err != nil {
 				turnErr = err
 				break
 			}
 			l.appendMessage(messageFromAssistant(response))
+			if err := l.hooks.afterAssistant(turnCtx, response); err != nil {
+				turnErr = err
+				break
+			}
 			if len(response.ToolCalls) == 0 {
 				completed = true
 				break
@@ -190,6 +253,13 @@ func (l *Loop) runTurn(ctx context.Context, input UserMessage) error {
 		turnErr = ErrMaxSteps
 	}
 
+	l.mu.Lock()
+	answer := lastAssistantText(l.messages)
+	l.mu.Unlock()
+
+	if err := l.hooks.commitTurn(ctx); err != nil {
+		turnErr = errors.Join(turnErr, err)
+	}
 	preempted := l.finishTurn()
 	if !preempted && ctx.Err() != nil && turnErr == nil {
 		turnErr = ctx.Err()
@@ -207,14 +277,18 @@ func (l *Loop) runTurn(ctx context.Context, input UserMessage) error {
 	hookErr = errors.Join(hookErr, l.hooks.afterTurn(ctx, input, result))
 
 	if preempted && errors.Is(turnErr, context.Canceled) && !hasLifecycleError(turnErr) {
-		return hookErr
+		return answer, hookErr
 	}
-	return errors.Join(turnErr, hookErr)
+	return answer, errors.Join(turnErr, hookErr)
 }
 
 // generate 调用 Provider 并执行模型生命周期钩子。
 func (l *Loop) generate(ctx context.Context) (AssistantMessage, error) {
 	request := l.assembleRequest()
+	request, err := l.hooks.assembleRequest(ctx, request)
+	if err != nil {
+		return AssistantMessage{}, err
+	}
 	if err := l.hooks.beforeModel(ctx, request); err != nil {
 		return AssistantMessage{}, err
 	}
@@ -289,4 +363,45 @@ func (l *Loop) finishTurn() bool {
 
 	cancel()
 	return preempted
+}
+
+// compactIfNeeded 在用量超过上下文窗口时，把旧消息整理进订阅子图并留下尾部。
+func (l *Loop) compactIfNeeded(ctx context.Context, usage *Usage) error {
+	if !ShouldCompact(usage, l.contextWindow) {
+		return nil
+	}
+	return l.compact(ctx, keepRecentBudget(l.contextWindow))
+}
+
+// commitTail 在本轮 ReAct 结束时把剩余消息全部写入记忆图。
+func (l *Loop) commitTail(ctx context.Context) error {
+	return l.compact(ctx, 0)
+}
+
+func (l *Loop) compact(ctx context.Context, keepRecentTokens int) error {
+	l.mu.Lock()
+	messages := cloneMessages(l.messages)
+	subscribed := append([]string(nil), l.subscribedSubgraphs...)
+	local := l.refreshGraphCopyLocked()
+	l.mu.Unlock()
+
+	graph, tail, err := CompactHistory(
+		ctx,
+		l.provider,
+		local.Graph,
+		messages,
+		subscribed,
+		keepRecentTokens,
+	)
+	if err != nil {
+		return err
+	}
+
+	l.mu.Lock()
+	local.Graph = graph
+	l.graphCopy = local
+	ctxgraph.Update(local)
+	l.messages = tail
+	l.mu.Unlock()
+	return nil
 }

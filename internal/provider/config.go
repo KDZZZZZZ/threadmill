@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/KDZZZZZZ/threadmill/internal/agent"
 )
 
 const (
@@ -25,15 +27,17 @@ var ErrInvalidConfig = errors.New("provider: invalid config")
 
 // FileConfig 是 threadmill.yaml 的顶层结构。
 type FileConfig struct {
-	LLM LLMConfig `yaml:"llm"`
+	LLM    LLMConfig       `yaml:"llm"`
+	Agents agent.FileAgents `yaml:"agents"`
 }
 
 // LLMConfig 配置一个 OpenAI-compatible Responses API Provider。
 type LLMConfig struct {
-	Provider  string `yaml:"provider"`
-	BaseURL   string `yaml:"base_url"`
-	APIKeyEnv string `yaml:"api_key_env"`
-	Model     string `yaml:"model"`
+	Provider      string `yaml:"provider"`
+	BaseURL       string `yaml:"base_url"`
+	APIKeyEnv     string `yaml:"api_key_env"`
+	Model         string `yaml:"model"`
+	ContextWindow int    `yaml:"context_window"`
 }
 
 // LoadConfig 从 root/threadmill.yaml 读取并严格校验配置。
@@ -63,6 +67,9 @@ func LoadConfig(root string) (FileConfig, error) {
 	if err := config.LLM.validate(); err != nil {
 		return FileConfig{}, err
 	}
+	if err := config.Agents.Validate(); err != nil {
+		return FileConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+	}
 	return config, nil
 }
 
@@ -82,6 +89,9 @@ func (config LLMConfig) validate() error {
 	}
 	if strings.TrimSpace(config.Model) == "" {
 		return fmt.Errorf("%w: llm.model is required", ErrInvalidConfig)
+	}
+	if config.ContextWindow < 0 {
+		return fmt.Errorf("%w: llm.context_window must not be negative", ErrInvalidConfig)
 	}
 
 	baseURL, err := url.Parse(config.BaseURL)

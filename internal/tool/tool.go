@@ -61,15 +61,18 @@ func (c Call) Validate() error {
 // Output 是工具成功执行后返回给 ReAct 循环的模型可见内容。
 type Output struct {
 	Content string
+	Details json.RawMessage
 }
 
 // Result 是 ReAct 循环写入对话记录的工具结果。
 // Tool 实现只返回 Output 和 error，调用关联及错误归一化由循环负责。
+// Details 供日志或 UI 使用，不发给模型。
 type Result struct {
-	CallID  string `json:"tool_call_id"`
-	Name    string `json:"name"`
-	Content string `json:"content"`
-	IsError bool   `json:"is_error"`
+	CallID  string          `json:"tool_call_id"`
+	Name    string          `json:"name"`
+	Content string          `json:"content"`
+	Details json.RawMessage `json:"details,omitempty"`
+	IsError bool            `json:"is_error"`
 }
 
 // Tool 提供模型可见定义，并执行一次支持上下文取消的工具调用。

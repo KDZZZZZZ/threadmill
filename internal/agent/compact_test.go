@@ -1,0 +1,252 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"reflect"
+	"strings"
+	"testing"
+
+	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
+)
+
+type stubProvider struct {
+	response string
+	err      error
+	last     Request
+	calls    int
+}
+
+func (s *stubProvider) Generate(_ context.Context, request Request) (AssistantMessage, error) {
+	s.calls++
+	s.last = cloneRequest(request)
+	if s.err != nil {
+		return AssistantMessage{}, s.err
+	}
+	return AssistantMessage{Content: s.response}, nil
+}
+
+func TestCompactHistoryUsesOneModelRequestAndKeepsTail(t *testing.T) {
+	t.Parallel()
+
+	provider := &stubProvider{response: `{
+  "nodes": [
+    {
+      "kind": "fact",
+      "statement": "user prefers blue",
+      "status": "accepted",
+      "source_subgraph_ids": ["sg-a"]
+    }
+  ]
+}`}
+	graph := ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask}},
+		Nodes: []ctxgraph.Node{{
+			ID:          "old",
+			Statement:   "already known",
+			SubgraphIDs: []string{"sg-a"},
+		}},
+	}
+	messages := []Message{
+		{Role: RoleUser, Content: "old work, I like blue"},
+		{Role: RoleAssistant, Content: "noted, using blue"},
+		{Role: RoleAssistant, Content: "hello"},
+	}
+
+	gotGraph, tail, err := CompactHistory(
+		context.Background(),
+		provider,
+		graph,
+		messages,
+		[]string{"sg-a"},
+		1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 1 {
+		t.Fatalf("model calls = %d, want 1", provider.calls)
+	}
+	if provider.last.SystemPrompt != OrganizePrompt {
+		t.Fatalf("system prompt = %q, want OrganizePrompt", provider.last.SystemPrompt)
+	}
+	if len(provider.last.Tools) != 0 {
+		t.Fatalf("tools = %#v, want none", provider.last.Tools)
+	}
+	if len(provider.last.Messages) != 1 {
+		t.Fatalf("organize messages = %#v, want one user payload", provider.last.Messages)
+	}
+	payload := provider.last.Messages[0].Content
+	if !strings.Contains(payload, "[User]: old work, I like blue") {
+		t.Fatalf("payload = %q, want serialized prefix", payload)
+	}
+	if strings.Contains(payload, "[Assistant]: hello") {
+		t.Fatal("payload included the kept tail")
+	}
+
+	if len(tail) != 1 || tail[0].Content != "hello" {
+		t.Fatalf("tail = %#v, want the last assistant message", tail)
+	}
+
+	nodes := gotGraph.NodesInSubgraphs([]string{"sg-a"})
+	if len(nodes) != 2 || nodes[1].Statement != "user prefers blue" {
+		t.Fatalf("subgraph nodes = %#v, want one model-made node", nodes)
+	}
+	if nodes[1].Kind != ctxgraph.NodeKindFact || nodes[1].Status != ctxgraph.NodeStatusAccepted {
+		t.Fatalf("node kind/status = %#v", nodes[1])
+	}
+	if got := gotGraph.SourceSubgraphsOf(nodes[1].ID); !reflect.DeepEqual(got, []string{"sg-a"}) {
+		t.Fatalf("source subgraphs = %v, want [sg-a]", got)
+	}
+	upstream := gotGraph.UpstreamNodes(nodes[1].ID)
+	if len(upstream) != 1 || upstream[0].ID != "old" {
+		t.Fatalf("previous node = %#v, want old", upstream)
+	}
+}
+
+func TestParseOrganizeOutputAcceptsFencedJSON(t *testing.T) {
+	t.Parallel()
+
+	got, err := parseOrganizeOutput("```json\n{\"nodes\":[{\"kind\":\"hypothesis\",\"statement\":\"maybe later\",\"status\":\"disputed\"}]}\n```")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []organizeNode{{
+		Kind:      ctxgraph.NodeKindHypothesis,
+		Statement: "maybe later",
+		Status:    ctxgraph.NodeStatusDisputed,
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseOrganizeOutput() = %#v, want %#v", got, want)
+	}
+}
+
+func TestKeepRecentIndex(t *testing.T) {
+	t.Parallel()
+
+	user := Message{Role: RoleUser, Content: "start"}
+	assistant := Message{Role: RoleAssistant, Content: "hello"}
+	tool := Message{Role: RoleTool, Content: "tool-output"}
+	final := Message{Role: RoleAssistant, Content: "done"}
+
+	tests := []struct {
+		name     string
+		messages []Message
+		keep     int
+		expected int
+	}{
+		{
+			name:     "commit all when keep is zero",
+			messages: []Message{user, assistant},
+			keep:     0,
+			expected: 2,
+		},
+		{
+			name:     "keep everything when under budget",
+			messages: []Message{user, assistant},
+			keep:     1000,
+			expected: 0,
+		},
+		{
+			name:     "cut at last assistant when it fills the budget",
+			messages: []Message{user, assistant, tool, final},
+			keep:     1,
+			expected: 3,
+		},
+		{
+			name:     "do not cut at a tool result",
+			messages: []Message{user, assistant, tool},
+			keep:     estimateTokens(tool),
+			expected: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := keepRecentIndex(tt.messages, tt.keep); got != tt.expected {
+				t.Fatalf("keepRecentIndex() = %d, want %d", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestCompactHistorySkipsWhenNoSubgraphs(t *testing.T) {
+	t.Parallel()
+
+	provider := &stubProvider{response: `{"nodes":[{"statement":"should not apply"}]}`}
+	graph := ctxgraph.Graph{}
+	messages := []Message{{Role: RoleUser, Content: "keep me"}}
+	gotGraph, tail, err := CompactHistory(
+		context.Background(),
+		provider,
+		graph,
+		messages,
+		nil,
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 0 {
+		t.Fatalf("model calls = %d, want 0", provider.calls)
+	}
+	if len(gotGraph.Nodes) != 0 {
+		t.Fatalf("nodes = %#v, want none", gotGraph.Nodes)
+	}
+	if len(tail) != 1 || tail[0].Content != "keep me" {
+		t.Fatalf("tail = %#v, want original messages", tail)
+	}
+}
+
+func TestCompactHistoryReturnsProviderError(t *testing.T) {
+	t.Parallel()
+
+	provider := &stubProvider{err: errors.New("boom")}
+	_, _, err := CompactHistory(
+		context.Background(),
+		provider,
+		ctxgraph.Graph{},
+		[]Message{{Role: RoleUser, Content: "x"}},
+		[]string{"sg-a"},
+		0,
+	)
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("error = %v, want organizing memory wrapping boom", err)
+	}
+}
+
+func TestSerializeConversationIncludesThinking(t *testing.T) {
+	t.Parallel()
+
+	got := serializeConversation([]Message{
+		{Role: RoleUser, Content: "look up"},
+		{
+			Role:     RoleAssistant,
+			Content:  "calling",
+			Thinking: "need a tool",
+			ToolCalls: []agenttool.Call{{
+				Name:      "echo",
+				Arguments: json.RawMessage(`{"text":"hi"}`),
+			}},
+		},
+		{
+			Role:    RoleTool,
+			Content: "hi",
+			ToolResult: &agenttool.Result{
+				Content: "hi",
+				Details: json.RawMessage(`{"secret":true}`),
+			},
+		},
+	})
+	want := "[User]: look up\n[Assistant thinking]: need a tool\n[Assistant]: calling\n[Assistant tool calls]: echo({\"text\":\"hi\"})\n[Tool result]: hi"
+	if got != want {
+		t.Fatalf("serializeConversation() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "secret") {
+		t.Fatal("serialized conversation leaked tool details")
+	}
+}

@@ -39,7 +39,14 @@ func (provider *Responses) Generate(ctx context.Context, request agent.Request) 
 	if err := provider.post(ctx, payload, &response); err != nil {
 		return agent.AssistantMessage{}, err
 	}
-	return response.assistantMessage()
+	message, err := response.assistantMessage()
+	if err != nil {
+		return agent.AssistantMessage{}, err
+	}
+	message.API = OpenAIResponses
+	message.Provider = OpenAIResponses
+	message.Model = provider.model
+	return message, nil
 }
 
 // buildRequest 将 Agent 的对话和工具定义转换为 Responses API 输入。
@@ -225,6 +232,7 @@ type responseOutput struct {
 	Name      string            `json:"name"`
 	Arguments string            `json:"arguments"`
 	Content   []responseContent `json:"content"`
+	Summary   []responseContent `json:"summary"`
 }
 
 // assistantMessage 提取所有 output_text，并保留输出顺序中的函数调用。
@@ -278,7 +286,15 @@ func (response createResponseResponse) assistantMessage() (agent.AssistantMessag
 				Arguments: json.RawMessage(output.Arguments),
 			})
 		case "reasoning":
-			// reasoning 已保存在 ModelData 中，仅用于下一轮协议回放。
+			for _, part := range output.Summary {
+				if text := strings.TrimSpace(part.Text); text == "" {
+					continue
+				}
+				if message.Thinking != "" {
+					message.Thinking += "\n"
+				}
+				message.Thinking += part.Text
+			}
 		default:
 			return message, fmt.Errorf("unsupported responses output type %q", output.Type)
 		}
@@ -286,6 +302,11 @@ func (response createResponseResponse) assistantMessage() (agent.AssistantMessag
 	message.Content = text.String()
 	if message.Content == "" && len(message.ToolCalls) == 0 {
 		return message, errors.New("completed responses generation has no assistant output")
+	}
+	if len(message.ToolCalls) > 0 {
+		message.StopReason = agent.StopReasonToolUse
+	} else {
+		message.StopReason = agent.StopReasonStop
 	}
 	return message, nil
 }

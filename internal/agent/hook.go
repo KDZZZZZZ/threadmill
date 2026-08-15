@@ -49,6 +49,15 @@ type AfterToolHook func(context.Context, agenttool.Call, agenttool.Result) error
 // AfterTurnHook 在单条用户消息处理结束后执行。
 type AfterTurnHook func(context.Context, UserMessage, TurnResult) error
 
+// AssembleRequestHook 在基础请求组装之后、调用模型之前改写请求。
+type AssembleRequestHook func(context.Context, Request) (Request, error)
+
+// AfterAssistantHook 在助手消息写入历史之后、执行工具之前运行。
+type AfterAssistantHook func(context.Context, AssistantMessage) error
+
+// CommitTurnHook 在本轮 ReAct 结束、AfterTurn 之前运行。
+type CommitTurnHook func(context.Context) error
+
 // TurnResult 描述一条用户消息对应的 ReAct 迭代结果。
 type TurnResult struct {
 	Err       error
@@ -58,15 +67,18 @@ type TurnResult struct {
 
 // Hooks 保存按注册顺序执行的生命周期钩子；每个阶段可注册多个钩子。
 type Hooks struct {
-	BeforeRun   []RunHook
-	AfterRun    []AfterRunHook
-	BeforeTurn  []TurnHook
-	BeforeModel []BeforeModelHook
-	AfterModel  []AfterModelHook
-	BeforeTool  []BeforeToolHook
-	AfterTool   []AfterToolHook
-	AfterTurn   []AfterTurnHook
-	OnPreempt   []TurnHook
+	BeforeRun       []RunHook
+	AfterRun        []AfterRunHook
+	BeforeTurn      []TurnHook
+	BeforeModel     []BeforeModelHook
+	AfterModel      []AfterModelHook
+	BeforeTool      []BeforeToolHook
+	AfterTool       []AfterToolHook
+	AfterTurn       []AfterTurnHook
+	OnPreempt       []TurnHook
+	AssembleRequest []AssembleRequestHook
+	AfterAssistant  []AfterAssistantHook
+	CommitTurn      []CommitTurnHook
 }
 
 // beforeRun 按注册顺序执行循环前置钩子，遇到首个错误即停止。
@@ -102,6 +114,37 @@ func (hooks Hooks) afterTurn(ctx context.Context, message UserMessage, result Tu
 	var hookErr error
 	for _, hook := range hooks.AfterTurn {
 		hookErr = errors.Join(hookErr, hook(ctx, message, result))
+	}
+	return hookErr
+}
+
+// assembleRequest 按注册顺序改写模型请求，遇到首个错误即停止。
+func (hooks Hooks) assembleRequest(ctx context.Context, request Request) (Request, error) {
+	var err error
+	for _, hook := range hooks.AssembleRequest {
+		request, err = hook(ctx, request)
+		if err != nil {
+			return Request{}, newLifecycleError("assemble request", err)
+		}
+	}
+	return request, nil
+}
+
+// afterAssistant 执行助手消息写入后的钩子，并隔离消息副本。
+func (hooks Hooks) afterAssistant(ctx context.Context, message AssistantMessage) error {
+	for _, hook := range hooks.AfterAssistant {
+		if err := hook(ctx, cloneAssistantMessage(message)); err != nil {
+			return newLifecycleError("after assistant", err)
+		}
+	}
+	return nil
+}
+
+// commitTurn 执行全部轮次提交钩子，并逐步累积错误。
+func (hooks Hooks) commitTurn(ctx context.Context) error {
+	var hookErr error
+	for _, hook := range hooks.CommitTurn {
+		hookErr = errors.Join(hookErr, hook(ctx))
 	}
 	return hookErr
 }
@@ -174,16 +217,24 @@ func runTurnHooks(ctx context.Context, message UserMessage, hooks []TurnHook) er
 
 // cloneHooks 复制全部钩子切片，避免调用方后续修改配置产生数据竞争。
 func cloneHooks(hooks Hooks) Hooks {
+	return mergeHooks(Hooks{}, hooks)
+}
+
+// mergeHooks 把 extra 追加到 base 之后，并复制切片。
+func mergeHooks(base, extra Hooks) Hooks {
 	return Hooks{
-		BeforeRun:   append([]RunHook(nil), hooks.BeforeRun...),
-		AfterRun:    append([]AfterRunHook(nil), hooks.AfterRun...),
-		BeforeTurn:  append([]TurnHook(nil), hooks.BeforeTurn...),
-		BeforeModel: append([]BeforeModelHook(nil), hooks.BeforeModel...),
-		AfterModel:  append([]AfterModelHook(nil), hooks.AfterModel...),
-		BeforeTool:  append([]BeforeToolHook(nil), hooks.BeforeTool...),
-		AfterTool:   append([]AfterToolHook(nil), hooks.AfterTool...),
-		AfterTurn:   append([]AfterTurnHook(nil), hooks.AfterTurn...),
-		OnPreempt:   append([]TurnHook(nil), hooks.OnPreempt...),
+		BeforeRun:       append(append([]RunHook(nil), base.BeforeRun...), extra.BeforeRun...),
+		AfterRun:        append(append([]AfterRunHook(nil), base.AfterRun...), extra.AfterRun...),
+		BeforeTurn:      append(append([]TurnHook(nil), base.BeforeTurn...), extra.BeforeTurn...),
+		BeforeModel:     append(append([]BeforeModelHook(nil), base.BeforeModel...), extra.BeforeModel...),
+		AfterModel:      append(append([]AfterModelHook(nil), base.AfterModel...), extra.AfterModel...),
+		BeforeTool:      append(append([]BeforeToolHook(nil), base.BeforeTool...), extra.BeforeTool...),
+		AfterTool:       append(append([]AfterToolHook(nil), base.AfterTool...), extra.AfterTool...),
+		AfterTurn:       append(append([]AfterTurnHook(nil), base.AfterTurn...), extra.AfterTurn...),
+		OnPreempt:       append(append([]TurnHook(nil), base.OnPreempt...), extra.OnPreempt...),
+		AssembleRequest: append(append([]AssembleRequestHook(nil), base.AssembleRequest...), extra.AssembleRequest...),
+		AfterAssistant:  append(append([]AfterAssistantHook(nil), base.AfterAssistant...), extra.AfterAssistant...),
+		CommitTurn:      append(append([]CommitTurnHook(nil), base.CommitTurn...), extra.CommitTurn...),
 	}
 }
 
@@ -243,6 +294,21 @@ func validateHooks(hooks Hooks) error {
 	for _, hook := range hooks.OnPreempt {
 		if hook == nil {
 			return fmt.Errorf("%w: on preempt", ErrNilHook)
+		}
+	}
+	for _, hook := range hooks.AssembleRequest {
+		if hook == nil {
+			return fmt.Errorf("%w: assemble request", ErrNilHook)
+		}
+	}
+	for _, hook := range hooks.AfterAssistant {
+		if hook == nil {
+			return fmt.Errorf("%w: after assistant", ErrNilHook)
+		}
+	}
+	for _, hook := range hooks.CommitTurn {
+		if hook == nil {
+			return fmt.Errorf("%w: commit turn", ErrNilHook)
 		}
 	}
 	return nil

@@ -132,6 +132,7 @@ func (l *Loop) executeToolCall(ctx context.Context, call agenttool.Call) (agentt
 			result.IsError = true
 		} else {
 			result.Content = output.Content
+			result.Details = bytes.Clone(output.Details)
 		}
 	}
 

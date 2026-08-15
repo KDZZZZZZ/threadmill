@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
+	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -15,6 +17,48 @@ type modelFunc func(context.Context, Request) (AssistantMessage, error)
 
 func (f modelFunc) Generate(ctx context.Context, request Request) (AssistantMessage, error) {
 	return f(ctx, request)
+}
+
+func ignoreOrganize(next modelFunc) modelFunc {
+	return func(ctx context.Context, request Request) (AssistantMessage, error) {
+		if request.SystemPrompt == OrganizePrompt {
+			return AssistantMessage{Content: `{"nodes":[]}`}, nil
+		}
+		return next(ctx, request)
+	}
+}
+
+func withOrganizeJSON(next modelFunc) modelFunc {
+	return func(ctx context.Context, request Request) (AssistantMessage, error) {
+		if request.SystemPrompt == OrganizePrompt {
+			body := ""
+			if len(request.Messages) > 0 {
+				body = request.Messages[0].Content
+			}
+			if i := strings.Index(body, "待整理对话："); i >= 0 {
+				body = body[i:]
+			}
+			statement := "compacted"
+			for _, needle := range []string{"remember blue", "old work", "start", "next"} {
+				if strings.Contains(body, needle) {
+					statement = needle
+					break
+				}
+			}
+			payload, err := json.Marshal(organizeOutput{
+				Nodes: []organizeNode{{
+					Kind:      ctxgraph.NodeKindFact,
+					Statement: statement,
+					Status:    ctxgraph.NodeStatusAccepted,
+				}},
+			})
+			if err != nil {
+				return AssistantMessage{}, err
+			}
+			return AssistantMessage{Content: string(payload)}, nil
+		}
+		return next(ctx, request)
+	}
 }
 
 type testTool struct {
@@ -459,4 +503,140 @@ func lastUserContent(messages []Message) string {
 		}
 	}
 	return ""
+}
+
+func TestLoopCompactsOverflowIntoSubscribedMemoryAndKeepsTail(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resetDefaultStore(t)
+
+	var second Request
+	calls := 0
+	model := withOrganizeJSON(func(_ context.Context, request Request) (AssistantMessage, error) {
+		calls++
+		if calls == 1 {
+			return AssistantMessage{
+				Content: "hello",
+				Usage:   &Usage{TotalTokens: 50},
+				ToolCalls: []agenttool.Call{{
+					ID:        "call-1",
+					Name:      "echo",
+					Arguments: json.RawMessage(`{}`),
+				}},
+			}, nil
+		}
+		second = request
+		return AssistantMessage{Content: "done", Usage: &Usage{TotalTokens: 4}}, nil
+	})
+	echo := &testTool{
+		definition: agenttool.Definition{
+			Name:        "echo",
+			Description: "Echo",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		execute: func(context.Context, agenttool.Call) (agenttool.Output, error) {
+			return agenttool.Output{Content: "ok"}, nil
+		},
+	}
+
+	loop, err := NewLoop(Config{
+		Provider:      model,
+		Tools:         []agenttool.Tool{echo},
+		ContextWindow: 5,
+		Hooks: Hooks{AfterTurn: []AfterTurnHook{
+			func(context.Context, UserMessage, TurnResult) error {
+				cancel()
+				return nil
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAddMemoryHooks(t, loop)
+	loop.SetContextGraph(ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask}},
+	})
+	loop.SetSubscribedSubgraphs([]string{"sg-a"})
+	loop.Enqueue(UserMessage{Content: "start"})
+
+	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if calls != 2 {
+		t.Fatalf("model calls = %d, want 2", calls)
+	}
+	if !strings.Contains(second.SystemPrompt, "start") {
+		t.Fatalf("second system prompt = %q, want compacted user memory", second.SystemPrompt)
+	}
+	if len(second.Messages) == 0 || second.Messages[0].Role != RoleAssistant {
+		t.Fatalf("second messages = %#v, want the kept assistant tail", second.Messages)
+	}
+}
+
+func TestLoopCommitsTailIntoMemoryWhenTurnEnds(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resetDefaultStore(t)
+
+	var secondPrompt string
+	turns := 0
+	model := withOrganizeJSON(func(_ context.Context, request Request) (AssistantMessage, error) {
+		if turns == 1 {
+			secondPrompt = request.SystemPrompt
+		}
+		return AssistantMessage{Content: "ok", Usage: &Usage{TotalTokens: 3}}, nil
+	})
+
+	var loop *Loop
+	loop, err := NewLoop(Config{
+		Provider: model,
+		Hooks: Hooks{AfterTurn: []AfterTurnHook{
+			func(context.Context, UserMessage, TurnResult) error {
+				turns++
+				if turns == 1 {
+					loop.Enqueue(UserMessage{Content: "next"})
+					return nil
+				}
+				cancel()
+				return nil
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAddMemoryHooks(t, loop)
+	loop.SetContextGraph(ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask}},
+	})
+	loop.SetSubscribedSubgraphs([]string{"sg-a"})
+	loop.Enqueue(UserMessage{Content: "remember blue"})
+
+	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if len(loop.Messages()) != 0 {
+		t.Fatalf("messages after last turn = %#v, want empty", loop.Messages())
+	}
+	if !strings.Contains(secondPrompt, "remember blue") {
+		t.Fatalf("second system prompt = %q, want committed first-turn memory", secondPrompt)
+	}
+
+	graph := loop.ContextGraph()
+	nodes := graph.NodesInSubgraphs([]string{"sg-a"})
+	if len(nodes) != 2 {
+		t.Fatalf("memory nodes = %#v, want one node per turn", nodes)
+	}
+	if nodes[0].Statement != "remember blue" || nodes[1].Statement != "next" {
+		t.Fatalf("turn memory = %#v", nodes)
+	}
+	sources := graph.SourceSubgraphsOf(nodes[0].ID)
+	if len(sources) != 1 || sources[0] != "sg-a" {
+		t.Fatalf("source subgraphs = %v", sources)
+	}
+	upstream := graph.UpstreamNodes(nodes[1].ID)
+	if len(upstream) != 1 || upstream[0].ID != nodes[0].ID {
+		t.Fatalf("assistant previous node = %#v", upstream)
+	}
 }

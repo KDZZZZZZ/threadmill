@@ -61,7 +61,7 @@ func TestResponsesGenerateCallsResponsesAPI(t *testing.T) {
     "id":"rs_1",
     "type":"reasoning",
     "encrypted_content":"opaque-reasoning",
-    "summary":[]
+    "summary":[{"type":"summary_text","text":"need weather"}]
   },{
     "id":"fc_1",
     "type":"function_call",
@@ -104,12 +104,17 @@ func TestResponsesGenerateCallsResponsesAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := agent.AssistantMessage{
+		Thinking:   "need weather",
+		StopReason: agent.StopReasonToolUse,
+		API:        OpenAIResponses,
+		Provider:   OpenAIResponses,
+		Model:      "gpt-5",
 		ToolCalls: []agenttool.Call{{
 			ID:        "call_1",
 			Name:      "weather",
 			Arguments: json.RawMessage(`{"city":"Paris"}`),
 		}},
-		ModelData: json.RawMessage(`[{"id":"rs_1","type":"reasoning","encrypted_content":"opaque-reasoning","summary":[]},{"id":"fc_1","type":"function_call","call_id":"call_1","name":"weather","arguments":"{\"city\":\"Paris\"}","status":"completed"}]`),
+		ModelData: json.RawMessage(`[{"id":"rs_1","type":"reasoning","encrypted_content":"opaque-reasoning","summary":[{"type":"summary_text","text":"need weather"}]},{"id":"fc_1","type":"function_call","call_id":"call_1","name":"weather","arguments":"{\"city\":\"Paris\"}","status":"completed"}]`),
 		Usage: &agent.Usage{
 			InputTokens:      1200,
 			CachedTokens:     800,
@@ -209,6 +214,7 @@ func TestResponsesGenerateReplaysProviderOutput(t *testing.T) {
 				CallID:  "call_1",
 				Name:    "weather",
 				Content: "sunny",
+				Details: json.RawMessage(`{"hidden":true}`),
 			},
 		},
 	}})
@@ -256,5 +262,8 @@ func TestResponsesGenerateReturnsRefusal(t *testing.T) {
 	}
 	if got.Content != "I cannot help with that." {
 		t.Fatalf("Generate().Content = %q, want refusal", got.Content)
+	}
+	if got.StopReason != agent.StopReasonStop {
+		t.Fatalf("Generate().StopReason = %q, want %q", got.StopReason, agent.StopReasonStop)
 	}
 }
