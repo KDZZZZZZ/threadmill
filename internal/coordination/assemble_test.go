@@ -20,7 +20,7 @@ func TestAssembleUsesYamlToolsHooksAndPrompt(t *testing.T) {
 	})
 
 	roles, err := Assemble(
-		ctxgraph.NewStore(),
+		Stores{Memory: ctxgraph.NewStore()},
 		provider,
 		agent.FileAgents{
 			Planner: agent.FileAgent{
@@ -77,7 +77,7 @@ func TestAssembleUsesLLMContextWindowForOverflowCompact(t *testing.T) {
 	})
 
 	roles, err := Assemble(
-		ctxgraph.NewStore(),
+		Stores{Memory: ctxgraph.NewStore()},
 		provider,
 		agent.FileAgents{
 			Planner: agent.FileAgent{

@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
-	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	"github.com/KDZZZZZZ/threadmill/internal/env"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
@@ -27,7 +26,7 @@ type AssembleFunc func(Task) (Roles, error)
 // Assemble 按 yaml 装配 prompt、tool、hook，再把记忆图绑到 task.Env。
 // contextWindow 来自 llm.context_window。checkpoints 保存进行中的 ReAct，可为空。
 func Assemble(
-	store *ctxgraph.Store,
+	stores Stores,
 	provider agent.Provider,
 	agents agent.FileAgents,
 	extra []agenttool.Tool,
@@ -35,7 +34,7 @@ func Assemble(
 	checkpoints agent.CheckpointStore,
 ) AssembleFunc {
 	return func(task Task) (Roles, error) {
-		if store == nil {
+		if stores.Memory == nil {
 			return Roles{}, ErrNilStore
 		}
 		team, err := agent.NewTeam(
@@ -48,7 +47,7 @@ func Assemble(
 			return Roles{}, err
 		}
 		team.BindCheckpoints(checkpoints, task.ID)
-		e := env.Open(task.Env.ID, store.View(task.Env.ID))
+		e := env.Open(task.Env.ID, stores.Memory.View(task.Env.ID))
 		if err := team.Bind(e); err != nil {
 			return Roles{}, err
 		}

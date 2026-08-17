@@ -22,7 +22,7 @@ func TestGraphRunUnknownTask(t *testing.T) {
 		context.Background(),
 		"task-missing",
 		"in",
-		ctxgraph.NewStore(),
+		Stores{Memory: ctxgraph.NewStore()},
 		recordingAssemble(nil),
 	)
 	if !errors.Is(err, ErrUnknownTask) {
@@ -40,7 +40,7 @@ func TestGraphRunPlannerExecutorVerifierInOrder(t *testing.T) {
 		context.Background(),
 		task.ID,
 		"in",
-		ctxgraph.NewStore(),
+		Stores{Memory: ctxgraph.NewStore()},
 		recordingAssemble(&steps),
 	)
 	if err != nil {
@@ -78,7 +78,7 @@ func TestGraphRunResumesCanceledTaskWithoutReplayingFinishedRoles(t *testing.T) 
 		<-execStarted
 		cancel()
 	}()
-	_, err = graph.Run(ctx, task.ID, "in", ctxgraph.NewStore(), func(Task) (Roles, error) {
+	_, err = graph.Run(ctx, task.ID, "in", Stores{Memory: ctxgraph.NewStore()}, func(Task) (Roles, error) {
 		return Roles{
 			Planner: askerFunc(func(_ context.Context, query string) (string, error) {
 				return query + "/planner", nil
@@ -96,7 +96,7 @@ func TestGraphRunResumesCanceledTaskWithoutReplayingFinishedRoles(t *testing.T) 
 	}
 
 	var resumed []string
-	got, err := graph.Run(context.Background(), task.ID, "in", ctxgraph.NewStore(), func(Task) (Roles, error) {
+	got, err := graph.Run(context.Background(), task.ID, "in", Stores{Memory: ctxgraph.NewStore()}, func(Task) (Roles, error) {
 		return Roles{
 			Planner: askerFunc(func(_ context.Context, query string) (string, error) {
 				resumed = append(resumed, "planner:"+query)
@@ -148,7 +148,7 @@ func TestGraphRunResumesSpawnedChildWithoutReplayingFinishedRoles(t *testing.T) 
 		<-execStarted
 		cancel()
 	}()
-	_, err = graph.Run(ctx, root.ID, "in", ctxgraph.NewStore(), func(task Task) (Roles, error) {
+	_, err = graph.Run(ctx, root.ID, "in", Stores{Memory: ctxgraph.NewStore()}, func(task Task) (Roles, error) {
 		if task.ID == child.ID {
 			return Roles{
 				Planner:  instantAsker(),
@@ -175,7 +175,7 @@ func TestGraphRunResumesSpawnedChildWithoutReplayingFinishedRoles(t *testing.T) 
 	}
 
 	var childAsks []string
-	got, err := graph.Run(context.Background(), root.ID, "in", ctxgraph.NewStore(), func(task Task) (Roles, error) {
+	got, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore()}, func(task Task) (Roles, error) {
 		if task.ID != child.ID {
 			return instantRoles(), nil
 		}
@@ -245,7 +245,7 @@ func TestGraphRunResumesInProgressReact(t *testing.T) {
 		}}}, nil
 	})
 	assemble := Assemble(
-		ctxgraph.NewStore(),
+		Stores{Memory: ctxgraph.NewStore()},
 		provider,
 		agent.FileAgents{},
 		[]agenttool.Tool{&blockingTool{started: started}},
@@ -259,14 +259,14 @@ func TestGraphRunResumesInProgressReact(t *testing.T) {
 		<-started
 		cancel()
 	}()
-	if _, err := graph.Run(ctx, task.ID, "in", ctxgraph.NewStore(), assemble); !errors.Is(err, context.Canceled) {
+	if _, err := graph.Run(ctx, task.ID, "in", Stores{Memory: ctxgraph.NewStore()}, assemble); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
 
 	mu.Lock()
 	resuming = true
 	mu.Unlock()
-	got, err := graph.Run(context.Background(), task.ID, "in", ctxgraph.NewStore(), assemble)
+	got, err := graph.Run(context.Background(), task.ID, "in", Stores{Memory: ctxgraph.NewStore()}, assemble)
 	if err != nil {
 		t.Fatalf("resume Run() error = %v", err)
 	}
@@ -468,7 +468,7 @@ func TestGraphRunIsolatesToolsByTaskEnv(t *testing.T) {
 		}, nil
 	}
 
-	if _, err := graph.Run(context.Background(), root.ID, "in", store, assemble); err != nil {
+	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: store}, assemble); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 
@@ -497,9 +497,9 @@ func TestGraphRunAssembledReActIsolatesMemoryByEnv(t *testing.T) {
 		context.Background(),
 		root.ID,
 		"in",
-		store,
+		Stores{Memory: store},
 		Assemble(
-			store,
+			Stores{Memory: store},
 			reactMemoryProvider(),
 			envMemoryAgents(),
 			nil,
@@ -584,9 +584,9 @@ func TestGraphRunAssembledReActSharesMemoryWithinTask(t *testing.T) {
 		context.Background(),
 		task.ID,
 		"in",
-		store,
+		Stores{Memory: store},
 		Assemble(
-			store,
+			Stores{Memory: store},
 			provider,
 			envMemoryAgents(),
 			nil,
@@ -636,7 +636,7 @@ func TestAssembleBindsLeakingMemoryToolsToTaskEnv(t *testing.T) {
 		return ctxgraph.Clone("leak")
 	}, ctxgraph.Update)
 	roles, err := Assemble(
-		store,
+		Stores{Memory: store},
 		provider,
 		agent.FileAgents{},
 		extra,
@@ -730,7 +730,7 @@ func runAsync(t *testing.T, graph *Graph, assemble AssembleFunc, taskID string) 
 			context.Background(),
 			taskID,
 			"in",
-			ctxgraph.NewStore(),
+			Stores{Memory: ctxgraph.NewStore()},
 			assemble,
 		)
 		done <- err

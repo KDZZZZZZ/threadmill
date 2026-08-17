@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-
-	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 )
 
 var (
@@ -29,13 +27,13 @@ var (
 //     之后，才能声明完成。指向自己的边包括 sequence、spawn、join。
 //
 // 对每个被调度到的 task，顺序固定为：
-//  1. 装配环境：store.Fork(父 env, 本 task.env)，子环境不存在时拷贝父快照，已存在则不覆盖。
+//  1. 装配环境：stores.Fork(父 env, 本 task.env)，子环境不存在时拷贝父快照，已存在则不覆盖。
 //  2. 组装 agent：assemble(task) 得到三个角色；工具必须绑在 task.Env 上。
 //  3. 执行 ReAct：对当前角色调用 Asker.Ask（即 agent.Loop 的 ReAct 循环）。
 //     若设置了 ProgressStore，已完成角色跳过 Ask，用保存的输出继续；入口 Run 成功后扔掉整棵子树的进度。
 //
-// Join 不合记忆/文件内容，只作为指向合入点的边，挡住合入点的「声明完成」，不挡住它开始 Ask。
-// 因此合入点可以先跑 ReAct，再等子 verifier 的完成事件。
+// Join 挡住合入点的「声明完成」，不挡住它开始 Ask。合入点先跑 ReAct，等 Incoming 都完成后，
+// 再把每条 join 边的子 task 环境 Merge 进合入点的 task 环境。
 //
 // spawn 边指向子 task 的 planner，所以子 planner 可以和父角色同时 Ask，但必须等父角色
 // 声明完成后才能自己声明完成。Join 指回更早阶段、或 spawn 与 join 落在同一节点时，
@@ -44,7 +42,7 @@ func (g *Graph) Run(
 	ctx context.Context,
 	taskID string,
 	input string,
-	store *ctxgraph.Store,
+	stores Stores,
 	assemble AssembleFunc,
 ) (string, error) {
 	if ctx == nil {
@@ -53,7 +51,7 @@ func (g *Graph) Run(
 	if assemble == nil {
 		return "", ErrNilAssemble
 	}
-	if store == nil {
+	if stores.Memory == nil {
 		return "", ErrNilStore
 	}
 
@@ -65,7 +63,7 @@ func (g *Graph) Run(
 	g.mu.Unlock()
 	r := &runner{
 		graph:    g,
-		store:    store,
+		stores:   stores,
 		assemble: assemble,
 		progress: progress,
 		cancel:   cancel,
@@ -73,7 +71,7 @@ func (g *Graph) Run(
 	}
 	out, err := r.runTask(ctx, taskID, input)
 	// spawn 出去的子 task 在独立 goroutine 里跑；入口 verifier 完成后它们通常已结束，
-	// 这里再等一遍，避免 Run 返回后还有 goroutine 碰 store。
+	// 这里再等一遍，避免 Run 返回后还有 goroutine 碰 stores。
 	r.wg.Wait()
 	if r.err != nil {
 		return "", r.err
@@ -90,7 +88,7 @@ func (g *Graph) Run(
 // runner 是单次 Run 的调度状态，不写回 Graph。图只提供拓扑（Sequence / SpawnedTasks / Incoming）。
 type runner struct {
 	graph    *Graph
-	store    *ctxgraph.Store
+	stores   Stores
 	assemble AssembleFunc
 	progress ProgressStore
 	cancel   context.CancelFunc
@@ -111,7 +109,7 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (string, err
 		return "", fmt.Errorf("%w: %q", ErrUnknownTask, taskID)
 	}
 
-	r.store.Fork(task.Env.ParentID, task.Env.ID)
+	r.stores.Fork(task.Env.ParentID, task.Env.ID)
 	roles, err := r.assemble(task)
 	if err != nil {
 		return "", err
@@ -142,7 +140,8 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (string, err
 //     子 task 拿到的输入是本角色此刻的输入，因为父角色的 Ask 还没返回。
 //  2. Ask：跑这个角色的 ReAct。
 //  3. 等 Incoming 里每个节点的完成事件（sequence 前驱、spawn 来源、join 进来的 verifier）。
-//  4. finish：发出自己的完成事件。同一 task 的下一阶段、以及所有等这条边的节点，现在可以往下走。
+//  4. 对每条 join 入边，把前驱 task 环境 Merge 进本节点的 task 环境。
+//  5. finish：发出自己的完成事件。同一 task 的下一阶段、以及所有等这条边的节点，现在可以往下走。
 func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input string, outputs map[string]string) (string, error) {
 	asker := roles.asker(node.Role)
 	if asker == nil {
@@ -174,6 +173,16 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 	}
 	for _, pred := range r.graph.Incoming(node.ID) {
 		if err := r.waitDone(ctx, pred.ID); err != nil {
+			return "", err
+		}
+	}
+	target, _ := r.graph.Task(node.TaskID)
+	for _, pred := range r.graph.IncomingJoins(node.ID) {
+		child, ok := r.graph.Task(pred.TaskID)
+		if !ok {
+			continue
+		}
+		if err := r.stores.Merge(child.Env.ID, target.Env.ID); err != nil {
 			return "", err
 		}
 	}
