@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	"github.com/KDZZZZZZ/threadmill/internal/env"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -153,11 +155,34 @@ func TestLoopKeepsTailWithoutCommitHook(t *testing.T) {
 	}
 }
 
-func mustAddMemoryHooks(t *testing.T, loop *Loop) {
-	t.Helper()
-	if err := registerTools(loop, hiddenMemoryTools()); err != nil {
+func TestMemoryHooksRegistersHiddenTools(t *testing.T) {
+	resetDefaultStore(t)
+	loop, err := NewLoop(Config{
+		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+			return AssistantMessage{Content: "done"}, nil
+		}),
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
+	if err := loop.AddHooks(MemoryHooks(loop)); err != nil {
+		t.Fatal(err)
+	}
+	store := ctxgraph.NewStore()
+	if err := loop.Bind(env.Open("env-1", store.View("env-1"))); err != nil {
+		t.Fatalf("Bind() error = %v", err)
+	}
+	answer, err := loop.Ask(context.Background(), "start")
+	if err != nil {
+		t.Fatalf("Ask() error = %v", err)
+	}
+	if answer != "done" {
+		t.Fatalf("Ask() = %q, want done", answer)
+	}
+}
+
+func mustAddMemoryHooks(t *testing.T, loop *Loop) {
+	t.Helper()
 	if err := loop.AddHooks(MemoryHooks(loop)); err != nil {
 		t.Fatal(err)
 	}

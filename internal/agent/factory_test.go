@@ -328,6 +328,29 @@ func TestRoleAgentsUseMemoryHooksAndRolePrompt(t *testing.T) {
 	}
 }
 
+func TestNewPlannerBindAllowsAsk(t *testing.T) {
+	resetDefaultStore(t)
+	loop, err := NewPlanner(Config{
+		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+			return AssistantMessage{Content: "done"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := ctxgraph.NewStore()
+	if err := loop.Bind(env.Open("env-1", store.View("env-1"))); err != nil {
+		t.Fatalf("Bind() error = %v", err)
+	}
+	answer, err := loop.Ask(context.Background(), "start")
+	if err != nil {
+		t.Fatalf("Ask() error = %v", err)
+	}
+	if answer != "done" {
+		t.Fatalf("Ask() = %q, want done", answer)
+	}
+}
+
 func TestNewPlannerKeepsConfiguredAgentID(t *testing.T) {
 	resetDefaultStore(t)
 	loop, err := NewPlanner(Config{

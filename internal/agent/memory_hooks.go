@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 )
 
 // InjectSubscribedMemory 把当前订阅子图里的节点拼进系统提示词。
@@ -40,11 +41,31 @@ func execHiddenErr(loop *Loop, ctx context.Context, name string, args json.RawMe
 	return err
 }
 
-// MemoryHooks 挂上默认的记忆注入、溢出压缩和退出整理。
-func MemoryHooks(loop *Loop) Hooks {
+func memoryHookSet(loop *Loop) Hooks {
 	return Hooks{
 		AssembleRequest: []AssembleRequestHook{InjectSubscribedMemory(loop)},
 		AfterAssistant:  []AfterAssistantHook{CompactOnOverflow(loop)},
 		CommitTurn:      []CommitTurnHook{CommitTailOnTurnEnd(loop)},
 	}
+}
+
+func ensureHiddenMemoryTools(loop *Loop) error {
+	if loop == nil {
+		return nil
+	}
+	return registerTools(loop, hiddenMemoryTools())
+}
+
+// MemoryHooks 挂上默认的记忆注入、溢出压缩和退出整理，并注册对应的隐藏工具。
+func MemoryHooks(loop *Loop) Hooks {
+	if err := ensureHiddenMemoryTools(loop); err != nil {
+		return Hooks{
+			AssembleRequest: []AssembleRequestHook{
+				func(_ context.Context, request Request) (Request, error) {
+					return request, fmt.Errorf("install hidden memory tools: %w", err)
+				},
+			},
+		}
+	}
+	return memoryHookSet(loop)
 }

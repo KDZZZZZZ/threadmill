@@ -344,11 +344,19 @@ func withFileDefaults(config Config, defaultID, defaultPrompt string) Config {
 // Bind 把 yaml 装好的工具接到工作区；同一 task 的角色共用这份 env。
 func (t *Team) Bind(e env.Env) error {
 	for _, loop := range []*Loop{t.Planner, t.Executor, t.Verifier, t.Organizer} {
-		if err := bindLoopTools(loop, e); err != nil {
+		if err := loop.Bind(e); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// Bind 把循环里的工具接到工作区，包括 NewPlanner 自行创建的整理 Agent。
+func (l *Loop) Bind(e env.Env) error {
+	if l == nil {
+		return nil
+	}
+	return bindLoopTools(l, e)
 }
 
 func bindLoopTools(loop *Loop, e env.Env) error {
@@ -597,10 +605,10 @@ func newMemoryLoop(config Config, defaultID, prompt string, organizer *Loop) (*L
 	if err != nil {
 		return nil, err
 	}
-	if err := registerTools(loop, hiddenMemoryTools()); err != nil {
+	if err := ensureHiddenMemoryTools(loop); err != nil {
 		return nil, err
 	}
-	if err := loop.AddHooks(MemoryHooks(loop)); err != nil {
+	if err := loop.AddHooks(memoryHookSet(loop)); err != nil {
 		return nil, err
 	}
 	return loop, nil

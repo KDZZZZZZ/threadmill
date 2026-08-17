@@ -220,8 +220,8 @@ func TestAssembleRequestReadsLiveSubscribedSubgraphContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustAddMemoryHooks(t, loop)
-	if err := bindLoopTools(loop, env.Open("env-1", store.View("env-1"))); err != nil {
-		t.Fatalf("bindLoopTools() error = %v", err)
+	if err := loop.Bind(env.Open("env-1", store.View("env-1"))); err != nil {
+		t.Fatalf("Bind() error = %v", err)
 	}
 	loop.SetSubscribedSubgraphs([]string{"sg-a"})
 	loop.Enqueue(UserMessage{Content: "start"})
@@ -320,8 +320,8 @@ func TestIndependentAgentCopyIsUnique(t *testing.T) {
 		}},
 	}
 	bindEnvGraph(t, loopA, store, "env-a", graph)
-	if err := bindLoopTools(loopB, env.Open("env-b", store.View("env-b"))); err != nil {
-		t.Fatalf("bindLoopTools() error = %v", err)
+	if err := loopB.Bind(env.Open("env-b", store.View("env-b"))); err != nil {
+		t.Fatalf("Bind() error = %v", err)
 	}
 
 	nodesA := store.Load("env-a").NodesInSubgraphs([]string{"sg-a"})
@@ -337,8 +337,8 @@ func TestIndependentAgentCopyIsUnique(t *testing.T) {
 func bindEnvGraph(t *testing.T, loop *Loop, store *ctxgraph.Store, envID string, graph ctxgraph.Graph) {
 	t.Helper()
 	store.Save(envID, graph)
-	if err := bindLoopTools(loop, env.Open(envID, store.View(envID))); err != nil {
-		t.Fatalf("bindLoopTools() error = %v", err)
+	if err := loop.Bind(env.Open(envID, store.View(envID))); err != nil {
+		t.Fatalf("Bind() error = %v", err)
 	}
 }
 
