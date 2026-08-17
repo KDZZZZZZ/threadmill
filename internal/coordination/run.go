@@ -176,7 +176,10 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 			return "", err
 		}
 	}
-	target, _ := r.graph.Task(node.TaskID)
+	target, ok := r.graph.Task(node.TaskID)
+	if !ok {
+		return "", fmt.Errorf("%w: %q", ErrUnknownTask, node.TaskID)
+	}
 	for _, pred := range r.graph.IncomingJoins(node.ID) {
 		child, ok := r.graph.Task(pred.TaskID)
 		if !ok {

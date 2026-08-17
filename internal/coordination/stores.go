@@ -13,7 +13,9 @@ type Stores struct {
 
 // Fork 把父环境复制到子环境；Files 为空时只 fork 记忆。
 func (s Stores) Fork(parentID, childID string) {
-	s.Memory.Fork(parentID, childID)
+	if s.Memory != nil {
+		s.Memory.Fork(parentID, childID)
+	}
 	if s.Files != nil {
 		s.Files.Fork(parentID, childID)
 	}
