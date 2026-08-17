@@ -183,6 +183,83 @@ func TestStoreMergeUnionsChildOnlyNodeSubgraphAndEdge(t *testing.T) {
 	}
 }
 
+func TestStoreMergeDoesNotRestoreInheritedEdges(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	store.Save("parent", Graph{
+		Nodes: []Node{
+			{ID: "a", Statement: "a"},
+			{ID: "b", Statement: "b"},
+		},
+		Edges: []Edge{{
+			FromRef:  NodeRef("a"),
+			ToNodeID: "b",
+			Kind:     EdgeKindLogicalAdjacent,
+		}},
+	})
+	store.Fork("parent", "child")
+	store.Save("parent", Graph{
+		Nodes: []Node{
+			{ID: "a", Statement: "a"},
+			{ID: "b", Statement: "b"},
+		},
+	})
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	got := store.Load("parent")
+	inherited := Edge{FromRef: NodeRef("a"), ToNodeID: "b", Kind: EdgeKindLogicalAdjacent}
+	if edgeExists(got, inherited) {
+		t.Fatalf("inherited edge restored after parent deleted it: %#v", got.Edges)
+	}
+}
+
+func TestStoreMergeReIDsCollisionEvenIfStatementExists(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	store.Fork("parent", "child")
+	store.Save("parent", Graph{
+		Nodes: []Node{
+			{ID: "other", Statement: "child-compact", Kind: NodeKindFact},
+			{ID: "mem-1", Statement: "parent-compact", Kind: NodeKindFact},
+		},
+	})
+	store.Save("child", Graph{
+		Nodes: []Node{{
+			ID:          "mem-1",
+			Statement:   "child-compact",
+			Kind:        NodeKindHypothesis,
+			Status:      NodeStatusDisputed,
+			SubgraphIDs: []string{"sg-c"},
+		}},
+	})
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	got := store.Load("parent")
+	var found Node
+	n := 0
+	for _, node := range got.Nodes {
+		if node.Statement == "child-compact" && node.Kind == NodeKindHypothesis {
+			found = node
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("re-ID'd child nodes = %d in %#v, want 1", n, got.Nodes)
+	}
+	if found.ID == "mem-1" || found.ID == "other" {
+		t.Fatalf("child node id = %q, want a fresh id", found.ID)
+	}
+	if found.Status != NodeStatusDisputed || len(found.SubgraphIDs) != 1 || found.SubgraphIDs[0] != "sg-c" {
+		t.Fatalf("child node lost fields: %#v", found)
+	}
+}
+
 func TestStoreMergeSkipsIdenticalNode(t *testing.T) {
 	t.Parallel()
 

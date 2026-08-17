@@ -141,16 +141,15 @@ func mergeAdditive(fromID string, base, ours, theirs Graph) Graph {
 			if oursNode.Statement == node.Statement {
 				continue
 			}
-			if id := nodeIDWithStatement(result, node.Statement); id != "" {
-				remap[node.ID] = id
+			newID, existed := collisionNodeID(fromID, node, result, used)
+			remap[node.ID] = newID
+			if existed {
 				continue
 			}
-			newID := unusedNodeID(fromID, node.ID, used)
 			cloned := cloneNode(node)
 			cloned.ID = newID
 			result.Nodes = append(result.Nodes, cloned)
 			used[newID] = struct{}{}
-			remap[node.ID] = newID
 			continue
 		}
 		result.Nodes = append(result.Nodes, cloneNode(node))
@@ -165,6 +164,9 @@ func mergeAdditive(fromID string, base, ours, theirs Graph) Graph {
 	}
 
 	for _, edge := range theirs.Edges {
+		if hasEdge(base, edge) {
+			continue
+		}
 		edge = rewriteEdge(edge, remap)
 		if hasEdge(result, edge) {
 			continue
@@ -176,27 +178,23 @@ func mergeAdditive(fromID string, base, ours, theirs Graph) Graph {
 	return result
 }
 
-func nodeIDWithStatement(g Graph, statement string) string {
-	for _, node := range g.Nodes {
-		if node.ID != "" && node.Statement == statement {
-			return node.ID
-		}
-	}
-	return ""
-}
-
-func unusedNodeID(fromID, oldID string, used map[string]struct{}) string {
-	id := fromID + "-" + oldID
-	if id != oldID {
-		if _, exists := used[id]; !exists {
-			return id
+func collisionNodeID(fromID string, node Node, result Graph, used map[string]struct{}) (string, bool) {
+	preferred := fromID + "-" + node.ID
+	if preferred != node.ID {
+		if existing, ok := result.nodeByID(preferred); ok {
+			if existing.Statement == node.Statement {
+				return preferred, true
+			}
+		} else {
+			return preferred, false
 		}
 	}
 	for i := 1; ; i++ {
-		id = fmt.Sprintf("mem-%d", i)
-		if _, exists := used[id]; !exists {
-			return id
+		id := fmt.Sprintf("mem-%d", i)
+		if _, taken := used[id]; taken {
+			continue
 		}
+		return id, false
 	}
 }
 
