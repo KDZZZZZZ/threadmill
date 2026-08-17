@@ -95,6 +95,24 @@ func TestBindEnvRebindsEnvBinder(t *testing.T) {
 	}
 }
 
+func TestBindEnvForwardsHidden(t *testing.T) {
+	t.Parallel()
+
+	tools := BindEnv(env.Open("env-1", nil), []Tool{hiddenSpy{spyTool: spyTool{
+		name: "secret",
+		execute: func(context.Context, Call) (Output, error) {
+			return Output{Content: "ok"}, nil
+		},
+	}}})
+	if len(tools) != 1 {
+		t.Fatalf("len(tools) = %d, want 1", len(tools))
+	}
+	h, ok := tools[0].(interface{ Hidden() bool })
+	if !ok || !h.Hidden() {
+		t.Fatal("BindEnv dropped Hidden from the inner tool")
+	}
+}
+
 func TestBindDoesNotRebindByToolName(t *testing.T) {
 	t.Parallel()
 
@@ -234,6 +252,12 @@ type envBinderSpy struct {
 	spyTool
 	boundID string
 }
+
+type hiddenSpy struct {
+	spyTool
+}
+
+func (hiddenSpy) Hidden() bool { return true }
 
 func (s *envBinderSpy) BindEnv(e env.Env) Tool {
 	s.boundID = e.ID

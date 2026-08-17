@@ -46,15 +46,8 @@ func TranscriptFromContext(ctx context.Context) (Transcript, bool) {
 }
 
 func toolHidden(tool agenttool.Tool) bool {
-	if h, ok := tool.(hidden); ok && h.Hidden() {
-		return true
-	}
-	switch tool.Definition().Name {
-	case compactMemoryToolName, injectSubscribedMemoryToolName:
-		return true
-	default:
-		return false
-	}
+	h, ok := tool.(hidden)
+	return ok && h.Hidden()
 }
 
 type compactMemoryTool struct {
@@ -217,8 +210,10 @@ func (l *Loop) execHidden(ctx context.Context, name string, args json.RawMessage
 	if err != nil {
 		return out, err
 	}
-	if err := l.applyCompactTail(out); err != nil {
-		return out, err
+	if name == compactMemoryToolName {
+		if err := l.applyCompactTail(out); err != nil {
+			return out, err
+		}
 	}
 	return out, nil
 }
