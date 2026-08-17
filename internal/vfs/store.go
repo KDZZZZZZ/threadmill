@@ -39,7 +39,7 @@ type blob struct {
 type layer struct {
 	parentID string
 	files    map[string]blob
-	baseline map[string]blob // Fork 瞬间的父 overlay；nil 表示不是 Fork 出来的
+	baseline []map[string]blob // Fork 瞬间从父到根的 overlay 快照；nil 表示不是 Fork 出来的
 }
 
 // Store 按环境保存 overlay。Fork 只挂 parent 指针，不复制树。
@@ -57,7 +57,7 @@ func NewStore(baseDir string) *Store {
 	}
 }
 
-// Fork 给 child 挂上 parent 指针和空 overlay，并记下当时的父 overlay 作为合入基线。
+// Fork 给 child 挂上 parent 指针和空 overlay，并记下当时从父到根的 overlay 作为合入基线。
 // 子环境已存在时不覆盖，也不改基线。
 func (s *Store) Fork(parentID, childID string) {
 	if childID == "" {
@@ -68,16 +68,10 @@ func (s *Store) Fork(parentID, childID string) {
 	if _, exists := s.envs[childID]; exists {
 		return
 	}
-	var baseline map[string]blob
-	if p, ok := s.envs[parentID]; ok {
-		baseline = cloneFiles(p.files)
-	} else {
-		baseline = map[string]blob{}
-	}
 	s.envs[childID] = &layer{
 		parentID: parentID,
 		files:    make(map[string]blob),
-		baseline: baseline,
+		baseline: s.snapshotOverlays(parentID),
 	}
 }
 
@@ -106,7 +100,7 @@ func (s *Store) Merge(from, into string) error {
 	for path, theirsBlob := range childFiles {
 		theirs := overlayContent(theirsBlob)
 		base := s.mergeBase(fromLayer, parentID, path)
-		ours := s.lookupContent(into, path, "")
+		ours := s.lookupContent(into, path)
 		if contentEqual(theirs, base) || contentEqual(ours, theirs) {
 			continue
 		}
@@ -137,16 +131,13 @@ func overlayContent(b blob) content {
 
 func (s *Store) mergeBase(fromLayer *layer, parentID, rel string) content {
 	if fromLayer != nil && fromLayer.baseline != nil {
-		if b, ok := fromLayer.baseline[rel]; ok {
-			return overlayContent(b)
-		}
-		// 不在 fork 基线里：跳过当前父 overlay，避免把 fork 之后的父写入当成基线。
-		return s.lookupContent(parentID, rel, parentID)
+		return s.lookupFrozen(fromLayer.baseline, rel)
 	}
-	return s.lookupContent(parentID, rel, "")
+	return s.lookupContent(parentID, rel)
 }
 
-func (s *Store) lookupContent(envID, rel, skipID string) content {
+func (s *Store) snapshotOverlays(envID string) []map[string]blob {
+	out := []map[string]blob{}
 	seen := map[string]struct{}{}
 	for id := envID; id != ""; {
 		if _, loop := seen[id]; loop {
@@ -157,16 +148,47 @@ func (s *Store) lookupContent(envID, rel, skipID string) content {
 		if !ok {
 			break
 		}
-		if id != skipID {
-			if b, ok := l.files[rel]; ok {
-				return overlayContent(b)
-			}
-			if layerMasks(l, rel) {
-				return content{exists: true, tombstone: true}
-			}
+		out = append(out, cloneFiles(l.files))
+		id = l.parentID
+	}
+	return out
+}
+
+func (s *Store) lookupFrozen(chain []map[string]blob, rel string) content {
+	for _, files := range chain {
+		if b, ok := files[rel]; ok {
+			return overlayContent(b)
+		}
+		if filesMask(files, rel) {
+			return content{exists: true, tombstone: true}
+		}
+	}
+	return s.lookupHost(rel)
+}
+
+func (s *Store) lookupContent(envID, rel string) content {
+	seen := map[string]struct{}{}
+	for id := envID; id != ""; {
+		if _, loop := seen[id]; loop {
+			break
+		}
+		seen[id] = struct{}{}
+		l, ok := s.envs[id]
+		if !ok {
+			break
+		}
+		if b, ok := l.files[rel]; ok {
+			return overlayContent(b)
+		}
+		if layerMasks(l, rel) {
+			return content{exists: true, tombstone: true}
 		}
 		id = l.parentID
 	}
+	return s.lookupHost(rel)
+}
+
+func (s *Store) lookupHost(rel string) content {
 	host, err := s.resolveHost(rel)
 	if err != nil {
 		return content{}
@@ -399,8 +421,12 @@ func (s *Store) lookupBlob(envID, rel string) ([]byte, bool, bool) {
 }
 
 func layerMasks(l *layer, rel string) bool {
+	return filesMask(l.files, rel)
+}
+
+func filesMask(files map[string]blob, rel string) bool {
 	for _, prefix := range ancestorPrefixes(rel) {
-		if _, ok := l.files[prefix]; ok {
+		if _, ok := files[prefix]; ok {
 			return true
 		}
 	}
