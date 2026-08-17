@@ -564,6 +564,35 @@ func TestStoreMergeConflictsWhenMatchingDirTombstoneHidesTargetDescendant(t *tes
 	}
 }
 
+func TestStoreMergeConflictsWhenTargetReplacesTombstonedDirWithFile(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Delete("dir"); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	if err := parent.Write("dir", []byte("now-a-file")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.View("child").Write("dir/x.txt", []byte("from-child")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Merge("child", "parent")
+	if err == nil {
+		t.Fatal("Merge succeeded, want conflict")
+	}
+	got, readErr := parent.Read("dir")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "now-a-file" {
+		t.Fatalf("parent dir = %q, want now-a-file", got)
+	}
+}
+
 func TestStoreMergeConflictsWhenGrandparentChangedDirDescendantAfterNestedFork(t *testing.T) {
 	t.Parallel()
 
@@ -751,6 +780,36 @@ func TestViewListKeepsDirAfterNestedTombstone(t *testing.T) {
 	}
 	if dirEntNamed(children, "nested.txt") {
 		t.Fatal("List(\"sub\") still showed the tombstoned file")
+	}
+}
+
+func TestViewListRootShowsRecreatedDirAfterSameLayerTombstone(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	view := store.View("env-a")
+	if err := view.Delete("sub"); err != nil {
+		t.Fatal(err)
+	}
+	if err := view.Write("sub/x.txt", []byte("kept")); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 20; i++ {
+		ents, err := view.List(".")
+		if err != nil {
+			t.Fatalf("List(.): %v", err)
+		}
+		if !dirEntNamed(ents, "sub") {
+			t.Fatalf("List(.) missing recreated sub on iteration %d: %#v", i, ents)
+		}
+	}
+	got, err := view.Read("sub/x.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "kept" {
+		t.Fatalf("sub/x.txt = %q, want kept", got)
 	}
 }
 

@@ -146,10 +146,16 @@ type content struct {
 	exists    bool
 	tombstone bool
 	data      []byte
+	maskFrom  string
+	maskFile  bool
 }
 
 func overlayContent(b blob) content {
 	return content{exists: true, tombstone: b.tombstone, data: b.data}
+}
+
+func maskedContent(prefix string, b blob) content {
+	return content{exists: true, tombstone: true, maskFrom: prefix, maskFile: !b.tombstone}
 }
 
 func (s *Store) mergeBase(fromLayer *layer, parentID, rel string) content {
@@ -182,8 +188,8 @@ func (s *Store) lookupFrozen(chain []map[string]blob, rel string) content {
 		if b, ok := files[rel]; ok {
 			return overlayContent(b)
 		}
-		if filesMask(files, rel) {
-			return content{exists: true, tombstone: true}
+		if c, ok := filesMask(files, rel); ok {
+			return c
 		}
 	}
 	return s.lookupHost(rel)
@@ -203,8 +209,8 @@ func (s *Store) lookupContent(envID, rel string) content {
 		if b, ok := l.files[rel]; ok {
 			return overlayContent(b)
 		}
-		if layerMasks(l, rel) {
-			return content{exists: true, tombstone: true}
+		if c, ok := filesMask(l.files, rel); ok {
+			return c
 		}
 		id = l.parentID
 	}
@@ -264,7 +270,13 @@ func contentEqual(a, b content) bool {
 	if !a.exists && !b.exists {
 		return true
 	}
-	if a.exists != b.exists || a.tombstone != b.tombstone {
+	if a.exists != b.exists {
+		return false
+	}
+	if a.maskFrom != "" || b.maskFrom != "" {
+		return a.maskFrom == b.maskFrom && a.maskFile == b.maskFile
+	}
+	if a.tombstone != b.tombstone {
 		return false
 	}
 	if a.tombstone {
@@ -480,16 +492,17 @@ func (s *Store) lookupBlob(envID, rel string) ([]byte, bool, bool) {
 }
 
 func layerMasks(l *layer, rel string) bool {
-	return filesMask(l.files, rel)
+	_, ok := filesMask(l.files, rel)
+	return ok
 }
 
-func filesMask(files map[string]blob, rel string) bool {
+func filesMask(files map[string]blob, rel string) (content, bool) {
 	for _, prefix := range ancestorPrefixes(rel) {
-		if _, ok := files[prefix]; ok {
-			return true
+		if b, ok := files[prefix]; ok {
+			return maskedContent(prefix, b), true
 		}
 	}
-	return false
+	return content{}, false
 }
 
 func ancestorPrefixes(rel string) []string {
@@ -539,19 +552,27 @@ func (s *Store) applyOverlayList(envID, rel string, ents map[string]DirEnt) {
 				delete(ents, name)
 			}
 		}
-		for filePath, b := range l.files {
-			name, isDir, ok := listPart(rel, filePath)
-			if !ok {
-				continue
-			}
-			if b.tombstone {
-				if !isDir {
-					delete(ents, name)
-				}
-				continue
-			}
-			ents[name] = DirEnt{Name: name, IsDir: isDir}
+		applyLayerList(l.files, rel, ents, true)
+		applyLayerList(l.files, rel, ents, false)
+	}
+}
+
+func applyLayerList(files map[string]blob, rel string, ents map[string]DirEnt, tombstones bool) {
+	for filePath, b := range files {
+		if b.tombstone != tombstones {
+			continue
 		}
+		name, isDir, ok := listPart(rel, filePath)
+		if !ok {
+			continue
+		}
+		if b.tombstone {
+			if !isDir {
+				delete(ents, name)
+			}
+			continue
+		}
+		ents[name] = DirEnt{Name: name, IsDir: isDir}
 	}
 }
 
