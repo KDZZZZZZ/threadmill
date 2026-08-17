@@ -13,6 +13,7 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
+	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
 func TestGraphRunUnknownTask(t *testing.T) {
@@ -103,6 +104,44 @@ func TestGraphRunJoinMergesChildMemory(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("join did not merge child memory into %s: %#v", root.Env.ID, got.Nodes)
+	}
+}
+
+func TestGraphRunJoinMergesChildFiles(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	child := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
+	files := vfs.NewStore(t.TempDir())
+
+	assemble := func(task Task) (Roles, error) {
+		roleAsker := func(role string) Asker {
+			return askerFunc(func(_ context.Context, query string) (string, error) {
+				if task.ID == child.ID && role == RoleVerifier {
+					if err := files.View(task.Env.ID).Write("from-child.txt", []byte("from-child")); err != nil {
+						return "", err
+					}
+				}
+				return query + "/" + role, nil
+			})
+		}
+		return Roles{
+			Planner:  roleAsker(RolePlanner),
+			Executor: roleAsker(RoleExecutor),
+			Verifier: roleAsker(RoleVerifier),
+		}, nil
+	}
+
+	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	got, err := files.View(root.Env.ID).Read("from-child.txt")
+	if err != nil {
+		t.Fatalf("join did not merge child file into %s: %v", root.Env.ID, err)
+	}
+	if string(got) != "from-child" {
+		t.Fatalf("merged from-child.txt = %q, want from-child", got)
 	}
 }
 

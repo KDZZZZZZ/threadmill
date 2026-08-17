@@ -21,20 +21,16 @@ func (s Stores) Fork(parentID, childID string) {
 	}
 }
 
-// Merge 把 from 环境合入 into。Memory 走 ctxgraph.Store.Merge；Files 若实现了 Merge 则同样调用。
+// Merge 把 from 环境合入 into。
 func (s Stores) Merge(from, into string) error {
 	if s.Memory != nil {
-		if m, ok := any(s.Memory).(interface{ Merge(from, into string) error }); ok {
-			if err := m.Merge(from, into); err != nil {
-				return err
-			}
+		if err := s.Memory.Merge(from, into); err != nil {
+			return err
 		}
 	}
 	if s.Files != nil {
-		if m, ok := any(s.Files).(interface{ Merge(from, into string) error }); ok {
-			if err := m.Merge(from, into); err != nil {
-				return err
-			}
+		if err := s.Files.Merge(from, into); err != nil {
+			return err
 		}
 	}
 	return nil

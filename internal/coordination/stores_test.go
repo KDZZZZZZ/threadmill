@@ -78,3 +78,24 @@ func TestStoresMergeUnionsChildMemory(t *testing.T) {
 		t.Fatalf("Merge() nil stores = %v, want nil", err)
 	}
 }
+
+func TestStoresMergeUnionsChildFiles(t *testing.T) {
+	t.Parallel()
+
+	files := vfs.NewStore(t.TempDir())
+	files.Fork("parent", "child")
+	if err := files.View("child").Write("from-child.txt", []byte("from-child")); err != nil {
+		t.Fatal(err)
+	}
+	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
+	if err := stores.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge() = %v", err)
+	}
+	got, err := files.View("parent").Read("from-child.txt")
+	if err != nil {
+		t.Fatalf("merged parent missing child file: %v", err)
+	}
+	if string(got) != "from-child" {
+		t.Fatalf("merged from-child.txt = %q, want from-child", got)
+	}
+}
