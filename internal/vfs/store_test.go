@@ -3,6 +3,7 @@ package vfs
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -191,6 +192,168 @@ func TestStoreForkDoesNotOverwriteExistingChild(t *testing.T) {
 	}
 	if string(got) != "existing" {
 		t.Fatalf("child kept.txt = %q, want existing", got)
+	}
+}
+
+func TestStoreMergeAppliesChildWriteAndKeepsParentWrite(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Write("only-parent.txt", []byte("parent-only")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	child := store.View("child")
+	if err := child.Write("only-child.txt", []byte("child-only")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+
+	gotChild, err := parent.Read("only-child.txt")
+	if err != nil {
+		t.Fatalf("parent missing child write: %v", err)
+	}
+	if string(gotChild) != "child-only" {
+		t.Fatalf("parent only-child.txt = %q, want child-only", gotChild)
+	}
+	gotParent, err := parent.Read("only-parent.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotParent) != "parent-only" {
+		t.Fatalf("parent only-parent.txt = %q, want parent-only", gotParent)
+	}
+	if _, err := store.View("child").Read("only-parent.txt"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStoreMergeAppliesChildTombstone(t *testing.T) {
+	t.Parallel()
+
+	store, base := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Write("from-parent.txt", []byte("parent-blob")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	child := store.View("child")
+	if err := child.Delete("hello.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Delete("from-parent.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+
+	if _, err := parent.Read("hello.txt"); err == nil {
+		t.Fatal("merged tombstone still exposed the base file")
+	}
+	if _, err := parent.Read("from-parent.txt"); err == nil {
+		t.Fatal("merged tombstone still exposed the parent overlay file")
+	}
+	host, err := os.ReadFile(filepath.Join(base, "hello.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(host) != "hello" {
+		t.Fatalf("base hello.txt = %q, want untouched hello", host)
+	}
+}
+
+func TestStoreMergeConflictsWhenBothSidesWrote(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	store.Fork("parent", "child")
+	if err := parent.Write("conflict.txt", []byte("ours")); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Write("keep.txt", []byte("keep")); err != nil {
+		t.Fatal(err)
+	}
+	child := store.View("child")
+	if err := child.Write("conflict.txt", []byte("theirs")); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Write("extra.txt", []byte("child-extra")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Merge("child", "parent")
+	if err == nil {
+		t.Fatal("Merge succeeded, want conflict")
+	}
+	if !strings.Contains(err.Error(), "conflict.txt") {
+		t.Fatalf("conflict error = %v, want path conflict.txt", err)
+	}
+
+	got, readErr := parent.Read("conflict.txt")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "ours" {
+		t.Fatalf("parent conflict.txt = %q, want ours", got)
+	}
+	if _, err := parent.Read("extra.txt"); err == nil {
+		t.Fatal("conflict Merge applied remaining child paths")
+	}
+	keep, err := parent.Read("keep.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(keep) != "keep" {
+		t.Fatalf("parent keep.txt = %q, want keep", keep)
+	}
+}
+
+func TestStoreMergeReplayDoesNotError(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	store.Fork("parent", "child")
+	if err := store.View("child").Write("from-child.txt", []byte("only-child")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("first Merge: %v", err)
+	}
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("second Merge: %v", err)
+	}
+
+	got, err := store.View("parent").Read("from-child.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "only-child" {
+		t.Fatalf("parent from-child.txt = %q, want only-child", got)
+	}
+}
+
+func TestStoreMergeEmptyIntoIsNoop(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	store.Fork("parent", "child")
+	if err := store.View("child").Write("from-child.txt", []byte("only-child")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", ""); err != nil {
+		t.Fatalf("Merge into empty: %v", err)
+	}
+	if _, err := store.View("parent").Read("from-child.txt"); err == nil {
+		t.Fatal("empty into applied onto parent")
 	}
 }
 

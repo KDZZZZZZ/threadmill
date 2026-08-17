@@ -4,6 +4,7 @@
 package vfs
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -38,6 +39,7 @@ type blob struct {
 type layer struct {
 	parentID string
 	files    map[string]blob
+	baseline map[string]blob // Fork 瞬间的父 overlay；nil 表示不是 Fork 出来的
 }
 
 // Store 按环境保存 overlay。Fork 只挂 parent 指针，不复制树。
@@ -55,7 +57,8 @@ func NewStore(baseDir string) *Store {
 	}
 }
 
-// Fork 给 child 挂上 parent 指针和空 overlay。子环境已存在时不覆盖。
+// Fork 给 child 挂上 parent 指针和空 overlay，并记下当时的父 overlay 作为合入基线。
+// 子环境已存在时不覆盖，也不改基线。
 func (s *Store) Fork(parentID, childID string) {
 	if childID == "" {
 		return
@@ -65,10 +68,142 @@ func (s *Store) Fork(parentID, childID string) {
 	if _, exists := s.envs[childID]; exists {
 		return
 	}
+	var baseline map[string]blob
+	if p, ok := s.envs[parentID]; ok {
+		baseline = cloneFiles(p.files)
+	} else {
+		baseline = map[string]blob{}
+	}
 	s.envs[childID] = &layer{
 		parentID: parentID,
 		files:    make(map[string]blob),
+		baseline: baseline,
 	}
+}
+
+// Merge 把 from 的 overlay 增量三路并入 into。冲突失败，不改 into。
+func (s *Store) Merge(from, into string) error {
+	if into == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var childFiles map[string]blob
+	var fromLayer *layer
+	parentID := ""
+	if l, ok := s.envs[from]; ok {
+		fromLayer = l
+		childFiles = l.files
+		parentID = l.parentID
+	}
+
+	type pending struct {
+		path string
+		b    blob
+	}
+	var apply []pending
+	for path, theirsBlob := range childFiles {
+		theirs := overlayContent(theirsBlob)
+		base := s.mergeBase(fromLayer, parentID, path)
+		ours := s.lookupContent(into, path, "")
+		if contentEqual(theirs, base) || contentEqual(ours, theirs) {
+			continue
+		}
+		if !contentEqual(ours, base) {
+			return fmt.Errorf("vfs: merge conflict: %s", path)
+		}
+		apply = append(apply, pending{path: path, b: cloneBlob(theirsBlob)})
+	}
+	if len(apply) == 0 {
+		return nil
+	}
+	dst := s.ensure(into)
+	for _, e := range apply {
+		dst.files[e.path] = e.b
+	}
+	return nil
+}
+
+type content struct {
+	exists    bool
+	tombstone bool
+	data      []byte
+}
+
+func overlayContent(b blob) content {
+	return content{exists: true, tombstone: b.tombstone, data: b.data}
+}
+
+func (s *Store) mergeBase(fromLayer *layer, parentID, rel string) content {
+	if fromLayer != nil && fromLayer.baseline != nil {
+		if b, ok := fromLayer.baseline[rel]; ok {
+			return overlayContent(b)
+		}
+		// 不在 fork 基线里：跳过当前父 overlay，避免把 fork 之后的父写入当成基线。
+		return s.lookupContent(parentID, rel, parentID)
+	}
+	return s.lookupContent(parentID, rel, "")
+}
+
+func (s *Store) lookupContent(envID, rel, skipID string) content {
+	seen := map[string]struct{}{}
+	for id := envID; id != ""; {
+		if _, loop := seen[id]; loop {
+			break
+		}
+		seen[id] = struct{}{}
+		l, ok := s.envs[id]
+		if !ok {
+			break
+		}
+		if id != skipID {
+			if b, ok := l.files[rel]; ok {
+				return overlayContent(b)
+			}
+			if layerMasks(l, rel) {
+				return content{exists: true, tombstone: true}
+			}
+		}
+		id = l.parentID
+	}
+	host, err := s.resolveHost(rel)
+	if err != nil {
+		return content{}
+	}
+	data, err := os.ReadFile(host)
+	if err != nil {
+		return content{}
+	}
+	return content{exists: true, data: data}
+}
+
+func contentEqual(a, b content) bool {
+	if !a.exists && !b.exists {
+		return true
+	}
+	if a.exists != b.exists || a.tombstone != b.tombstone {
+		return false
+	}
+	if a.tombstone {
+		return true
+	}
+	return bytes.Equal(a.data, b.data)
+}
+
+func cloneBlob(b blob) blob {
+	if b.tombstone {
+		return blob{tombstone: true}
+	}
+	return blob{data: cloneBytes(b.data)}
+}
+
+func cloneFiles(src map[string]blob) map[string]blob {
+	dst := make(map[string]blob, len(src))
+	for path, b := range src {
+		dst[path] = cloneBlob(b)
+	}
+	return dst
 }
 
 // View 返回该环境的文件视图。
