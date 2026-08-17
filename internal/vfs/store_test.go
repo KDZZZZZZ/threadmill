@@ -22,7 +22,7 @@ func TestViewRejectsEscapingPaths(t *testing.T) {
 		{"stat", func(path string) error { _, err := view.Stat(path); return err }},
 		{"list", func(path string) error { _, err := view.List(path); return err }},
 	}
-	paths := []string{"..", "../secret.txt", "/etc/passwd"}
+	paths := []string{"..", "../secret.txt", "/etc/passwd", "foo/../../etc/passwd"}
 
 	for _, op := range ops {
 		op := op
@@ -34,6 +34,21 @@ func TestViewRejectsEscapingPaths(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestViewJailCleansDotDotInsideRoot(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	view := store.View("env-a")
+
+	got, err := view.Read("sub/../hello.txt")
+	if err != nil {
+		t.Fatalf("read cleaned path: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("sub/../hello.txt = %q, want hello", got)
 	}
 }
 
