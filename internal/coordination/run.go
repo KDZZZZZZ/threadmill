@@ -147,9 +147,14 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 	if asker == nil {
 		return "", fmt.Errorf("%w: %s", ErrNilAsker, node.Role)
 	}
+	task, ok := r.graph.Task(node.TaskID)
+	if !ok {
+		return "", fmt.Errorf("%w: %q", ErrUnknownTask, node.TaskID)
+	}
 
 	for _, child := range r.graph.SpawnedTasks(node.ID) {
 		childID := child.ID
+		r.stores.Fork(task.Env.ID, child.Env.ID)
 		r.wg.Add(1)
 		go func() {
 			defer r.wg.Done()
@@ -176,10 +181,7 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 			return "", err
 		}
 	}
-	target, ok := r.graph.Task(node.TaskID)
-	if !ok {
-		return "", fmt.Errorf("%w: %q", ErrUnknownTask, node.TaskID)
-	}
+	target := task
 	if !merged[node.ID] {
 		for _, pred := range r.graph.IncomingJoins(node.ID) {
 			child, ok := r.graph.Task(pred.TaskID)
