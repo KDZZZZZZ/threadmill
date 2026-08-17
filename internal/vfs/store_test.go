@@ -230,6 +230,107 @@ func TestViewReadReturnsCopiedBlob(t *testing.T) {
 	}
 }
 
+func TestViewRejectsSymlinkEscape(t *testing.T) {
+	t.Parallel()
+
+	store, base := newTestStore(t)
+	outside := t.TempDir()
+	mustWriteFile(t, filepath.Join(outside, "secret.txt"), "leak")
+	if err := os.Symlink(outside, filepath.Join(base, "link")); err != nil {
+		t.Fatal(err)
+	}
+	view := store.View("env-a")
+
+	if _, err := view.Read("link/secret.txt"); err == nil {
+		t.Fatal("Read followed a symlink out of base")
+	}
+	if _, err := view.Stat("link/secret.txt"); err == nil {
+		t.Fatal("Stat followed a symlink out of base")
+	}
+	if _, err := view.List("link"); err == nil {
+		t.Fatal("List followed a symlink out of base")
+	}
+}
+
+func TestViewAncestorTombstoneHidesDescendants(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	view := store.View("env-a")
+	if err := view.Delete("sub"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := view.Read("sub/nested.txt"); err == nil {
+		t.Fatal("Read saw a file under a tombstoned directory")
+	}
+	if _, err := view.Stat("sub/nested.txt"); err == nil {
+		t.Fatal("Stat saw a file under a tombstoned directory")
+	}
+
+	if err := view.Write("sub", []byte("now-a-file")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := view.Read("sub/nested.txt"); err == nil {
+		t.Fatal("Read saw a directory child after replacing the directory with a file")
+	}
+}
+
+func TestViewListKeepsDirAfterNestedTombstone(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	view := store.View("env-a")
+	if err := view.Delete("sub/nested.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	ents, err := view.List(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dirEntNamed(ents, "sub") {
+		t.Fatal("List(\".\") hid sub after tombstoning only sub/nested.txt")
+	}
+	if dirEntNamed(ents, "nested.txt") {
+		t.Fatal("List(\".\") listed a nested file as a root entry")
+	}
+
+	children, err := view.List("sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirEntNamed(children, "nested.txt") {
+		t.Fatal("List(\"sub\") still showed the tombstoned file")
+	}
+}
+
+func TestViewListOverlayChildrenOverBaseFile(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	view := store.View("env-a")
+	if err := view.Write("hello.txt/child.txt", []byte("inside")); err != nil {
+		t.Fatal(err)
+	}
+
+	ents, err := view.List("hello.txt")
+	if err != nil {
+		t.Fatalf("List hello.txt as overlay dir: %v", err)
+	}
+	if !dirEntNamed(ents, "child.txt") {
+		t.Fatalf("List(hello.txt) = %#v, want child.txt", ents)
+	}
+}
+
+func dirEntNamed(ents []DirEnt, name string) bool {
+	for _, ent := range ents {
+		if ent.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func newTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	dir := t.TempDir()

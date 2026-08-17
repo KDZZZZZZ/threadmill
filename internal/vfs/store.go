@@ -101,7 +101,11 @@ func (v *View) Read(path string) ([]byte, error) {
 		return nil, fmt.Errorf("vfs: %s: is a directory", rel)
 	}
 
-	data, err := os.ReadFile(v.store.hostPath(rel))
+	host, err := v.store.resolveHost(rel)
+	if err != nil {
+		return nil, mapHostError("read", rel, err)
+	}
+	data, err := os.ReadFile(host)
 	if err != nil {
 		return nil, mapIOError("read", rel, err)
 	}
@@ -145,7 +149,11 @@ func (v *View) Stat(path string) (FileInfo, error) {
 		return info, err
 	}
 
-	fi, err := os.Stat(v.store.hostPath(rel))
+	host, err := v.store.resolveHost(rel)
+	if err != nil {
+		return FileInfo{}, mapHostError("stat", rel, err)
+	}
+	fi, err := os.Stat(host)
 	if err != nil {
 		return FileInfo{}, mapIOError("stat", rel, err)
 	}
@@ -171,22 +179,27 @@ func (v *View) List(path string) ([]DirEnt, error) {
 	ents := map[string]DirEnt{}
 	exists := false
 
-	host := v.store.hostPath(rel)
-	fi, err := os.Stat(host)
+	host, err := v.store.resolveHost(rel)
 	switch {
-	case err == nil && !fi.IsDir():
-		return nil, fmt.Errorf("vfs: %s: not a directory", rel)
 	case err == nil:
-		exists = true
-		entries, readErr := os.ReadDir(host)
-		if readErr != nil {
-			return nil, mapIOError("list", rel, readErr)
+		fi, statErr := os.Stat(host)
+		if statErr != nil {
+			return nil, mapIOError("list", rel, statErr)
 		}
-		for _, e := range entries {
-			ents[e.Name()] = DirEnt{Name: e.Name(), IsDir: e.IsDir()}
+		if fi.IsDir() {
+			exists = true
+			entries, readErr := os.ReadDir(host)
+			if readErr != nil {
+				return nil, mapIOError("list", rel, readErr)
+			}
+			for _, e := range entries {
+				ents[e.Name()] = DirEnt{Name: e.Name(), IsDir: e.IsDir()}
+			}
 		}
-	case os.IsNotExist(err):
+	case errors.Is(err, fs.ErrNotExist):
 		// overlay 里可能仍有这个目录
+	case errors.Is(err, ErrInvalidPath):
+		return nil, err
 	default:
 		return nil, mapIOError("list", rel, err)
 	}
@@ -243,8 +256,32 @@ func (s *Store) lookupBlob(envID, rel string) ([]byte, bool, bool) {
 		if b, ok := l.files[rel]; ok {
 			return b.data, b.tombstone, true
 		}
+		if layerMasks(l, rel) {
+			return nil, true, true
+		}
 	}
 	return nil, false, false
+}
+
+func layerMasks(l *layer, rel string) bool {
+	for _, prefix := range ancestorPrefixes(rel) {
+		if _, ok := l.files[prefix]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func ancestorPrefixes(rel string) []string {
+	var out []string
+	for {
+		i := strings.LastIndex(rel, "/")
+		if i <= 0 {
+			return out
+		}
+		rel = rel[:i]
+		out = append(out, rel)
+	}
 }
 
 func (s *Store) lookupStat(envID, rel string) (FileInfo, bool, error) {
@@ -279,7 +316,9 @@ func (s *Store) applyOverlayList(envID, rel string, ents map[string]DirEnt) {
 				continue
 			}
 			if b.tombstone {
-				delete(ents, name)
+				if !isDir {
+					delete(ents, name)
+				}
 				continue
 			}
 			ents[name] = DirEnt{Name: name, IsDir: isDir}
@@ -287,8 +326,46 @@ func (s *Store) applyOverlayList(envID, rel string, ents map[string]DirEnt) {
 	}
 }
 
-func (s *Store) hostPath(rel string) string {
-	return filepath.Join(s.baseDir, filepath.FromSlash(rel))
+func (s *Store) resolveHost(rel string) (string, error) {
+	root, err := confinedRoot(s.baseDir)
+	if err != nil {
+		return "", err
+	}
+	candidate := filepath.Join(root, filepath.FromSlash(rel))
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if escapesRoot(root, candidate) {
+				return "", fmt.Errorf("%w: %q", ErrInvalidPath, rel)
+			}
+			return "", notFound(rel)
+		}
+		return "", err
+	}
+	if escapesRoot(root, resolved) {
+		return "", fmt.Errorf("%w: %q", ErrInvalidPath, rel)
+	}
+	return resolved, nil
+}
+
+func confinedRoot(baseDir string) (string, error) {
+	abs, err := filepath.Abs(baseDir)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+func escapesRoot(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return true
+	}
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 func jail(path string) (string, error) {
@@ -335,4 +412,11 @@ func mapIOError(op, rel string, err error) error {
 		return notFound(rel)
 	}
 	return fmt.Errorf("vfs: %s %s: %w", op, rel, err)
+}
+
+func mapHostError(op, rel string, err error) error {
+	if errors.Is(err, ErrInvalidPath) || errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return mapIOError(op, rel, err)
 }
