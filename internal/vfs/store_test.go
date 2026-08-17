@@ -412,6 +412,73 @@ func TestStoreMergeAppliesChildWriteUnderParentDirTombstone(t *testing.T) {
 	}
 }
 
+func TestStoreMergeRecreateDirKeepsMaskedHostDescendantsHidden(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Delete("sub"); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	if err := store.View("child").Write("sub/new.txt", []byte("recreated")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	got, err := parent.Read("sub/new.txt")
+	if err != nil {
+		t.Fatalf("parent missing child recreate: %v", err)
+	}
+	if string(got) != "recreated" {
+		t.Fatalf("parent sub/new.txt = %q, want recreated", got)
+	}
+	if _, err := parent.Read("sub/nested.txt"); err == nil {
+		t.Fatal("merge resurrected host sub/nested.txt")
+	}
+	ents, err := parent.List("sub")
+	if err != nil {
+		t.Fatalf("List sub: %v", err)
+	}
+	if len(ents) != 1 || ents[0].Name != "new.txt" {
+		t.Fatalf("List sub = %#v, want [new.txt]", ents)
+	}
+}
+
+func TestStoreMergeOverlappingDirTombstoneAndChildWriteIsDeterministic(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Delete("sub"); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	child := store.View("child")
+	if err := child.Write("sub/x.txt", []byte("kept")); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Delete("sub"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	got, err := parent.Read("sub/x.txt")
+	if err != nil {
+		t.Fatalf("overlapping child write missing after Merge: %v", err)
+	}
+	if string(got) != "kept" {
+		t.Fatalf("parent sub/x.txt = %q, want kept", got)
+	}
+	if _, err := parent.Read("sub/nested.txt"); err == nil {
+		t.Fatal("merge resurrected host sub/nested.txt")
+	}
+}
+
 func TestStoreMergeConflictsWhenChildDeletesDirOverChangedDescendant(t *testing.T) {
 	t.Parallel()
 

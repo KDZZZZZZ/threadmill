@@ -123,7 +123,14 @@ func (s *Store) Merge(from, into string) error {
 	}
 	dst := s.ensure(into)
 	for _, e := range apply {
-		applyBlob(dst, e.path, e.b)
+		if e.b.tombstone {
+			applyBlob(dst, e.path, e.b)
+		}
+	}
+	for _, e := range apply {
+		if !e.b.tombstone {
+			applyBlob(dst, e.path, e.b)
+		}
 	}
 	return nil
 }
@@ -243,11 +250,6 @@ func applyBlob(dst *layer, path string, b blob) {
 		}
 		return
 	}
-	for _, ancestor := range ancestorPrefixes(path) {
-		if existing, ok := dst.files[ancestor]; ok && existing.tombstone {
-			delete(dst.files, ancestor)
-		}
-	}
 	dst.files[path] = cloneBlob(b)
 }
 
@@ -301,6 +303,9 @@ func (v *View) Read(path string) ([]byte, error) {
 
 	if data, tombstone, found := v.store.lookupBlob(v.envID, rel); found {
 		if tombstone {
+			if v.store.hasOverlayChildren(v.envID, rel) {
+				return nil, fmt.Errorf("vfs: %s: is a directory", rel)
+			}
 			return nil, notFound(rel)
 		}
 		return cloneBytes(data), nil
@@ -379,7 +384,12 @@ func (v *View) List(path string) ([]DirEnt, error) {
 
 	if _, tombstone, found := v.store.lookupBlob(v.envID, rel); found {
 		if tombstone {
-			return nil, notFound(rel)
+			if !v.store.hasOverlayChildren(v.envID, rel) {
+				return nil, notFound(rel)
+			}
+			ents := map[string]DirEnt{}
+			v.store.applyOverlayList(v.envID, rel, ents)
+			return sortedDirents(ents), nil
 		}
 		return nil, fmt.Errorf("vfs: %s: not a directory", rel)
 	}
@@ -420,16 +430,7 @@ func (v *View) List(path string) ([]DirEnt, error) {
 		return nil, notFound(rel)
 	}
 
-	names := make([]string, 0, len(ents))
-	for name := range ents {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	out := make([]DirEnt, 0, len(names))
-	for _, name := range names {
-		out = append(out, ents[name])
-	}
-	return out, nil
+	return sortedDirents(ents), nil
 }
 
 func (s *Store) ensure(envID string) *layer {
@@ -499,6 +500,9 @@ func ancestorPrefixes(rel string) []string {
 func (s *Store) lookupStat(envID, rel string) (FileInfo, bool, error) {
 	if data, tombstone, found := s.lookupBlob(envID, rel); found {
 		if tombstone {
+			if rel != "." && s.hasOverlayChildren(envID, rel) {
+				return FileInfo{Name: filepath.Base(rel), IsDir: true}, true, nil
+			}
 			return FileInfo{}, true, notFound(rel)
 		}
 		return FileInfo{
@@ -585,6 +589,19 @@ func jail(path string) (string, error) {
 		return "", fmt.Errorf("%w: %q", ErrInvalidPath, path)
 	}
 	return filepath.ToSlash(filepath.Clean(path)), nil
+}
+
+func sortedDirents(ents map[string]DirEnt) []DirEnt {
+	names := make([]string, 0, len(ents))
+	for name := range ents {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	out := make([]DirEnt, 0, len(names))
+	for _, name := range names {
+		out = append(out, ents[name])
+	}
+	return out
 }
 
 func listPart(dir, filePath string) (name string, isDir bool, ok bool) {
