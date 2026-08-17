@@ -97,6 +97,10 @@ func (s *Store) Merge(from, into string) error {
 		b    blob
 	}
 	var apply []pending
+	var baseline []map[string]blob
+	if fromLayer != nil {
+		baseline = fromLayer.baseline
+	}
 	for path, theirsBlob := range childFiles {
 		theirs := overlayContent(theirsBlob)
 		base := s.mergeBase(fromLayer, parentID, path)
@@ -107,6 +111,11 @@ func (s *Store) Merge(from, into string) error {
 		if !contentEqual(ours, base) {
 			return fmt.Errorf("vfs: merge conflict: %s", path)
 		}
+		for _, q := range s.knownDescendants(into, baseline, path) {
+			if !contentEqual(s.lookupContent(into, q), s.mergeBase(fromLayer, parentID, q)) {
+				return fmt.Errorf("vfs: merge conflict: %s", q)
+			}
+		}
 		apply = append(apply, pending{path: path, b: cloneBlob(theirsBlob)})
 	}
 	if len(apply) == 0 {
@@ -114,7 +123,7 @@ func (s *Store) Merge(from, into string) error {
 	}
 	dst := s.ensure(into)
 	for _, e := range apply {
-		dst.files[e.path] = e.b
+		applyBlob(dst, e.path, e.b)
 	}
 	return nil
 }
@@ -198,6 +207,48 @@ func (s *Store) lookupHost(rel string) content {
 		return content{}
 	}
 	return content{exists: true, data: data}
+}
+
+func (s *Store) knownDescendants(into string, baseline []map[string]blob, path string) []string {
+	prefix := path + "/"
+	seen := map[string]struct{}{}
+	add := func(files map[string]blob) {
+		for k := range files {
+			if strings.HasPrefix(k, prefix) {
+				seen[k] = struct{}{}
+			}
+		}
+	}
+	for _, l := range s.chain(into) {
+		add(l.files)
+	}
+	for _, files := range baseline {
+		add(files)
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	return out
+}
+
+func applyBlob(dst *layer, path string, b blob) {
+	if b.tombstone {
+		dst.files[path] = blob{tombstone: true}
+		prefix := path + "/"
+		for k := range dst.files {
+			if strings.HasPrefix(k, prefix) {
+				delete(dst.files, k)
+			}
+		}
+		return
+	}
+	for _, ancestor := range ancestorPrefixes(path) {
+		if existing, ok := dst.files[ancestor]; ok && existing.tombstone {
+			delete(dst.files, ancestor)
+		}
+	}
+	dst.files[path] = cloneBlob(b)
 }
 
 func contentEqual(a, b content) bool {
