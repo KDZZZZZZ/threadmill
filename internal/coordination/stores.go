@@ -21,8 +21,7 @@ func (s Stores) Fork(parentID, childID string) {
 	}
 }
 
-// Merge 把 from 环境合入 into。
-// ctxgraph.Store 与 vfs.Store 的 Merge 尚未落地（Wave J/K），当前是 no-op。
+// Merge 把 from 环境合入 into。Memory 走 ctxgraph.Store.Merge；Files 若实现了 Merge 则同样调用。
 func (s Stores) Merge(from, into string) error {
 	if s.Memory != nil {
 		if m, ok := any(s.Memory).(interface{ Merge(from, into string) error }); ok {

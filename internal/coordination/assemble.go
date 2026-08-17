@@ -6,6 +6,7 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 	"github.com/KDZZZZZZ/threadmill/internal/env"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
+	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
 // Asker 执行一个角色的 ReAct 循环。
@@ -48,6 +49,9 @@ func Assemble(
 		}
 		team.BindCheckpoints(checkpoints, task.ID)
 		e := env.Open(task.Env.ID, stores.Memory.View(task.Env.ID))
+		if stores.Files != nil {
+			e = e.WithFiles(filesView{view: stores.Files.View(task.Env.ID)})
+		}
 		if err := team.Bind(e); err != nil {
 			return Roles{}, err
 		}
@@ -70,4 +74,43 @@ func (r Roles) asker(role string) Asker {
 	default:
 		return nil
 	}
+}
+
+var _ env.FileView = filesView{}
+
+// filesView 把 vfs.View 的本地 FileInfo/DirEnt 转成 env.FileView。
+type filesView struct {
+	view *vfs.View
+}
+
+func (v filesView) Read(path string) ([]byte, error) {
+	return v.view.Read(path)
+}
+
+func (v filesView) Write(path string, data []byte) error {
+	return v.view.Write(path, data)
+}
+
+func (v filesView) Delete(path string) error {
+	return v.view.Delete(path)
+}
+
+func (v filesView) Stat(path string) (env.FileInfo, error) {
+	info, err := v.view.Stat(path)
+	if err != nil {
+		return env.FileInfo{}, err
+	}
+	return env.FileInfo{Name: info.Name, Size: info.Size, IsDir: info.IsDir}, nil
+}
+
+func (v filesView) List(path string) ([]env.DirEnt, error) {
+	ents, err := v.view.List(path)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]env.DirEnt, len(ents))
+	for i, ent := range ents {
+		out[i] = env.DirEnt{Name: ent.Name, IsDir: ent.IsDir}
+	}
+	return out, nil
 }

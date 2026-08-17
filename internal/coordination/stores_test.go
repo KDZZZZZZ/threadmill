@@ -58,12 +58,21 @@ func TestStoresForkCopiesMemoryAndFiles(t *testing.T) {
 	}
 }
 
-func TestStoresMergeIsNoOpUntilJ(t *testing.T) {
+func TestStoresMergeUnionsChildMemory(t *testing.T) {
 	t.Parallel()
 
-	stores := Stores{Memory: ctxgraph.NewStore(), Files: vfs.NewStore(t.TempDir())}
+	memory := ctxgraph.NewStore()
+	memory.Fork("parent", "child")
+	memory.Save("child", ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{{ID: "c1", Statement: "from-child"}},
+	})
+	stores := Stores{Memory: memory, Files: vfs.NewStore(t.TempDir())}
 	if err := stores.Merge("child", "parent"); err != nil {
-		t.Fatalf("Merge() = %v, want nil until store Merge lands", err)
+		t.Fatalf("Merge() = %v", err)
+	}
+	got := memory.Load("parent")
+	if len(got.Nodes) != 1 || got.Nodes[0].Statement != "from-child" {
+		t.Fatalf("merged parent = %#v, want from-child", got)
 	}
 	if err := (Stores{}).Merge("child", "parent"); err != nil {
 		t.Fatalf("Merge() nil stores = %v, want nil", err)

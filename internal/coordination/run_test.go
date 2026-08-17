@@ -60,6 +60,52 @@ func TestGraphRunPlannerExecutorVerifierInOrder(t *testing.T) {
 	}
 }
 
+func TestGraphRunJoinMergesChildMemory(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	child := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
+	store := ctxgraph.NewStore()
+
+	assemble := func(task Task) (Roles, error) {
+		roleAsker := func(role string) Asker {
+			return askerFunc(func(_ context.Context, query string) (string, error) {
+				if task.ID == child.ID && role == RoleVerifier {
+					view := store.View(task.Env.ID)
+					graph := view.Snapshot()
+					graph.Nodes = append(graph.Nodes, ctxgraph.Node{
+						ID:        "c1",
+						Statement: "from-child",
+					})
+					view.Commit(graph)
+				}
+				return query + "/" + role, nil
+			})
+		}
+		return Roles{
+			Planner:  roleAsker(RolePlanner),
+			Executor: roleAsker(RoleExecutor),
+			Verifier: roleAsker(RoleVerifier),
+		}, nil
+	}
+
+	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: store}, assemble); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	got := store.Load(root.Env.ID)
+	found := false
+	for _, node := range got.Nodes {
+		if node.ID == "c1" && node.Statement == "from-child" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("join did not merge child memory into %s: %#v", root.Env.ID, got.Nodes)
+	}
+}
+
 func TestGraphRunResumesCanceledTaskWithoutReplayingFinishedRoles(t *testing.T) {
 	t.Parallel()
 
