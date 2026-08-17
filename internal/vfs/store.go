@@ -160,6 +160,17 @@ func (s *Store) Merge(from, into string) error {
 	}
 	if live, ok := s.lives[into]; ok {
 		for _, e := range apply {
+			if !e.b.tombstone {
+				continue
+			}
+			if err := applyLive(live, e.path, e.b); err != nil {
+				return err
+			}
+		}
+		for _, e := range apply {
+			if e.b.tombstone {
+				continue
+			}
 			if err := applyLive(live, e.path, e.b); err != nil {
 				return err
 			}

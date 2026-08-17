@@ -28,6 +28,7 @@ func probeBwrap() bool {
 	cmd := osexec.Command(
 		"bwrap",
 		"--unshare-user",
+		"--unshare-net",
 		"--overlay-src", lower,
 		"--overlay", upper, work, "/dest",
 		"true",
@@ -41,6 +42,7 @@ func runBwrap(ctx context.Context, live, command string, capBytes int) (env.Exec
 		"bwrap",
 		"--unshare-user",
 		"--unshare-pid",
+		"--unshare-net",
 		"--die-with-parent",
 		"--bind", live, "/",
 		"--ro-bind-try", "/usr", "/usr",

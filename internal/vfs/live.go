@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -48,7 +49,7 @@ func (s *Store) Materialize(envID string) (string, error) {
 	return live, nil
 }
 
-// Absorb 把 live 目录里的普通文件写回 overlay。未物化则是空操作。
+// Absorb 把 live 相对 overlay+host 的增量写回 overlay。未物化则是空操作。
 func (s *Store) Absorb(envID string) error {
 	s.mu.Lock()
 	live, ok := s.lives[envID]
@@ -57,38 +58,7 @@ func (s *Store) Absorb(envID string) error {
 		return nil
 	}
 
-	type file struct {
-		rel  string
-		data []byte
-	}
-	var files []file
-	err := filepath.WalkDir(live, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(live, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		if filepath.IsAbs(rel) || !filepath.IsLocal(rel) || escapesRoot(live, path) {
-			return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
-		}
-		if d.Type()&os.ModeSymlink != 0 || d.IsDir() {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		files = append(files, file{
-			rel:  filepath.ToSlash(rel),
-			data: cloneBytes(data),
-		})
-		return nil
-	})
+	liveFiles, err := walkRegularFiles(live)
 	if err != nil {
 		return fmt.Errorf("vfs: absorb: %w", err)
 	}
@@ -98,9 +68,22 @@ func (s *Store) Absorb(envID string) error {
 	if _, ok := s.lives[envID]; !ok {
 		return nil
 	}
+	before, err := s.visibleRegularFiles(envID)
+	if err != nil {
+		return fmt.Errorf("vfs: absorb: %w", err)
+	}
 	dst := s.ensure(envID)
-	for _, f := range files {
-		dst.files[f.rel] = blob{data: f.data}
+	for path := range before {
+		if _, ok := liveFiles[path]; !ok {
+			applyBlob(dst, path, blob{tombstone: true})
+		}
+	}
+	for path, data := range liveFiles {
+		old, existed := before[path]
+		if existed && bytes.Equal(old, data) {
+			continue
+		}
+		applyBlob(dst, path, blob{data: data})
 	}
 	return nil
 }
@@ -128,18 +111,124 @@ type overlayFile struct {
 }
 
 func (s *Store) overlayBlobs(envID string) []overlayFile {
-	merged := map[string]blob{}
 	chain := s.chain(envID)
+	var out []overlayFile
 	for i := len(chain) - 1; i >= 0; i-- {
+		var tombs, writes []overlayFile
 		for path, b := range chain[i].files {
-			merged[path] = cloneBlob(b)
+			item := overlayFile{path: path, b: cloneBlob(b)}
+			if b.tombstone {
+				tombs = append(tombs, item)
+				continue
+			}
+			writes = append(writes, item)
 		}
-	}
-	out := make([]overlayFile, 0, len(merged))
-	for path, b := range merged {
-		out = append(out, overlayFile{path: path, b: b})
+		out = append(out, tombs...)
+		out = append(out, writes...)
 	}
 	return out
+}
+
+func walkRegularFiles(root string) (map[string][]byte, error) {
+	out := map[string][]byte{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if filepath.IsAbs(rel) || !filepath.IsLocal(rel) || escapesRoot(root, path) {
+			return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
+		}
+		if d.Type()&os.ModeSymlink != 0 || d.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		out[filepath.ToSlash(rel)] = cloneBytes(data)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Store) visibleRegularFiles(envID string) (map[string][]byte, error) {
+	candidates := map[string]struct{}{}
+	base, err := confinedRoot(s.baseDir)
+	if err != nil {
+		return nil, err
+	}
+	err = filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(base, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if filepath.IsAbs(rel) || !filepath.IsLocal(rel) || escapesRoot(base, path) {
+			return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
+		}
+		if d.Type()&os.ModeSymlink != 0 || d.IsDir() {
+			return nil
+		}
+		candidates[filepath.ToSlash(rel)] = struct{}{}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, l := range s.chain(envID) {
+		for path := range l.files {
+			candidates[path] = struct{}{}
+		}
+	}
+	out := make(map[string][]byte, len(candidates))
+	for path := range candidates {
+		data, ok := s.regularFileContent(envID, path)
+		if ok {
+			out[path] = data
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) regularFileContent(envID, rel string) ([]byte, bool) {
+	data, tombstone, found := s.lookupBlob(envID, rel)
+	if found {
+		if tombstone {
+			return nil, false
+		}
+		return cloneBytes(data), true
+	}
+	if s.hasOverlayChildren(envID, rel) {
+		return nil, false
+	}
+	host, err := s.resolveHost(rel)
+	if err != nil {
+		return nil, false
+	}
+	fi, err := os.Stat(host)
+	if err != nil || fi.IsDir() {
+		return nil, false
+	}
+	b, err := os.ReadFile(host)
+	if err != nil {
+		return nil, false
+	}
+	return b, true
 }
 
 func applyLive(live, rel string, b blob) error {

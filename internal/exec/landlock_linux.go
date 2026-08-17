@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	osexec "os/exec"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -16,6 +17,7 @@ import (
 // go-landlock 需要 Go 1.24；这里用 stdlib syscall 调 Landlock。
 const (
 	landlockChildArg = "--threadmill-landlock"
+	landlockChildEnv = "THREADMILL_LANDLOCK_CHILD"
 
 	sysLandlockCreateRuleset = 444
 	sysLandlockAddRule       = 445
@@ -43,6 +45,9 @@ const (
 )
 
 func init() {
+	if os.Getenv(landlockChildEnv) != "1" {
+		return
+	}
 	if len(os.Args) >= 4 && os.Args[1] == landlockChildArg {
 		os.Exit(runLandlockChild(os.Args[2], os.Args[3]))
 	}
@@ -60,6 +65,7 @@ func runLandlock(ctx context.Context, live, command string, capBytes int) (env.E
 	}
 	cmd := osexec.CommandContext(ctx, exe, landlockChildArg, live, command)
 	cmd.Dir = live
+	cmd.Env = append(os.Environ(), landlockChildEnv+"=1")
 	return collect(ctx, cmd, capBytes)
 }
 
@@ -76,11 +82,24 @@ func runLandlockChild(live, command string) int {
 		fmt.Fprintf(os.Stderr, "exec: chdir: %v\n", err)
 		return 127
 	}
-	if err := syscall.Exec(bash, []string{"bash", "-c", command}, os.Environ()); err != nil {
+	if err := syscall.Exec(bash, []string{"bash", "-c", command}, landlockExecEnv()); err != nil {
 		fmt.Fprintf(os.Stderr, "exec: bash: %v\n", err)
 		return 127
 	}
 	return 0
+}
+
+func landlockExecEnv() []string {
+	const prefix = landlockChildEnv + "="
+	env := os.Environ()
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func landlockABI() (int, error) {
