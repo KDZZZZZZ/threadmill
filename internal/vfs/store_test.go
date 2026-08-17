@@ -3,6 +3,7 @@ package vfs
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -194,6 +195,597 @@ func TestStoreForkDoesNotOverwriteExistingChild(t *testing.T) {
 	}
 }
 
+func TestStoreMergeAppliesChildWriteAndKeepsParentWrite(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Write("only-parent.txt", []byte("parent-only")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	child := store.View("child")
+	if err := child.Write("only-child.txt", []byte("child-only")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+
+	gotChild, err := parent.Read("only-child.txt")
+	if err != nil {
+		t.Fatalf("parent missing child write: %v", err)
+	}
+	if string(gotChild) != "child-only" {
+		t.Fatalf("parent only-child.txt = %q, want child-only", gotChild)
+	}
+	gotParent, err := parent.Read("only-parent.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotParent) != "parent-only" {
+		t.Fatalf("parent only-parent.txt = %q, want parent-only", gotParent)
+	}
+	if _, err := store.View("child").Read("only-parent.txt"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStoreMergeAppliesChildTombstone(t *testing.T) {
+	t.Parallel()
+
+	store, base := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Write("from-parent.txt", []byte("parent-blob")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	child := store.View("child")
+	if err := child.Delete("hello.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Delete("from-parent.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+
+	if _, err := parent.Read("hello.txt"); err == nil {
+		t.Fatal("merged tombstone still exposed the base file")
+	}
+	if _, err := parent.Read("from-parent.txt"); err == nil {
+		t.Fatal("merged tombstone still exposed the parent overlay file")
+	}
+	host, err := os.ReadFile(filepath.Join(base, "hello.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(host) != "hello" {
+		t.Fatalf("base hello.txt = %q, want untouched hello", host)
+	}
+}
+
+func TestStoreMergeConflictsWhenBothSidesWrote(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	store.Fork("parent", "child")
+	if err := parent.Write("conflict.txt", []byte("ours")); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Write("keep.txt", []byte("keep")); err != nil {
+		t.Fatal(err)
+	}
+	child := store.View("child")
+	if err := child.Write("conflict.txt", []byte("theirs")); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Write("extra.txt", []byte("child-extra")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Merge("child", "parent")
+	if err == nil {
+		t.Fatal("Merge succeeded, want conflict")
+	}
+	if !strings.Contains(err.Error(), "conflict.txt") {
+		t.Fatalf("conflict error = %v, want path conflict.txt", err)
+	}
+
+	got, readErr := parent.Read("conflict.txt")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "ours" {
+		t.Fatalf("parent conflict.txt = %q, want ours", got)
+	}
+	if _, err := parent.Read("extra.txt"); err == nil {
+		t.Fatal("conflict Merge applied remaining child paths")
+	}
+	keep, err := parent.Read("keep.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(keep) != "keep" {
+		t.Fatalf("parent keep.txt = %q, want keep", keep)
+	}
+}
+
+func TestStoreMergeReplayDoesNotError(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	store.Fork("parent", "child")
+	if err := store.View("child").Write("from-child.txt", []byte("only-child")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("first Merge: %v", err)
+	}
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("second Merge: %v", err)
+	}
+
+	got, err := store.View("parent").Read("from-child.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "only-child" {
+		t.Fatalf("parent from-child.txt = %q, want only-child", got)
+	}
+}
+
+func TestStoreMergeConflictsWhenGrandparentChangedAfterNestedFork(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	gp := store.View("gp")
+	if err := gp.Write("shared.txt", []byte("A")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("gp", "parent")
+	store.Fork("parent", "child")
+	if err := gp.Write("shared.txt", []byte("B")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.View("child").Write("shared.txt", []byte("C")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Merge("child", "gp")
+	if err == nil {
+		t.Fatal("Merge succeeded, want conflict")
+	}
+	if !strings.Contains(err.Error(), "shared.txt") {
+		t.Fatalf("conflict error = %v, want path shared.txt", err)
+	}
+	got, readErr := gp.Read("shared.txt")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "B" {
+		t.Fatalf("gp shared.txt = %q, want B", got)
+	}
+}
+
+func TestStoreMergeAppliesChildWriteUnderParentDirTombstone(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Delete("dir"); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	if err := store.View("child").Write("dir/new.txt", []byte("recreated")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	got, err := parent.Read("dir/new.txt")
+	if err != nil {
+		t.Fatalf("parent missing child recreate: %v", err)
+	}
+	if string(got) != "recreated" {
+		t.Fatalf("parent dir/new.txt = %q, want recreated", got)
+	}
+	info, err := parent.Stat("dir")
+	if err != nil {
+		t.Fatalf("Stat dir after recreate: %v", err)
+	}
+	if !info.IsDir {
+		t.Fatal("Stat dir after recreate: want directory")
+	}
+	ents, err := parent.List("dir")
+	if err != nil {
+		t.Fatalf("List dir after recreate: %v", err)
+	}
+	if len(ents) != 1 || ents[0].Name != "new.txt" || ents[0].IsDir {
+		t.Fatalf("List dir = %#v, want [new.txt file]", ents)
+	}
+}
+
+func TestStoreMergeRecreateDirKeepsMaskedHostDescendantsHidden(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Delete("sub"); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	if err := store.View("child").Write("sub/new.txt", []byte("recreated")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	got, err := parent.Read("sub/new.txt")
+	if err != nil {
+		t.Fatalf("parent missing child recreate: %v", err)
+	}
+	if string(got) != "recreated" {
+		t.Fatalf("parent sub/new.txt = %q, want recreated", got)
+	}
+	if _, err := parent.Read("sub/nested.txt"); err == nil {
+		t.Fatal("merge resurrected host sub/nested.txt")
+	}
+	ents, err := parent.List("sub")
+	if err != nil {
+		t.Fatalf("List sub: %v", err)
+	}
+	if len(ents) != 1 || ents[0].Name != "new.txt" {
+		t.Fatalf("List sub = %#v, want [new.txt]", ents)
+	}
+}
+
+func TestStoreMergeOverlappingDirTombstoneAndChildWriteIsDeterministic(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Delete("sub"); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	child := store.View("child")
+	if err := child.Write("sub/x.txt", []byte("kept")); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Delete("sub"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	got, err := parent.Read("sub/x.txt")
+	if err != nil {
+		t.Fatalf("overlapping child write missing after Merge: %v", err)
+	}
+	if string(got) != "kept" {
+		t.Fatalf("parent sub/x.txt = %q, want kept", got)
+	}
+	if _, err := parent.Read("sub/nested.txt"); err == nil {
+		t.Fatal("merge resurrected host sub/nested.txt")
+	}
+}
+
+func TestStoreMergeConflictsWhenChildDeletesDirOverChangedDescendant(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Write("dir/file.txt", []byte("A")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	if err := parent.Write("dir/file.txt", []byte("B")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.View("child").Delete("dir"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Merge("child", "parent")
+	if err == nil {
+		t.Fatal("Merge succeeded, want conflict")
+	}
+	if !strings.Contains(err.Error(), "dir/file.txt") && !strings.Contains(err.Error(), "dir") {
+		t.Fatalf("conflict error = %v, want dir or dir/file.txt", err)
+	}
+	got, readErr := parent.Read("dir/file.txt")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "B" {
+		t.Fatalf("parent dir/file.txt = %q, want B", got)
+	}
+}
+
+func TestStoreMergeChildDirTombstoneHidesUnchangedDescendant(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Write("dir/file.txt", []byte("A")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	if err := store.View("child").Delete("dir"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	if _, err := parent.Read("dir/file.txt"); err == nil {
+		t.Fatal("child dir tombstone left parent dir/file.txt visible")
+	}
+	if _, err := parent.List("dir"); err == nil {
+		t.Fatal("List still showed tombstoned dir via inherited overlay children")
+	}
+}
+
+func TestStoreMergeConflictsWhenMatchingDirTombstoneHidesTargetDescendant(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	store.Fork("parent", "child")
+	if err := parent.Delete("dir"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.View("child").Delete("dir"); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Write("dir/new.txt", []byte("ours")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Merge("child", "parent")
+	if err == nil {
+		t.Fatal("Merge succeeded, want conflict")
+	}
+	got, readErr := parent.Read("dir/new.txt")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "ours" {
+		t.Fatalf("parent dir/new.txt = %q, want ours", got)
+	}
+}
+
+func TestStoreMergeConflictsWhenTargetReplacesTombstonedDirWithFile(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Delete("dir"); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	if err := parent.Write("dir", []byte("now-a-file")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.View("child").Write("dir/x.txt", []byte("from-child")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Merge("child", "parent")
+	if err == nil {
+		t.Fatal("Merge succeeded, want conflict")
+	}
+	got, readErr := parent.Read("dir")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "now-a-file" {
+		t.Fatalf("parent dir = %q, want now-a-file", got)
+	}
+}
+
+func TestStoreMergeConflictsWhenMaskingFileChangedUnderChildWrite(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Write("dir", []byte("A")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	if err := parent.Write("dir", []byte("B")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.View("child").Write("dir/x.txt", []byte("from-child")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Merge("child", "parent")
+	if err == nil {
+		t.Fatal("Merge succeeded, want conflict")
+	}
+	got, readErr := parent.Read("dir")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "B" {
+		t.Fatalf("parent dir = %q, want B", got)
+	}
+}
+
+func TestStoreMergeConflictsWhenChildWritesUnderLiveFile(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Write("dir", []byte("A")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	if err := store.View("child").Write("dir/x.txt", []byte("from-child")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Merge("child", "parent")
+	if err == nil {
+		t.Fatal("Merge succeeded, want conflict")
+	}
+	got, readErr := parent.Read("dir")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "A" {
+		t.Fatalf("parent dir = %q, want A", got)
+	}
+}
+
+func TestStoreMergeChildFileAtDirHidesTargetDescendant(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Write("dir/x.txt", []byte("from-parent")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	if err := store.View("child").Write("dir", []byte("now-a-file")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	got, err := parent.Read("dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "now-a-file" {
+		t.Fatalf("parent dir = %q, want now-a-file", got)
+	}
+	if _, err := parent.Read("dir/x.txt"); err == nil {
+		t.Fatal("file at dir left parent dir/x.txt visible")
+	}
+}
+
+func TestStoreMergeRepeatedDirTombstoneHidesBaselineDescendant(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Delete("dir"); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Write("dir/x.txt", []byte("recreated")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	if err := store.View("child").Delete("dir"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	if _, err := parent.Read("dir/x.txt"); err == nil {
+		t.Fatal("repeated dir tombstone left baseline dir/x.txt visible")
+	}
+}
+
+func TestStoreMergeConflictsWhenChildHasFileAndDescendant(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	store.Fork("parent", "child")
+	child := store.View("child")
+	if err := child.Write("dir", []byte("file")); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Write("dir/x.txt", []byte("child")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err == nil {
+		t.Fatal("Merge succeeded, want conflict")
+	}
+}
+
+func TestStoreMergeChildDeleteIntoGrandparentWithoutFileIsOK(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	store.Fork("gp", "parent")
+	if err := store.View("parent").Write("temporary.txt", []byte("A")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	if err := store.View("child").Delete("temporary.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "gp"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	if _, err := store.View("gp").Read("temporary.txt"); err == nil {
+		t.Fatal("grandparent gained temporary.txt")
+	}
+}
+
+func TestStoreMergeConflictsWhenGrandparentChangedDirDescendantAfterNestedFork(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	gp := store.View("gp")
+	if err := gp.Write("dir/file.txt", []byte("A")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("gp", "parent")
+	store.Fork("parent", "child")
+	if err := gp.Write("dir/file.txt", []byte("B")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.View("child").Delete("dir"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Merge("child", "gp")
+	if err == nil {
+		t.Fatal("Merge succeeded, want conflict")
+	}
+	got, readErr := gp.Read("dir/file.txt")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "B" {
+		t.Fatalf("gp dir/file.txt = %q, want B", got)
+	}
+}
+
+func TestStoreMergeEmptyIntoIsNoop(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	store.Fork("parent", "child")
+	if err := store.View("child").Write("from-child.txt", []byte("only-child")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", ""); err != nil {
+		t.Fatalf("Merge into empty: %v", err)
+	}
+	if _, err := store.View("parent").Read("from-child.txt"); err == nil {
+		t.Fatal("empty into applied onto parent")
+	}
+}
+
 func TestViewReadReturnsCopiedBlob(t *testing.T) {
 	t.Parallel()
 
@@ -252,6 +844,33 @@ func TestViewRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestViewChildDirTombstoneHidesParentOverlayChildren(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	if err := store.View("parent").Write("dir/old.txt", []byte("from-parent")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	child := store.View("child")
+	if err := child.Delete("dir"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := child.Stat("dir"); err == nil {
+		t.Fatal("Stat saw parent overlay children under child dir tombstone")
+	}
+	if _, err := child.List("dir"); err == nil {
+		t.Fatal("List saw parent overlay children under child dir tombstone")
+	}
+	ents, err := store.View("parent").List("dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dirEntNamed(ents, "old.txt") {
+		t.Fatalf("parent List(dir) = %#v, want old.txt", ents)
+	}
+}
+
 func TestViewAncestorTombstoneHidesDescendants(t *testing.T) {
 	t.Parallel()
 
@@ -265,6 +884,12 @@ func TestViewAncestorTombstoneHidesDescendants(t *testing.T) {
 	}
 	if _, err := view.Stat("sub/nested.txt"); err == nil {
 		t.Fatal("Stat saw a file under a tombstoned directory")
+	}
+	if _, err := view.Stat("sub"); err == nil {
+		t.Fatal("Stat saw tombstoned directory via inherited children")
+	}
+	if _, err := view.List("sub"); err == nil {
+		t.Fatal("List saw tombstoned directory via inherited children")
 	}
 
 	if err := view.Write("sub", []byte("now-a-file")); err != nil {
@@ -301,6 +926,36 @@ func TestViewListKeepsDirAfterNestedTombstone(t *testing.T) {
 	}
 	if dirEntNamed(children, "nested.txt") {
 		t.Fatal("List(\"sub\") still showed the tombstoned file")
+	}
+}
+
+func TestViewListRootShowsRecreatedDirAfterSameLayerTombstone(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	view := store.View("env-a")
+	if err := view.Delete("sub"); err != nil {
+		t.Fatal(err)
+	}
+	if err := view.Write("sub/x.txt", []byte("kept")); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 20; i++ {
+		ents, err := view.List(".")
+		if err != nil {
+			t.Fatalf("List(.): %v", err)
+		}
+		if !dirEntNamed(ents, "sub") {
+			t.Fatalf("List(.) missing recreated sub on iteration %d: %#v", i, ents)
+		}
+	}
+	got, err := view.Read("sub/x.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "kept" {
+		t.Fatalf("sub/x.txt = %q, want kept", got)
 	}
 }
 
