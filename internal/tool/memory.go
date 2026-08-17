@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	"github.com/KDZZZZZZ/threadmill/internal/env"
 )
 
 const (
@@ -30,7 +31,10 @@ type memoryTool struct {
 	commit   func(ctxgraph.Copy)
 }
 
-var _ Tool = memoryTool{}
+var (
+	_ Tool      = memoryTool{}
+	_ EnvBinder = memoryTool{}
+)
 
 // MemoryTools 返回操作本 Agent 已持有图副本的工具。
 // snapshot 必须返回那份副本；写入工具通过 commit 写回，不得再 Clone 全局图。
@@ -79,9 +83,27 @@ func (t memoryTool) Definition() Definition {
 	}
 }
 
+func (t memoryTool) BindEnv(e env.Env) Tool {
+	t.snapshot = func() ctxgraph.Copy {
+		if e.Memory == nil {
+			return ctxgraph.Copy{}
+		}
+		return ctxgraph.Copy{Graph: e.Memory.Snapshot()}
+	}
+	t.commit = func(copy ctxgraph.Copy) {
+		if e.Memory != nil {
+			e.Memory.Commit(copy.Graph)
+		}
+	}
+	return t
+}
+
 func (t memoryTool) Execute(ctx context.Context, call Call) (Output, error) {
 	if err := ctx.Err(); err != nil {
 		return Output{}, err
+	}
+	if t.snapshot == nil {
+		return Output{}, fmt.Errorf("%s: not bound to env", t.name)
 	}
 
 	switch t.name {

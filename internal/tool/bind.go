@@ -4,6 +4,7 @@ import (
 	"context"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	"github.com/KDZZZZZZ/threadmill/internal/env"
 )
 
 type envKey struct{}
@@ -15,6 +16,11 @@ func EnvFromContext(ctx context.Context) string {
 	}
 	id, _ := ctx.Value(envKey{}).(string)
 	return id
+}
+
+// EnvBinder 把工具绑到一个工作区。Bind / BindEnv 只问这个接口，不认工具名。
+type EnvBinder interface {
+	BindEnv(env.Env) Tool
 }
 
 type boundTool struct {
@@ -30,9 +36,37 @@ func (t boundTool) Execute(ctx context.Context, call Call) (Output, error) {
 	return t.inner.Execute(context.WithValue(ctx, envKey{}, t.envID), call)
 }
 
-// Bind 把工具绑到指定环境：记忆工具读写该环境快照，其余工具在 Execute 的 context 里带上 env。
-// 同名工具后者覆盖前者，避免把全局记忆工具和按环境记忆工具同时交给模型。
-func Bind(store *ctxgraph.Store, envID string, tools []Tool) []Tool {
+func unwrapBound(tool Tool) Tool {
+	for {
+		bound, ok := tool.(boundTool)
+		if !ok {
+			return tool
+		}
+		tool = bound.inner
+	}
+}
+
+type storeView struct {
+	store *ctxgraph.Store
+	envID string
+}
+
+func (v storeView) Snapshot() ctxgraph.Graph {
+	if v.store == nil {
+		return ctxgraph.Graph{}
+	}
+	return v.store.Load(v.envID)
+}
+
+func (v storeView) Commit(graph ctxgraph.Graph) {
+	if v.store != nil {
+		v.store.Save(v.envID, graph)
+	}
+}
+
+// BindEnv 把工具绑到工作区：实现 EnvBinder 的换后端，其余工具在 Execute 的 context 里带上 env ID。
+// 同名工具后者覆盖前者。
+func BindEnv(e env.Env, tools []Tool) []Tool {
 	out := make([]Tool, 0, len(tools))
 	indexByName := make(map[string]int, len(tools))
 	for _, tool := range tools {
@@ -40,11 +74,11 @@ func Bind(store *ctxgraph.Store, envID string, tools []Tool) []Tool {
 			continue
 		}
 		name := tool.Definition().Name
-		inner := tool
-		if rebound, ok := rebindMemory(store, envID, name); ok {
-			inner = rebound
+		inner := unwrapBound(tool)
+		if binder, ok := inner.(EnvBinder); ok {
+			inner = binder.BindEnv(e)
 		}
-		bound := Tool(boundTool{envID: envID, inner: inner})
+		bound := Tool(boundTool{envID: e.ID, inner: inner})
 		if i, dup := indexByName[name]; dup {
 			out[i] = bound
 			continue
@@ -55,28 +89,7 @@ func Bind(store *ctxgraph.Store, envID string, tools []Tool) []Tool {
 	return out
 }
 
-func rebindMemory(store *ctxgraph.Store, envID, name string) (Tool, bool) {
-	switch name {
-	case memoryNeighborsName, memorySubgraphsOfName, memorySourcesOfName, memoryNodesInName, memoryAddToSubgraphName:
-	default:
-		return nil, false
-	}
-	for _, tool := range MemoryTools(
-		func() ctxgraph.Copy {
-			if store == nil {
-				return ctxgraph.Copy{}
-			}
-			return ctxgraph.Copy{Graph: store.Load(envID)}
-		},
-		func(copy ctxgraph.Copy) {
-			if store != nil {
-				store.Save(envID, copy.Graph)
-			}
-		},
-	) {
-		if tool.Definition().Name == name {
-			return tool, true
-		}
-	}
-	return nil, false
+// Bind 把工具绑到指定环境。内部用 store 适配成 MemoryView 再走 BindEnv。
+func Bind(store *ctxgraph.Store, envID string, tools []Tool) []Tool {
+	return BindEnv(env.Open(envID, storeView{store: store, envID: envID}), tools)
 }

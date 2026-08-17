@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	"github.com/KDZZZZZZ/threadmill/internal/env"
 )
 
 func TestBindMemoryToolsStayInTheirEnv(t *testing.T) {
@@ -81,6 +82,128 @@ func TestBindReplacesGlobalMemoryTools(t *testing.T) {
 	}
 }
 
+func TestBindEnvRebindsEnvBinder(t *testing.T) {
+	t.Parallel()
+
+	spy := &envBinderSpy{spyTool: spyTool{name: "echo"}}
+	tools := BindEnv(env.Open("env-9", nil), []Tool{spy})
+	if _, err := executeNamed(t, tools, "echo", `{}`); err != nil {
+		t.Fatalf("echo: %v", err)
+	}
+	if spy.boundID != "env-9" {
+		t.Fatalf("BindEnv ID = %q, want env-9", spy.boundID)
+	}
+}
+
+func TestBindDoesNotRebindByToolName(t *testing.T) {
+	t.Parallel()
+
+	var seen bool
+	spy := spyTool{
+		name: memoryNeighborsName,
+		execute: func(context.Context, Call) (Output, error) {
+			seen = true
+			return Output{Content: "spy"}, nil
+		},
+	}
+
+	tools := Bind(ctxgraph.NewStore(), "env-a", []Tool{spy})
+	out, err := executeNamed(t, tools, memoryNeighborsName, `{"node_id":"n1"}`)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !seen || out.Content != "spy" {
+		t.Fatalf("Bind rebound by name: seen=%v content=%q", seen, out.Content)
+	}
+}
+
+func TestBindEnvIsolatesMemoryViews(t *testing.T) {
+	t.Parallel()
+
+	graph := ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{{
+			ID:          "n1",
+			Kind:        ctxgraph.NodeKindFact,
+			Statement:   "secret",
+			Status:      ctxgraph.NodeStatusAccepted,
+			SubgraphIDs: []string{"sg"},
+		}},
+	}
+	viewA := &memView{graph: graph.Clone()}
+	viewB := &memView{graph: graph.Clone()}
+
+	toolsA := BindEnv(env.Open("env-a", viewA), MemoryTools(nil, nil))
+	toolsB := BindEnv(env.Open("env-b", viewB), MemoryTools(nil, nil))
+
+	if _, err := executeNamed(t, toolsA, memoryAddToSubgraphName, `{"subgraph_id":"secret","node_ids":["n1"]}`); err != nil {
+		t.Fatalf("env-a add: %v", err)
+	}
+
+	outB, err := executeNamed(t, toolsB, memoryNodesInName, `{"subgraph_ids":["secret"]}`)
+	if err != nil {
+		t.Fatalf("env-b nodes_in: %v", err)
+	}
+	if strings.Contains(outB.Content, `"n1"`) {
+		t.Fatalf("env-b saw env-a write: %s", outB.Content)
+	}
+}
+
+func TestBindEnvRebindsAlreadyBoundTools(t *testing.T) {
+	t.Parallel()
+
+	graph := ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{{
+			ID:          "n1",
+			Kind:        ctxgraph.NodeKindFact,
+			Statement:   "secret",
+			Status:      ctxgraph.NodeStatusAccepted,
+			SubgraphIDs: []string{"sg"},
+		}},
+	}
+	viewA := &memView{graph: graph.Clone()}
+	viewB := &memView{graph: graph.Clone()}
+
+	tools := BindEnv(env.Open("env-a", viewA), MemoryTools(nil, nil))
+	tools = BindEnv(env.Open("env-b", viewB), tools)
+
+	if _, err := executeNamed(t, tools, memoryAddToSubgraphName, `{"subgraph_id":"secret","node_ids":["n1"]}`); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	if nodes := viewA.Snapshot().NodesInSubgraphs([]string{"secret"}); len(nodes) != 0 {
+		t.Fatalf("second BindEnv still wrote env-a: %#v", nodes)
+	}
+	if nodes := viewB.Snapshot().NodesInSubgraphs([]string{"secret"}); len(nodes) != 1 || nodes[0].ID != "n1" {
+		t.Fatal("second BindEnv did not write env-b")
+	}
+
+	var seen string
+	echo := spyTool{
+		name: "echo",
+		execute: func(ctx context.Context, _ Call) (Output, error) {
+			seen = EnvFromContext(ctx)
+			return Output{Content: "ok"}, nil
+		},
+	}
+	wrapped := BindEnv(env.Open("env-a", nil), []Tool{echo})
+	wrapped = BindEnv(env.Open("env-b", nil), wrapped)
+	if _, err := executeNamed(t, wrapped, "echo", `{}`); err != nil {
+		t.Fatalf("echo: %v", err)
+	}
+	if seen != "env-b" {
+		t.Fatalf("EnvFromContext after rebind = %q, want env-b", seen)
+	}
+}
+
+func TestUnboundMemoryToolsExecuteError(t *testing.T) {
+	t.Parallel()
+
+	_, err := executeNamed(t, MemoryTools(nil, nil), memoryNeighborsName, `{"node_id":"n1"}`)
+	if err == nil || !strings.Contains(err.Error(), "not bound to env") {
+		t.Fatalf("unbound Execute error = %v, want not bound to env", err)
+	}
+}
+
 func TestBindInjectsEnvIntoToolContext(t *testing.T) {
 	t.Parallel()
 
@@ -105,6 +228,35 @@ func TestBindInjectsEnvIntoToolContext(t *testing.T) {
 type spyTool struct {
 	name    string
 	execute func(context.Context, Call) (Output, error)
+}
+
+type envBinderSpy struct {
+	spyTool
+	boundID string
+}
+
+func (s *envBinderSpy) BindEnv(e env.Env) Tool {
+	s.boundID = e.ID
+	return s
+}
+
+func (s *envBinderSpy) Execute(ctx context.Context, call Call) (Output, error) {
+	if s.execute != nil {
+		return s.execute(ctx, call)
+	}
+	return Output{Content: "ok"}, nil
+}
+
+type memView struct {
+	graph ctxgraph.Graph
+}
+
+func (v *memView) Snapshot() ctxgraph.Graph {
+	return v.graph.Clone()
+}
+
+func (v *memView) Commit(graph ctxgraph.Graph) {
+	v.graph = graph.Clone()
 }
 
 func (s spyTool) Definition() Definition {
