@@ -123,6 +123,9 @@ func (s *Store) Merge(from, into string) error {
 		if sameAncestor {
 			continue
 		}
+		if !theirs.tombstone && s.liveFileAncestor(into, path) {
+			return fmt.Errorf("vfs: merge conflict: %s", path)
+		}
 		apply = append(apply, pending{path: path, b: cloneBlob(theirsBlob)})
 	}
 	if len(apply) == 0 {
@@ -155,7 +158,11 @@ func overlayContent(b blob) content {
 }
 
 func maskedContent(prefix string, b blob) content {
-	return content{exists: true, tombstone: true, maskFrom: prefix, maskFile: !b.tombstone}
+	c := content{exists: true, tombstone: true, maskFrom: prefix, maskFile: !b.tombstone}
+	if !b.tombstone {
+		c.data = cloneBytes(b.data)
+	}
+	return c
 }
 
 func (s *Store) mergeBase(fromLayer *layer, parentID, rel string) content {
@@ -229,6 +236,16 @@ func (s *Store) lookupHost(rel string) content {
 	return content{exists: true, data: data}
 }
 
+func (s *Store) liveFileAncestor(envID, rel string) bool {
+	for _, prefix := range ancestorPrefixes(rel) {
+		c := s.lookupContent(envID, prefix)
+		if c.exists && !c.tombstone && c.maskFrom == "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Store) knownDescendants(into string, baseline []map[string]blob, path string) []string {
 	prefix := path + "/"
 	seen := map[string]struct{}{}
@@ -274,7 +291,13 @@ func contentEqual(a, b content) bool {
 		return false
 	}
 	if a.maskFrom != "" || b.maskFrom != "" {
-		return a.maskFrom == b.maskFrom && a.maskFile == b.maskFile
+		if a.maskFrom != b.maskFrom || a.maskFile != b.maskFile {
+			return false
+		}
+		if a.maskFile {
+			return bytes.Equal(a.data, b.data)
+		}
+		return true
 	}
 	if a.tombstone != b.tombstone {
 		return false
