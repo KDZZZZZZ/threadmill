@@ -101,6 +101,18 @@ func (s *Store) Merge(from, into string) error {
 	if fromLayer != nil {
 		baseline = fromLayer.baseline
 	}
+	for path, b := range childFiles {
+		if b.tombstone {
+			continue
+		}
+		prefix := path + "/"
+		for other, ob := range childFiles {
+			if ob.tombstone || other == path || !strings.HasPrefix(other, prefix) {
+				continue
+			}
+			return fmt.Errorf("vfs: merge conflict: %s", other)
+		}
+	}
 	for path, theirsBlob := range childFiles {
 		theirs := overlayContent(theirsBlob)
 		base := s.mergeBase(fromLayer, parentID, path)
@@ -286,12 +298,6 @@ func applyBlob(dst *layer, path string, b blob) {
 }
 
 func contentEqual(a, b content) bool {
-	if !a.exists && !b.exists {
-		return true
-	}
-	if a.exists != b.exists {
-		return false
-	}
 	if a.maskFrom != "" || b.maskFrom != "" {
 		if a.maskFrom != b.maskFrom || a.maskFile != b.maskFile {
 			return false
@@ -301,13 +307,23 @@ func contentEqual(a, b content) bool {
 		}
 		return true
 	}
-	if a.tombstone != b.tombstone {
+	if exactHidden(a) && exactHidden(b) {
+		return true
+	}
+	if !a.exists && !b.exists {
+		return true
+	}
+	if a.exists != b.exists || a.tombstone != b.tombstone {
 		return false
 	}
 	if a.tombstone {
 		return true
 	}
 	return bytes.Equal(a.data, b.data)
+}
+
+func exactHidden(c content) bool {
+	return !c.exists || c.tombstone
 }
 
 func cloneBlob(b blob) blob {

@@ -700,6 +700,45 @@ func TestStoreMergeRepeatedDirTombstoneHidesBaselineDescendant(t *testing.T) {
 	}
 }
 
+func TestStoreMergeConflictsWhenChildHasFileAndDescendant(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	store.Fork("parent", "child")
+	child := store.View("child")
+	if err := child.Write("dir", []byte("file")); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Write("dir/x.txt", []byte("child")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err == nil {
+		t.Fatal("Merge succeeded, want conflict")
+	}
+}
+
+func TestStoreMergeChildDeleteIntoGrandparentWithoutFileIsOK(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	store.Fork("gp", "parent")
+	if err := store.View("parent").Write("temporary.txt", []byte("A")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	if err := store.View("child").Delete("temporary.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "gp"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	if _, err := store.View("gp").Read("temporary.txt"); err == nil {
+		t.Fatal("grandparent gained temporary.txt")
+	}
+}
+
 func TestStoreMergeConflictsWhenGrandparentChangedDirDescendantAfterNestedFork(t *testing.T) {
 	t.Parallel()
 
