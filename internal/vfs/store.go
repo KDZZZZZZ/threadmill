@@ -372,11 +372,21 @@ type View struct {
 	envID string
 }
 
-// Read 沿 overlay → parent → base 读文件，返回拷贝。
+func (v *View) liveDir() (string, bool) {
+	v.store.mu.Lock()
+	defer v.store.mu.Unlock()
+	dir, ok := v.store.lives[v.envID]
+	return dir, ok
+}
+
+// Read 沿 overlay → parent → base 读文件，返回拷贝。已物化则读 live。
 func (v *View) Read(path string) ([]byte, error) {
 	rel, err := jail(path)
 	if err != nil {
 		return nil, err
+	}
+	if live, ok := v.liveDir(); ok {
+		return readLive(live, rel)
 	}
 	v.store.mu.Lock()
 	defer v.store.mu.Unlock()
@@ -405,11 +415,14 @@ func (v *View) Read(path string) ([]byte, error) {
 	return cloneBytes(data), nil
 }
 
-// Write 只写入本环境 overlay。
+// Write 写入本环境 overlay；已物化则写 live。
 func (v *View) Write(path string, data []byte) error {
 	rel, err := jail(path)
 	if err != nil {
 		return err
+	}
+	if live, ok := v.liveDir(); ok {
+		return writeLive(live, rel, data)
 	}
 	v.store.mu.Lock()
 	defer v.store.mu.Unlock()
@@ -417,11 +430,14 @@ func (v *View) Write(path string, data []byte) error {
 	return nil
 }
 
-// Delete 在本环境 overlay 上打 tombstone，隐藏 parent/base 同名文件。
+// Delete 在本环境 overlay 上打 tombstone；已物化则删 live。
 func (v *View) Delete(path string) error {
 	rel, err := jail(path)
 	if err != nil {
 		return err
+	}
+	if live, ok := v.liveDir(); ok {
+		return deleteLive(live, rel)
 	}
 	v.store.mu.Lock()
 	defer v.store.mu.Unlock()
@@ -429,11 +445,14 @@ func (v *View) Delete(path string) error {
 	return nil
 }
 
-// Stat 沿 overlay → parent → base 返回元数据。
+// Stat 沿 overlay → parent → base 返回元数据。已物化则看 live。
 func (v *View) Stat(path string) (FileInfo, error) {
 	rel, err := jail(path)
 	if err != nil {
 		return FileInfo{}, err
+	}
+	if live, ok := v.liveDir(); ok {
+		return statLive(live, rel)
 	}
 	v.store.mu.Lock()
 	defer v.store.mu.Unlock()
@@ -453,11 +472,14 @@ func (v *View) Stat(path string) (FileInfo, error) {
 	return FileInfo{Name: fi.Name(), Size: fi.Size(), IsDir: fi.IsDir()}, nil
 }
 
-// List 合并 base 目录项与 overlay（tombstone 会去掉对应名字）。
+// List 合并 base 目录项与 overlay（tombstone 会去掉对应名字）。已物化则列 live。
 func (v *View) List(path string) ([]DirEnt, error) {
 	rel, err := jail(path)
 	if err != nil {
 		return nil, err
+	}
+	if live, ok := v.liveDir(); ok {
+		return listLive(live, rel)
 	}
 	v.store.mu.Lock()
 	defer v.store.mu.Unlock()

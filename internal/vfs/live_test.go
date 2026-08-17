@@ -91,6 +91,66 @@ func TestReleaseRemovesLiveDir(t *testing.T) {
 	}
 }
 
+func TestFileViewReadSeesLiveWrite(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	live, err := store.Materialize("env-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "from-bash.txt"), []byte("from-live"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.View("env-a").Read("from-bash.txt")
+	if err != nil {
+		t.Fatalf("FileView missed live write: %v", err)
+	}
+	if string(got) != "from-live" {
+		t.Fatalf("from-bash.txt = %q, want from-live", got)
+	}
+}
+
+func TestFileViewWriteAfterMaterializeUpdatesLive(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	live, err := store.Materialize("env-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.View("env-a").Write("via-view.txt", []byte("from-view")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(live, "via-view.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "from-view" {
+		t.Fatalf("live via-view.txt = %q, want from-view", got)
+	}
+}
+
+func TestMaterializeReplacesHostDirWithOverlayFile(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	if err := store.View("env-a").Write("sub", []byte("now-a-file")); err != nil {
+		t.Fatal(err)
+	}
+	live, err := store.Materialize("env-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(live, "sub"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "now-a-file" {
+		t.Fatalf("live sub = %q, want now-a-file", got)
+	}
+}
+
 func TestAbsorbPicksUpLiveWrites(t *testing.T) {
 	t.Parallel()
 

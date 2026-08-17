@@ -152,6 +152,80 @@ func TestGraphRunJoinMergesChildMemory(t *testing.T) {
 	}
 }
 
+func TestGraphRunVerifierReadsExecutorLiveWrite(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	task := graph.AddTask()
+	files := vfs.NewStore(t.TempDir())
+	assemble := func(task Task) (Roles, error) {
+		return Roles{
+			Planner: instantAsker(),
+			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
+				dir, err := files.Materialize(task.Env.ID)
+				if err != nil {
+					return "", err
+				}
+				if err := os.WriteFile(filepath.Join(dir, "from-exec.txt"), []byte("from-live"), 0o640); err != nil {
+					return "", err
+				}
+				return query + "/executor", nil
+			}),
+			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
+				got, err := files.View(task.Env.ID).Read("from-exec.txt")
+				if err != nil {
+					return "", fmt.Errorf("verifier missed executor live write: %w", err)
+				}
+				if string(got) != "from-live" {
+					return "", fmt.Errorf("from-exec.txt = %q, want from-live", got)
+				}
+				return query + "/verifier", nil
+			}),
+		}, nil
+	}
+	if _, err := graph.Run(context.Background(), task.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestGraphRunJoinMergesChildLiveWrites(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	child := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
+	files := vfs.NewStore(t.TempDir())
+	assemble := func(task Task) (Roles, error) {
+		return Roles{
+			Planner: instantAsker(),
+			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
+				if task.ID != child.ID {
+					return query + "/executor", nil
+				}
+				dir, err := files.Materialize(task.Env.ID)
+				if err != nil {
+					return "", err
+				}
+				if err := os.WriteFile(filepath.Join(dir, "from-child-live.txt"), []byte("from-live"), 0o640); err != nil {
+					return "", err
+				}
+				return query + "/executor", nil
+			}),
+			Verifier: instantAsker(),
+		}, nil
+	}
+	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	got, err := files.View(root.Env.ID).Read("from-child-live.txt")
+	if err != nil {
+		t.Fatalf("join did not merge child live write: %v", err)
+	}
+	if string(got) != "from-live" {
+		t.Fatalf("merged from-child-live.txt = %q, want from-live", got)
+	}
+}
+
 func TestGraphRunJoinMergesChildFiles(t *testing.T) {
 	t.Parallel()
 

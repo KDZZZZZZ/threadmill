@@ -136,11 +136,12 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (output stri
 	}
 
 	output = input
-	for _, node := range task.Sequence() {
+	seq := task.Sequence()
+	for i, node := range seq {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		output, err = r.runRole(ctx, node, roles, output, outputs, merged)
+		output, err = r.runRole(ctx, node, roles, output, outputs, merged, i == len(seq)-1)
 		if err != nil {
 			r.fail(err)
 			return "", err
@@ -156,8 +157,9 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (output stri
 //  2. Ask：跑这个角色的 ReAct。
 //  3. 等 Incoming 里每个节点的完成事件（sequence 前驱、spawn 来源、join 进来的 verifier）。
 //  4. 对每条 join 入边，把前驱 task 环境 Merge 进本节点的 task 环境。
-//  5. finish：发出自己的完成事件。同一 task 的下一阶段、以及所有等这条边的节点，现在可以往下走。
-func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input string, outputs map[string]string, merged map[string]bool) (string, error) {
+//  5. 最后一个角色在 finish 之前 Absorb，这样 join 的 Merge 能看见 bash 写进 live 的文件。
+//  6. finish：发出自己的完成事件。同一 task 的下一阶段、以及所有等这条边的节点，现在可以往下走。
+func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input string, outputs map[string]string, merged map[string]bool, last bool) (string, error) {
 	asker := roles.asker(node.Role)
 	if asker == nil {
 		return "", fmt.Errorf("%w: %s", ErrNilAsker, node.Role)
@@ -209,6 +211,11 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 		}
 		merged[node.ID] = true
 		if err := r.saveProgress(node.TaskID, outputs, merged); err != nil {
+			return "", err
+		}
+	}
+	if last && r.stores.Files != nil {
+		if err := r.stores.Files.Absorb(task.Env.ID); err != nil {
 			return "", err
 		}
 	}

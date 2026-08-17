@@ -232,20 +232,96 @@ func (s *Store) regularFileContent(envID, rel string) ([]byte, bool) {
 }
 
 func applyLive(live, rel string, b blob) error {
-	dest, err := livePath(live, rel)
-	if err != nil {
-		return err
-	}
 	if b.tombstone {
+		dest, err := livePath(live, rel)
+		if err != nil {
+			return err
+		}
 		if err := os.RemoveAll(dest); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		return nil
 	}
+	return writeLive(live, rel, b.data)
+}
+
+func liveDest(live, rel string) (string, error) {
+	if rel == "." {
+		return live, nil
+	}
+	return livePath(live, rel)
+}
+
+func readLive(live, rel string) ([]byte, error) {
+	dest, err := liveDest(live, rel)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		return nil, mapIOError("read", rel, err)
+	}
+	return cloneBytes(data), nil
+}
+
+func writeLive(live, rel string, data []byte) error {
+	dest, err := livePath(live, rel)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(dest); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
 		return err
 	}
-	return os.WriteFile(dest, b.data, 0o640)
+	return os.WriteFile(dest, data, 0o640)
+}
+
+func deleteLive(live, rel string) error {
+	dest, err := livePath(live, rel)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(dest); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func statLive(live, rel string) (FileInfo, error) {
+	dest, err := liveDest(live, rel)
+	if err != nil {
+		return FileInfo{}, err
+	}
+	fi, err := os.Stat(dest)
+	if err != nil {
+		return FileInfo{}, mapIOError("stat", rel, err)
+	}
+	return FileInfo{Name: fi.Name(), Size: fi.Size(), IsDir: fi.IsDir()}, nil
+}
+
+func listLive(live, rel string) ([]DirEnt, error) {
+	dest, err := liveDest(live, rel)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := os.Stat(dest)
+	if err != nil {
+		return nil, mapIOError("list", rel, err)
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("vfs: %s: not a directory", rel)
+	}
+	entries, err := os.ReadDir(dest)
+	if err != nil {
+		return nil, mapIOError("list", rel, err)
+	}
+	ents := make(map[string]DirEnt, len(entries))
+	for _, e := range entries {
+		ents[e.Name()] = DirEnt{Name: e.Name(), IsDir: e.IsDir()}
+	}
+	return sortedDirents(ents), nil
 }
 
 func livePath(live, rel string) (string, error) {

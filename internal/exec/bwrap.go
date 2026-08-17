@@ -55,5 +55,6 @@ func runBwrap(ctx context.Context, live, command string, capBytes int) (env.Exec
 		"--",
 		"bash", "-c", command,
 	)
+	cmd.Env = sandboxEnv(live)
 	return collect(ctx, cmd, capBytes)
 }

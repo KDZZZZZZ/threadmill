@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	osexec "os/exec"
-	"strings"
 	"syscall"
 	"unsafe"
 
@@ -65,7 +64,7 @@ func runLandlock(ctx context.Context, live, command string, capBytes int) (env.E
 	}
 	cmd := osexec.CommandContext(ctx, exe, landlockChildArg, live, command)
 	cmd.Dir = live
-	cmd.Env = append(os.Environ(), landlockChildEnv+"=1")
+	cmd.Env = append(sandboxEnv(live), landlockChildEnv+"=1")
 	return collect(ctx, cmd, capBytes)
 }
 
@@ -74,6 +73,7 @@ func runLandlockChild(live, command string) int {
 	if err != nil {
 		bash = "/bin/bash"
 	}
+	_ = syscall.Unshare(syscall.CLONE_NEWNET)
 	if err := restrictTo(live); err != nil {
 		fmt.Fprintf(os.Stderr, "exec: landlock: %v\n", err)
 		return 127
@@ -82,24 +82,11 @@ func runLandlockChild(live, command string) int {
 		fmt.Fprintf(os.Stderr, "exec: chdir: %v\n", err)
 		return 127
 	}
-	if err := syscall.Exec(bash, []string{"bash", "-c", command}, landlockExecEnv()); err != nil {
+	if err := syscall.Exec(bash, []string{"bash", "-c", command}, sandboxEnv(live)); err != nil {
 		fmt.Fprintf(os.Stderr, "exec: bash: %v\n", err)
 		return 127
 	}
 	return 0
-}
-
-func landlockExecEnv() []string {
-	const prefix = landlockChildEnv + "="
-	env := os.Environ()
-	out := make([]string, 0, len(env))
-	for _, e := range env {
-		if strings.HasPrefix(e, prefix) {
-			continue
-		}
-		out = append(out, e)
-	}
-	return out
 }
 
 func landlockABI() (int, error) {

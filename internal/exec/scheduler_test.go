@@ -68,6 +68,9 @@ func TestSchedulerDoesNotAbsorbOnRun(t *testing.T) {
 	if _, err := s.View("env-a", files).Run(context.Background(), env.Cmd{Command: "true"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := files.Release("env-a"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := files.View("env-a").Read("from-run.txt"); err == nil {
 		t.Fatal("Run absorbed a live file into overlay")
 	}
