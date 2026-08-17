@@ -4,6 +4,7 @@
 package vfs
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -38,6 +39,7 @@ type blob struct {
 type layer struct {
 	parentID string
 	files    map[string]blob
+	baseline []map[string]blob // Fork 瞬间从父到根的 overlay 快照；nil 表示不是 Fork 出来的
 }
 
 // Store 按环境保存 overlay。Fork 只挂 parent 指针，不复制树。
@@ -55,7 +57,8 @@ func NewStore(baseDir string) *Store {
 	}
 }
 
-// Fork 给 child 挂上 parent 指针和空 overlay。子环境已存在时不覆盖。
+// Fork 给 child 挂上 parent 指针和空 overlay，并记下当时从父到根的 overlay 作为合入基线。
+// 子环境已存在时不覆盖，也不改基线。
 func (s *Store) Fork(parentID, childID string) {
 	if childID == "" {
 		return
@@ -68,7 +71,274 @@ func (s *Store) Fork(parentID, childID string) {
 	s.envs[childID] = &layer{
 		parentID: parentID,
 		files:    make(map[string]blob),
+		baseline: s.snapshotOverlays(parentID),
 	}
+}
+
+// Merge 把 from 的 overlay 增量三路并入 into。冲突失败，不改 into。
+func (s *Store) Merge(from, into string) error {
+	if into == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var childFiles map[string]blob
+	var fromLayer *layer
+	parentID := ""
+	if l, ok := s.envs[from]; ok {
+		fromLayer = l
+		childFiles = l.files
+		parentID = l.parentID
+	}
+
+	type pending struct {
+		path string
+		b    blob
+	}
+	var apply []pending
+	var baseline []map[string]blob
+	if fromLayer != nil {
+		baseline = fromLayer.baseline
+	}
+	for path, b := range childFiles {
+		if b.tombstone {
+			continue
+		}
+		prefix := path + "/"
+		for other, ob := range childFiles {
+			if ob.tombstone || other == path || !strings.HasPrefix(other, prefix) {
+				continue
+			}
+			return fmt.Errorf("vfs: merge conflict: %s", other)
+		}
+	}
+	for path, theirsBlob := range childFiles {
+		theirs := overlayContent(theirsBlob)
+		base := s.mergeBase(fromLayer, parentID, path)
+		ours := s.lookupContent(into, path)
+		sameAncestor := contentEqual(theirs, base) || contentEqual(ours, theirs)
+		if !sameAncestor && !contentEqual(ours, base) {
+			return fmt.Errorf("vfs: merge conflict: %s", path)
+		}
+		needApply := !sameAncestor
+		for _, q := range s.knownDescendants(into, baseline, path) {
+			tq := s.lookupContent(from, q)
+			bq := s.mergeBase(fromLayer, parentID, q)
+			oq := s.lookupContent(into, q)
+			if contentEqual(tq, bq) || contentEqual(oq, tq) {
+				continue
+			}
+			if !contentEqual(oq, bq) {
+				return fmt.Errorf("vfs: merge conflict: %s", q)
+			}
+			needApply = true
+		}
+		if !needApply {
+			continue
+		}
+		if !theirs.tombstone && s.liveFileAncestor(into, path) {
+			return fmt.Errorf("vfs: merge conflict: %s", path)
+		}
+		apply = append(apply, pending{path: path, b: cloneBlob(theirsBlob)})
+	}
+	if len(apply) == 0 {
+		return nil
+	}
+	dst := s.ensure(into)
+	for _, e := range apply {
+		if e.b.tombstone {
+			applyBlob(dst, e.path, e.b)
+		}
+	}
+	for _, e := range apply {
+		if !e.b.tombstone {
+			applyBlob(dst, e.path, e.b)
+		}
+	}
+	return nil
+}
+
+type content struct {
+	exists    bool
+	tombstone bool
+	data      []byte
+	maskFrom  string
+	maskFile  bool
+}
+
+func overlayContent(b blob) content {
+	return content{exists: true, tombstone: b.tombstone, data: b.data}
+}
+
+func maskedContent(prefix string, b blob) content {
+	c := content{exists: true, tombstone: true, maskFrom: prefix, maskFile: !b.tombstone}
+	if !b.tombstone {
+		c.data = cloneBytes(b.data)
+	}
+	return c
+}
+
+func (s *Store) mergeBase(fromLayer *layer, parentID, rel string) content {
+	if fromLayer != nil && fromLayer.baseline != nil {
+		return s.lookupFrozen(fromLayer.baseline, rel)
+	}
+	return s.lookupContent(parentID, rel)
+}
+
+func (s *Store) snapshotOverlays(envID string) []map[string]blob {
+	out := []map[string]blob{}
+	seen := map[string]struct{}{}
+	for id := envID; id != ""; {
+		if _, loop := seen[id]; loop {
+			break
+		}
+		seen[id] = struct{}{}
+		l, ok := s.envs[id]
+		if !ok {
+			break
+		}
+		out = append(out, cloneFiles(l.files))
+		id = l.parentID
+	}
+	return out
+}
+
+func (s *Store) lookupFrozen(chain []map[string]blob, rel string) content {
+	for _, files := range chain {
+		if b, ok := files[rel]; ok {
+			return overlayContent(b)
+		}
+		if c, ok := filesMask(files, rel); ok {
+			return c
+		}
+	}
+	return s.lookupHost(rel)
+}
+
+func (s *Store) lookupContent(envID, rel string) content {
+	seen := map[string]struct{}{}
+	for id := envID; id != ""; {
+		if _, loop := seen[id]; loop {
+			break
+		}
+		seen[id] = struct{}{}
+		l, ok := s.envs[id]
+		if !ok {
+			break
+		}
+		if b, ok := l.files[rel]; ok {
+			return overlayContent(b)
+		}
+		if c, ok := filesMask(l.files, rel); ok {
+			return c
+		}
+		id = l.parentID
+	}
+	return s.lookupHost(rel)
+}
+
+func (s *Store) lookupHost(rel string) content {
+	host, err := s.resolveHost(rel)
+	if err != nil {
+		return content{}
+	}
+	data, err := os.ReadFile(host)
+	if err != nil {
+		return content{}
+	}
+	return content{exists: true, data: data}
+}
+
+func (s *Store) liveFileAncestor(envID, rel string) bool {
+	for _, prefix := range ancestorPrefixes(rel) {
+		c := s.lookupContent(envID, prefix)
+		if c.exists && !c.tombstone && c.maskFrom == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) knownDescendants(into string, baseline []map[string]blob, path string) []string {
+	prefix := path + "/"
+	seen := map[string]struct{}{}
+	add := func(files map[string]blob) {
+		for k := range files {
+			if strings.HasPrefix(k, prefix) {
+				seen[k] = struct{}{}
+			}
+		}
+	}
+	for _, l := range s.chain(into) {
+		add(l.files)
+	}
+	for _, files := range baseline {
+		add(files)
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	return out
+}
+
+func applyBlob(dst *layer, path string, b blob) {
+	if b.tombstone {
+		dst.files[path] = blob{tombstone: true}
+	} else {
+		dst.files[path] = cloneBlob(b)
+	}
+	prefix := path + "/"
+	for k := range dst.files {
+		if strings.HasPrefix(k, prefix) {
+			delete(dst.files, k)
+		}
+	}
+}
+
+func contentEqual(a, b content) bool {
+	if a.maskFrom != "" || b.maskFrom != "" {
+		if a.maskFrom != b.maskFrom || a.maskFile != b.maskFile {
+			return false
+		}
+		if a.maskFile {
+			return bytes.Equal(a.data, b.data)
+		}
+		return true
+	}
+	if exactHidden(a) && exactHidden(b) {
+		return true
+	}
+	if !a.exists && !b.exists {
+		return true
+	}
+	if a.exists != b.exists || a.tombstone != b.tombstone {
+		return false
+	}
+	if a.tombstone {
+		return true
+	}
+	return bytes.Equal(a.data, b.data)
+}
+
+func exactHidden(c content) bool {
+	return !c.exists || c.tombstone
+}
+
+func cloneBlob(b blob) blob {
+	if b.tombstone {
+		return blob{tombstone: true}
+	}
+	return blob{data: cloneBytes(b.data)}
+}
+
+func cloneFiles(src map[string]blob) map[string]blob {
+	dst := make(map[string]blob, len(src))
+	for path, b := range src {
+		dst[path] = cloneBlob(b)
+	}
+	return dst
 }
 
 // View 返回该环境的文件视图。
@@ -93,6 +363,9 @@ func (v *View) Read(path string) ([]byte, error) {
 
 	if data, tombstone, found := v.store.lookupBlob(v.envID, rel); found {
 		if tombstone {
+			if v.store.hasOverlayChildren(v.envID, rel) {
+				return nil, fmt.Errorf("vfs: %s: is a directory", rel)
+			}
 			return nil, notFound(rel)
 		}
 		return cloneBytes(data), nil
@@ -171,7 +444,12 @@ func (v *View) List(path string) ([]DirEnt, error) {
 
 	if _, tombstone, found := v.store.lookupBlob(v.envID, rel); found {
 		if tombstone {
-			return nil, notFound(rel)
+			if !v.store.hasOverlayChildren(v.envID, rel) {
+				return nil, notFound(rel)
+			}
+			ents := map[string]DirEnt{}
+			v.store.applyOverlayList(v.envID, rel, ents)
+			return sortedDirents(ents), nil
 		}
 		return nil, fmt.Errorf("vfs: %s: not a directory", rel)
 	}
@@ -212,16 +490,7 @@ func (v *View) List(path string) ([]DirEnt, error) {
 		return nil, notFound(rel)
 	}
 
-	names := make([]string, 0, len(ents))
-	for name := range ents {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	out := make([]DirEnt, 0, len(names))
-	for _, name := range names {
-		out = append(out, ents[name])
-	}
-	return out, nil
+	return sortedDirents(ents), nil
 }
 
 func (s *Store) ensure(envID string) *layer {
@@ -264,12 +533,17 @@ func (s *Store) lookupBlob(envID, rel string) ([]byte, bool, bool) {
 }
 
 func layerMasks(l *layer, rel string) bool {
+	_, ok := filesMask(l.files, rel)
+	return ok
+}
+
+func filesMask(files map[string]blob, rel string) (content, bool) {
 	for _, prefix := range ancestorPrefixes(rel) {
-		if _, ok := l.files[prefix]; ok {
-			return true
+		if b, ok := files[prefix]; ok {
+			return maskedContent(prefix, b), true
 		}
 	}
-	return false
+	return content{}, false
 }
 
 func ancestorPrefixes(rel string) []string {
@@ -287,6 +561,9 @@ func ancestorPrefixes(rel string) []string {
 func (s *Store) lookupStat(envID, rel string) (FileInfo, bool, error) {
 	if data, tombstone, found := s.lookupBlob(envID, rel); found {
 		if tombstone {
+			if rel != "." && s.hasOverlayChildren(envID, rel) {
+				return FileInfo{Name: filepath.Base(rel), IsDir: true}, true, nil
+			}
 			return FileInfo{}, true, notFound(rel)
 		}
 		return FileInfo{
@@ -310,19 +587,33 @@ func (s *Store) hasOverlayChildren(envID, rel string) bool {
 func (s *Store) applyOverlayList(envID, rel string, ents map[string]DirEnt) {
 	chain := s.chain(envID)
 	for i := len(chain) - 1; i >= 0; i-- {
-		for filePath, b := range chain[i].files {
-			name, isDir, ok := listPart(rel, filePath)
-			if !ok {
-				continue
+		l := chain[i]
+		if _, ok := l.files[rel]; ok {
+			for name := range ents {
+				delete(ents, name)
 			}
-			if b.tombstone {
-				if !isDir {
-					delete(ents, name)
-				}
-				continue
-			}
-			ents[name] = DirEnt{Name: name, IsDir: isDir}
 		}
+		applyLayerList(l.files, rel, ents, true)
+		applyLayerList(l.files, rel, ents, false)
+	}
+}
+
+func applyLayerList(files map[string]blob, rel string, ents map[string]DirEnt, tombstones bool) {
+	for filePath, b := range files {
+		if b.tombstone != tombstones {
+			continue
+		}
+		name, isDir, ok := listPart(rel, filePath)
+		if !ok {
+			continue
+		}
+		if b.tombstone {
+			if !isDir {
+				delete(ents, name)
+			}
+			continue
+		}
+		ents[name] = DirEnt{Name: name, IsDir: isDir}
 	}
 }
 
@@ -373,6 +664,19 @@ func jail(path string) (string, error) {
 		return "", fmt.Errorf("%w: %q", ErrInvalidPath, path)
 	}
 	return filepath.ToSlash(filepath.Clean(path)), nil
+}
+
+func sortedDirents(ents map[string]DirEnt) []DirEnt {
+	names := make([]string, 0, len(ents))
+	for name := range ents {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	out := make([]DirEnt, 0, len(names))
+	for _, name := range names {
+		out = append(out, ents[name])
+	}
+	return out
 }
 
 func listPart(dir, filePath string) (name string, isDir bool, ok bool) {
