@@ -264,6 +264,50 @@ func TestGraphRunJoinMergesChildFiles(t *testing.T) {
 	}
 }
 
+func TestGraphRunJoinConflictsWhenParentAndChildWroteSameLiveFile(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	child := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
+	files := vfs.NewStore(t.TempDir())
+	_, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, func(task Task) (Roles, error) {
+		return Roles{
+			Planner: askerFunc(func(_ context.Context, query string) (string, error) {
+				if task.ID == root.ID {
+					dir, err := files.Materialize(task.Env.ID)
+					if err != nil {
+						return "", err
+					}
+					if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("parent"), 0o640); err != nil {
+						return "", err
+					}
+				}
+				return query + "/planner", nil
+			}),
+			Executor: instantAsker(),
+			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
+				if task.ID == child.ID {
+					dir, err := files.Materialize(task.Env.ID)
+					if err != nil {
+						return "", err
+					}
+					if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("child"), 0o640); err != nil {
+						return "", err
+					}
+				}
+				return query + "/verifier", nil
+			}),
+		}, nil
+	})
+	if err == nil {
+		t.Fatal("Run succeeded, want join merge conflict")
+	}
+	if !strings.Contains(err.Error(), "shared.txt") {
+		t.Fatalf("Run() error = %v, want shared.txt conflict", err)
+	}
+}
+
 func TestGraphRunJoinConflictsWhenParentAndChildWroteSameFile(t *testing.T) {
 	t.Parallel()
 

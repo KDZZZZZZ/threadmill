@@ -91,6 +91,36 @@ func TestReleaseRemovesLiveDir(t *testing.T) {
 	}
 }
 
+func TestLiveRejectsSymlinkEscape(t *testing.T) {
+	t.Parallel()
+
+	store, base := newTestStore(t)
+	outside := t.TempDir()
+	mustWriteFile(t, filepath.Join(outside, "secret.txt"), "leak")
+	if err := os.Symlink(outside, filepath.Join(base, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Materialize("env-a"); err != nil {
+		t.Fatal(err)
+	}
+	view := store.View("env-a")
+	if _, err := view.Read("link/secret.txt"); err == nil {
+		t.Fatal("Read followed a symlink out of live")
+	}
+	if _, err := view.Stat("link/secret.txt"); err == nil {
+		t.Fatal("Stat followed a symlink out of live")
+	}
+	if _, err := view.List("link"); err == nil {
+		t.Fatal("List followed a symlink out of live")
+	}
+	if err := view.Write("link/pwn.txt", []byte("x")); err == nil {
+		t.Fatal("Write followed a symlink out of live")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "pwn.txt")); err == nil {
+		t.Fatal("wrote outside the live dir via symlink")
+	}
+}
+
 func TestFileViewReadSeesLiveWrite(t *testing.T) {
 	t.Parallel()
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // Materialize 把 env 的可见树落到 live 目录。已物化则原样返回。
@@ -233,27 +234,13 @@ func (s *Store) regularFileContent(envID, rel string) ([]byte, bool) {
 
 func applyLive(live, rel string, b blob) error {
 	if b.tombstone {
-		dest, err := livePath(live, rel)
-		if err != nil {
-			return err
-		}
-		if err := os.RemoveAll(dest); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
+		return deleteLive(live, rel)
 	}
 	return writeLive(live, rel, b.data)
 }
 
-func liveDest(live, rel string) (string, error) {
-	if rel == "." {
-		return live, nil
-	}
-	return livePath(live, rel)
-}
-
 func readLive(live, rel string) ([]byte, error) {
-	dest, err := liveDest(live, rel)
+	dest, err := resolveLive(live, rel)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +252,7 @@ func readLive(live, rel string) ([]byte, error) {
 }
 
 func writeLive(live, rel string, data []byte) error {
-	dest, err := livePath(live, rel)
+	dest, err := createLivePath(live, rel)
 	if err != nil {
 		return err
 	}
@@ -279,18 +266,36 @@ func writeLive(live, rel string, data []byte) error {
 }
 
 func deleteLive(live, rel string) error {
-	dest, err := livePath(live, rel)
+	root, err := confinedRoot(live)
 	if err != nil {
 		return err
 	}
-	if err := os.RemoveAll(dest); err != nil && !os.IsNotExist(err) {
+	dest, err := liveCandidate(root, rel)
+	if err != nil {
+		return err
+	}
+	fi, err := os.Lstat(dest)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return os.Remove(dest)
+	}
+	resolved, err := resolveLive(live, rel)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(resolved); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
 }
 
 func statLive(live, rel string) (FileInfo, error) {
-	dest, err := liveDest(live, rel)
+	dest, err := resolveLive(live, rel)
 	if err != nil {
 		return FileInfo{}, err
 	}
@@ -302,7 +307,7 @@ func statLive(live, rel string) (FileInfo, error) {
 }
 
 func listLive(live, rel string) ([]DirEnt, error) {
-	dest, err := liveDest(live, rel)
+	dest, err := resolveLive(live, rel)
 	if err != nil {
 		return nil, err
 	}
@@ -324,15 +329,93 @@ func listLive(live, rel string) ([]DirEnt, error) {
 	return sortedDirents(ents), nil
 }
 
-func livePath(live, rel string) (string, error) {
-	if rel == "" || rel == "." {
+func resolveLive(live, rel string) (string, error) {
+	root, err := confinedRoot(live)
+	if err != nil {
+		return "", err
+	}
+	if rel == "." {
+		return root, nil
+	}
+	candidate, err := liveCandidate(root, rel)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if escapesRoot(root, candidate) {
+				return "", fmt.Errorf("%w: %q", ErrInvalidPath, rel)
+			}
+			return "", notFound(rel)
+		}
+		return "", err
+	}
+	if escapesRoot(root, resolved) {
 		return "", fmt.Errorf("%w: %q", ErrInvalidPath, rel)
 	}
-	if filepath.IsAbs(rel) || !filepath.IsLocal(filepath.FromSlash(rel)) {
+	return resolved, nil
+}
+
+func createLivePath(live, rel string) (string, error) {
+	root, err := confinedRoot(live)
+	if err != nil {
+		return "", err
+	}
+	if rel == "." {
 		return "", fmt.Errorf("%w: %q", ErrInvalidPath, rel)
 	}
-	full := filepath.Join(live, filepath.FromSlash(rel))
-	if escapesRoot(live, full) {
+	parts := strings.Split(rel, "/")
+	if len(parts) == 0 || parts[0] == "" {
+		return "", fmt.Errorf("%w: %q", ErrInvalidPath, rel)
+	}
+	cur := root
+	for _, part := range parts[:len(parts)-1] {
+		if part == "." || part == ".." {
+			return "", fmt.Errorf("%w: %q", ErrInvalidPath, rel)
+		}
+		next := filepath.Join(cur, part)
+		if escapesRoot(root, next) {
+			return "", fmt.Errorf("%w: %q", ErrInvalidPath, rel)
+		}
+		fi, err := os.Lstat(next)
+		if err != nil {
+			if os.IsNotExist(err) {
+				cur = next
+				continue
+			}
+			return "", err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			resolved, err := filepath.EvalSymlinks(next)
+			if err != nil {
+				return "", err
+			}
+			if escapesRoot(root, resolved) {
+				return "", fmt.Errorf("%w: %q", ErrInvalidPath, rel)
+			}
+			cur = resolved
+			continue
+		}
+		cur = next
+	}
+	base := parts[len(parts)-1]
+	if base == "." || base == ".." {
+		return "", fmt.Errorf("%w: %q", ErrInvalidPath, rel)
+	}
+	dest := filepath.Join(cur, base)
+	if escapesRoot(root, dest) {
+		return "", fmt.Errorf("%w: %q", ErrInvalidPath, rel)
+	}
+	return dest, nil
+}
+
+func liveCandidate(root, rel string) (string, error) {
+	if rel == "" || filepath.IsAbs(rel) || !filepath.IsLocal(filepath.FromSlash(rel)) {
+		return "", fmt.Errorf("%w: %q", ErrInvalidPath, rel)
+	}
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	if escapesRoot(root, full) {
 		return "", fmt.Errorf("%w: %q", ErrInvalidPath, rel)
 	}
 	return full, nil
