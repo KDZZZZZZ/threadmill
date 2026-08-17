@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"unicode/utf8"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
@@ -310,6 +311,49 @@ func NewTeam(
 	}, nil
 }
 
+// BindCheckpoints 把进行中 ReAct 快照绑到 task 角色 ID 上，避免多个 task 互相覆盖。
+func (t *Team) BindCheckpoints(store CheckpointStore, taskID string) {
+	bind := func(loop *Loop, role string) {
+		if loop == nil {
+			return
+		}
+		if taskID != "" {
+			loop.agentID = taskID + ":" + role
+		}
+		loop.checkpoints = store
+	}
+	bind(t.Planner, plannerID)
+	bind(t.Executor, executorID)
+	bind(t.Verifier, verifierID)
+	bind(t.Organizer, subgraphOrganizerID)
+}
+
+func withFileDefaults(config Config, defaultID, defaultPrompt string) Config {
+	if config.AgentID == "" {
+		config.AgentID = defaultID
+	}
+	if config.SystemPrompt == "" {
+		config.SystemPrompt = defaultPrompt
+	}
+	return config
+}
+
+// Bind 把 yaml 装好的工具接到 env 上的记忆图；hook 读到的也是同一份快照。
+func (t *Team) Bind(store *ctxgraph.Store, envID string) error {
+	if store == nil {
+		return fmt.Errorf("agent: nil store")
+	}
+	for _, loop := range []*Loop{t.Planner, t.Executor, t.Verifier, t.Organizer} {
+		if loop == nil {
+			continue
+		}
+		if err := loop.bindEnv(store, envID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func newFileLoop(
 	config Config,
 	file FileAgent,
@@ -317,12 +361,7 @@ func newFileLoop(
 	defaultPrompt string,
 	organizer *Loop,
 ) (*Loop, error) {
-	if config.AgentID == "" {
-		config.AgentID = defaultID
-	}
-	if config.SystemPrompt == "" {
-		config.SystemPrompt = defaultPrompt
-	}
+	config = withFileDefaults(config, defaultID, defaultPrompt)
 	loop, err := NewLoop(config)
 	if err != nil {
 		return nil, err
@@ -539,7 +578,7 @@ func (t *organizeSubgraphTool) Execute(ctx context.Context, call agenttool.Call)
 	copy.Graph = copy.Graph.WithSubgraph(subgraph)
 	t.organizer.commitCopy(copy)
 
-	if _, err := t.organizer.Ask(ctx, organizeQuery(query, subgraph.ID)); err != nil {
+	if _, err := t.organizer.Ask(ctx, organizeQuery(query, subgraph.ID, t.organizer.ContextGraph())); err != nil {
 		return agenttool.Output{}, err
 	}
 
@@ -557,8 +596,58 @@ func (t *organizeSubgraphTool) Execute(ctx context.Context, call agenttool.Call)
 	return agenttool.Output{Content: string(payload)}, nil
 }
 
-func organizeQuery(query, subgraphID string) string {
-	return query + "\n\n目标子图 ID：" + subgraphID + "\n请把相关节点加入这个子图，不要更换 ID。"
+func organizeQuery(query, subgraphID string, graph ctxgraph.Graph) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n\n目标子图 ID：%s\n请把相关节点加入这个子图，不要更换 ID。查询字符串不是节点 ID。\n", query, subgraphID)
+	b.WriteString("\n已有子图：\n")
+	if len(graph.Subgraphs) == 0 {
+		b.WriteString("（无）\n")
+	}
+	for _, subgraph := range graph.Subgraphs {
+		fmt.Fprintf(&b, "- %s kind=%s name=%s\n", subgraph.ID, subgraph.Kind, subgraph.Name)
+	}
+	b.WriteString("\n查询可能命中的节点：\n")
+	hits := 0
+	for _, node := range graph.Nodes {
+		if !nodeMatchesQuery(node, query) {
+			continue
+		}
+		hits++
+		fmt.Fprintf(&b, "- %s %s\n", node.ID, node.Statement)
+	}
+	if hits == 0 {
+		b.WriteString("（无）\n")
+	}
+	return b.String()
+}
+
+func nodeMatchesQuery(node ctxgraph.Node, query string) bool {
+	if query == "" {
+		return false
+	}
+	haystack := strings.TrimSpace(node.ID + " " + node.Statement)
+	if haystack == "" {
+		return false
+	}
+	if strings.Contains(haystack, query) {
+		return true
+	}
+	if node.ID != "" && strings.Contains(query, node.ID) {
+		return true
+	}
+	if node.Statement != "" && strings.Contains(query, node.Statement) {
+		return true
+	}
+	for _, token := range strings.Fields(query) {
+		token = strings.Trim(token, "`\"'.,;:()[]")
+		if utf8.RuneCountInString(token) < 4 {
+			continue
+		}
+		if strings.Contains(haystack, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func subgraphFromGraph(graph ctxgraph.Graph, id string) (ctxgraph.Subgraph, bool) {

@@ -136,6 +136,18 @@ func TestOrganizeSubgraphToolAsksOrganizer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	organizer.SetContextGraph(ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{
+			ID:   "sg-seed",
+			Name: "seed",
+			Kind: ctxgraph.SubgraphKindGeneral,
+		}},
+		Nodes: []ctxgraph.Node{{
+			ID:          "n-seed",
+			Statement:   "user prefers blue preference",
+			SubgraphIDs: []string{"sg-seed"},
+		}},
+	})
 	requester.SetSubscribedSubgraphs([]string{"sg-old"})
 
 	tool, ok := requester.tools["organize_subgraph"]
@@ -168,8 +180,26 @@ func TestOrganizeSubgraphToolAsksOrganizer(t *testing.T) {
 	if !strings.Contains(query, "blue preference") || !strings.Contains(query, subgraph.ID) {
 		t.Fatalf("organizer query = %q, want original query and subgraph id", query)
 	}
+	if !strings.Contains(query, "n-seed") || !strings.Contains(query, "sg-seed") {
+		t.Fatalf("organizer query = %q, want existing subgraph and matching node ids", query)
+	}
 	if got, want := requester.subscribedSubgraphs, []string{"sg-old", subgraph.ID}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("subscriptions = %v, want %v", got, want)
+	}
+}
+
+func TestOrganizeQueryListsTokenMatchedNodes(t *testing.T) {
+	t.Parallel()
+
+	got := organizeQuery("THREADMILL_GRAPH_MEM_7f3a 核验", "sg-q-1", ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-seed", Kind: ctxgraph.SubgraphKindGeneral}},
+		Nodes: []ctxgraph.Node{{
+			ID:        "n-seed",
+			Statement: "user preference marker THREADMILL_GRAPH_MEM_7f3a",
+		}},
+	})
+	if !strings.Contains(got, "n-seed") || !strings.Contains(got, "sg-seed") {
+		t.Fatalf("organizeQuery() = %q, want token match n-seed and subgraph catalog", got)
 	}
 }
 
@@ -415,4 +445,107 @@ func TestNewTeamUsesFileAgentsAndSharesOrganizer(t *testing.T) {
 	if len(team.Organizer.hooks.AssembleRequest) == 0 {
 		t.Fatal("organizer yaml drop-context reminder not registered")
 	}
+}
+
+func TestTeamBindUsesYamlPluginsAgainstEnvStore(t *testing.T) {
+	resetDefaultStore(t)
+
+	store := ctxgraph.NewStore()
+	store.Save("env-1", ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{{
+			ID:          "n1",
+			Kind:        ctxgraph.NodeKindFact,
+			Statement:   "local fact",
+			Status:      ctxgraph.NodeStatusAccepted,
+			SubgraphIDs: []string{"sg-a"},
+		}},
+	})
+	ctxgraph.Update(ctxgraph.Copy{
+		Graph: ctxgraph.Graph{
+			Nodes: []ctxgraph.Node{{
+				ID:          "n1",
+				Kind:        ctxgraph.NodeKindFact,
+				Statement:   "global fact",
+				Status:      ctxgraph.NodeStatusAccepted,
+				SubgraphIDs: []string{"sg-a"},
+			}},
+		},
+	})
+
+	var request Request
+	team, err := NewTeam(
+		modelFunc(func(_ context.Context, got Request) (AssistantMessage, error) {
+			request = got
+			if hasToolResultMessages(got.Messages) {
+				return AssistantMessage{Content: "done"}, nil
+			}
+			return AssistantMessage{
+				ToolCalls: []agenttool.Call{{
+					ID:        "call-1",
+					Name:      memoryAddToSubgraphToolName,
+					Arguments: json.RawMessage(`{"subgraph_id":"bound","node_ids":["n1"]}`),
+				}},
+			}, nil
+		}),
+		0,
+		FileAgents{
+			Planner: FileAgent{
+				SystemPrompt: "yaml plan",
+				Tools:        []string{organizeSubgraphToolName, memoryAddToSubgraphToolName},
+				Hooks:        []string{hookInjectSubscribedMemory},
+			},
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := team.Bind(store, "env-1"); err != nil {
+		t.Fatalf("Bind() error = %v", err)
+	}
+	team.Planner.SetSubscribedSubgraphs([]string{"sg-a"})
+
+	answer, err := team.Planner.Ask(context.Background(), "start")
+	if err != nil {
+		t.Fatalf("Ask() error = %v", err)
+	}
+	if answer != "done" {
+		t.Fatalf("Ask() = %q, want done", answer)
+	}
+	if !strings.Contains(request.SystemPrompt, "yaml plan") {
+		t.Fatalf("planner prompt = %q, want yaml plan", request.SystemPrompt)
+	}
+	if !strings.Contains(request.SystemPrompt, "local fact") {
+		t.Fatalf("planner prompt missing env memory: %q", request.SystemPrompt)
+	}
+	if strings.Contains(request.SystemPrompt, "global fact") {
+		t.Fatalf("planner prompt used global memory: %q", request.SystemPrompt)
+	}
+	if !hasRequestTool(request.Tools, organizeSubgraphToolName) {
+		t.Fatal("yaml organize_subgraph missing")
+	}
+	if nodes := ctxgraph.Clone("check").Graph.NodesInSubgraphs([]string{"bound"}); len(nodes) != 0 {
+		t.Fatalf("write leaked to global graph: %#v", nodes)
+	}
+	if nodes := store.Load("env-1").NodesInSubgraphs([]string{"bound"}); len(nodes) != 1 || nodes[0].ID != "n1" {
+		t.Fatal("write did not stay in env-1")
+	}
+}
+
+func hasRequestTool(tools []agenttool.Definition, name string) bool {
+	for _, tool := range tools {
+		if tool.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func hasToolResultMessages(messages []Message) bool {
+	for _, message := range messages {
+		if message.Role == RoleTool {
+			return true
+		}
+	}
+	return false
 }

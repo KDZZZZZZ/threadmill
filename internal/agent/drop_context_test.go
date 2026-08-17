@@ -29,7 +29,7 @@ func TestDropFromContextToolRemovesNodesFromHistoryNotGraph(t *testing.T) {
 	})
 
 	payload := `{"before":[{"id":"n-drop","statement":"drop me"}],"after":[{"id":"n-keep","statement":"keep me"}]}`
-	loop.appendMessage(Message{
+	if err := loop.appendMessage(Message{
 		Role:    RoleTool,
 		Content: payload,
 		ToolResult: &agenttool.Result{
@@ -37,7 +37,9 @@ func TestDropFromContextToolRemovesNodesFromHistoryNotGraph(t *testing.T) {
 			Name:    "memory_neighbors",
 			Content: payload,
 		},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	output, err := DropFromContextTool(loop).Execute(context.Background(), agenttool.Call{
 		ID:        "call-drop",

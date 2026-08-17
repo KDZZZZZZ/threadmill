@@ -10,6 +10,9 @@ import (
 )
 
 const defaultKeepRecentTokens = 20000
+const maxOrganizeFormatAttempts = 3
+
+const organizeJSONReminder = `上次输出不是完整 JSON。只输出一个 JSON 对象，不要 markdown，不要其它文字。格式：{"nodes":[{"kind":"fact","statement":"...","status":"accepted","subgraph_ids":["sg-a"]}]}`
 
 // OrganizePrompt 是把对话整理成记忆节点的系统提示词（初稿）。
 const OrganizePrompt = `你是记忆整理器。把一段对话整理成记忆图节点。不要继续对话，不要回答用户。
@@ -20,25 +23,26 @@ const OrganizePrompt = `你是记忆整理器。把一段对话整理成记忆�
 - 一条陈述只写一件事，短句，保留确切路径、名称和错误原文。
 - kind 只能是 directive（约束/偏好）、fact（已成立）、hypothesis（待验证）。
 - status 只能是 accepted、disputed、superseded、outdated。
-- source_subgraph_ids 只能从用户消息里给出的子图 ID 中选：这条知识是在哪些子图的上下文里产生的。不知道就用归属子图。
+- subgraph_ids 只能从用户消息里给出的子图 ID 中选：按内容判断这条知识正式属于哪些子图。不知道就用当前订阅。
+- 不要填写来源子图；来源由当前订阅列表决定。
 - 不要重复「已有记忆」里已经有的陈述。
 - 只输出 JSON，不要 markdown，不要其它文字。
 
 格式：
-{"nodes":[{"kind":"fact","statement":"...","status":"accepted","source_subgraph_ids":["sg-a"]}]}`
+{"nodes":[{"kind":"fact","statement":"...","status":"accepted","subgraph_ids":["sg-a"]}]}`
 
 type organizeOutput struct {
 	Nodes []organizeNode `json:"nodes"`
 }
 
 type organizeNode struct {
-	Kind              string   `json:"kind"`
-	Statement         string   `json:"statement"`
-	Status            string   `json:"status"`
-	SourceSubgraphIDs []string `json:"source_subgraph_ids"`
+	Kind        string   `json:"kind"`
+	Statement   string   `json:"statement"`
+	Status      string   `json:"status"`
+	SubgraphIDs []string `json:"subgraph_ids"`
 }
 
-// CompactHistory 将切点之前的消息用一次模型请求整理进记忆图，并返回保留的尾部消息。
+// CompactHistory 将切点之前的消息整理进记忆图，并返回保留的尾部消息。
 func CompactHistory(
 	ctx context.Context,
 	provider Provider,
@@ -91,36 +95,49 @@ func organizeWithModel(
 	provider Provider,
 	graph ctxgraph.Graph,
 	subgraphIDs []string,
-	messages []Message,
+	history []Message,
 ) ([]organizeNode, error) {
 	if provider == nil {
 		return nil, fmt.Errorf("organizing memory: %w", ErrNilProvider)
 	}
-	response, err := provider.Generate(ctx, Request{
-		SystemPrompt: OrganizePrompt,
-		Messages: []Message{{
-			Role:    RoleUser,
-			Content: buildOrganizeUserPrompt(graph, subgraphIDs, messages),
-		}},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("organizing memory: %w", err)
+	requestMessages := []Message{{
+		Role:    RoleUser,
+		Content: buildOrganizeUserPrompt(graph, subgraphIDs, history),
+	}}
+	var lastParse error
+	for range maxOrganizeFormatAttempts {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("organizing memory: %w", err)
+		}
+		response, err := provider.Generate(ctx, Request{
+			SystemPrompt: OrganizePrompt,
+			Messages:     requestMessages,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("organizing memory: %w", err)
+		}
+		drafts, err := parseOrganizeOutput(response.Content)
+		if err == nil {
+			return drafts, nil
+		}
+		lastParse = err
+		requestMessages = append(requestMessages,
+			Message{Role: RoleAssistant, Content: response.Content},
+			Message{Role: RoleUser, Content: organizeJSONReminder + "\n解析错误：" + err.Error()},
+		)
 	}
-	drafts, err := parseOrganizeOutput(response.Content)
-	if err != nil {
-		return nil, fmt.Errorf("organizing memory: %w", err)
-	}
-	return drafts, nil
+	return nil, fmt.Errorf("organizing memory: %w", lastParse)
 }
 
 func buildOrganizeUserPrompt(graph ctxgraph.Graph, subgraphIDs []string, messages []Message) string {
+	catalog := catalogIDs(graph, subgraphIDs)
 	var b strings.Builder
-	b.WriteString("归属子图：\n")
+	b.WriteString("当前订阅：\n")
 	writeSubgraphCatalog(&b, graph, subgraphIDs)
-	b.WriteString("\n可选来源子图：\n")
-	writeSubgraphCatalog(&b, graph, catalogIDs(graph, subgraphIDs))
+	b.WriteString("\n可选归属子图：\n")
+	writeSubgraphCatalog(&b, graph, catalog)
 	b.WriteString("\n已有记忆：\n")
-	existing := graph.NodesInSubgraphs(subgraphIDs)
+	existing := graph.NodesInSubgraphs(catalog)
 	if len(existing) == 0 {
 		b.WriteString("（无）\n")
 	}
@@ -186,14 +203,14 @@ func extractJSONObject(content string) []byte {
 
 func nodesFromDrafts(
 	drafts []organizeNode,
-	subgraphIDs []string,
-	allowedSourceIDs []string,
+	subscribed []string,
+	allowedMemberIDs []string,
 	previousNodeID string,
 	existing []ctxgraph.Node,
 ) ([]ctxgraph.Node, []ctxgraph.Edge) {
-	allowedSources := make(map[string]struct{}, len(allowedSourceIDs))
-	for _, id := range allowedSourceIDs {
-		allowedSources[id] = struct{}{}
+	allowedMembers := make(map[string]struct{}, len(allowedMemberIDs))
+	for _, id := range allowedMemberIDs {
+		allowedMembers[id] = struct{}{}
 	}
 
 	used := make(map[string]struct{}, len(existing)+len(drafts))
@@ -213,12 +230,22 @@ func nodesFromDrafts(
 			continue
 		}
 		id := nextMemoryNodeID(used, &next)
+		members := make([]string, 0, len(draft.SubgraphIDs))
+		for _, memberID := range uniqueIDs(draft.SubgraphIDs) {
+			if _, ok := allowedMembers[memberID]; !ok {
+				continue
+			}
+			members = append(members, memberID)
+		}
+		if len(members) == 0 {
+			members = append([]string(nil), subscribed...)
+		}
 		node := ctxgraph.Node{
 			ID:          id,
 			Kind:        normalizeKind(draft.Kind),
 			Statement:   statement,
 			Status:      normalizeStatus(draft.Status),
-			SubgraphIDs: append([]string(nil), subgraphIDs...),
+			SubgraphIDs: members,
 		}
 		nodes = append(nodes, node)
 		if prev != "" {
@@ -228,13 +255,8 @@ func nodesFromDrafts(
 				Kind:     ctxgraph.EdgeKindLogicalAdjacent,
 			})
 		}
-		sources := uniqueIDs(draft.SourceSubgraphIDs)
-		if len(sources) == 0 {
-			sources = subgraphIDs
-		}
-		addedSource := false
-		for _, sourceID := range sources {
-			if _, ok := allowedSources[sourceID]; !ok {
+		for _, sourceID := range subscribed {
+			if sourceID == "" {
 				continue
 			}
 			edges = append(edges, ctxgraph.Edge{
@@ -242,16 +264,6 @@ func nodesFromDrafts(
 				ToNodeID: id,
 				Kind:     ctxgraph.EdgeKindDerivesFromSubgraph,
 			})
-			addedSource = true
-		}
-		if !addedSource {
-			for _, sourceID := range subgraphIDs {
-				edges = append(edges, ctxgraph.Edge{
-					FromRef:  ctxgraph.SubgraphRef(sourceID),
-					ToNodeID: id,
-					Kind:     ctxgraph.EdgeKindDerivesFromSubgraph,
-				})
-			}
 		}
 		prev = id
 	}

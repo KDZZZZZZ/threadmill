@@ -32,15 +32,16 @@ type Provider interface {
 	Generate(ctx context.Context, request Request) (AssistantMessage, error)
 }
 
-// Config 配置 LLM Provider、工具、生命周期钩子、单次迭代上限和上下文窗口。
+// Config 配置 LLM Provider、工具、生命周期钩子、单次迭代上限、上下文窗口，以及可选的进行中 ReAct 快照。
 type Config struct {
-	AgentID       string
-	Provider      Provider
-	Tools         []agenttool.Tool
-	Hooks         Hooks
-	MaxSteps      int
-	ContextWindow int
-	SystemPrompt  string
+	AgentID         string
+	Provider        Provider
+	Tools           []agenttool.Tool
+	Hooks           Hooks
+	MaxSteps        int
+	ContextWindow   int
+	SystemPrompt    string
+	CheckpointStore CheckpointStore
 }
 
 // Loop 串行执行 ReAct 迭代，其公开方法可安全地并发调用。
@@ -53,6 +54,7 @@ type Loop struct {
 	maxSteps      int
 	contextWindow int
 	wake          chan struct{}
+	checkpoints   CheckpointStore
 
 	mu                  sync.Mutex
 	queue               []UserMessage
@@ -61,6 +63,8 @@ type Loop struct {
 	subscribedSubgraphs []string
 	agentID             string
 	graphCopy           ctxgraph.Copy
+	store               *ctxgraph.Store
+	envID               string
 	running             bool
 	turnCancel          context.CancelFunc
 	turnPreempted       bool
@@ -103,6 +107,7 @@ func NewLoop(config Config) (*Loop, error) {
 		maxSteps:            maxSteps,
 		contextWindow:       config.ContextWindow,
 		wake:                make(chan struct{}, 1),
+		checkpoints:         config.CheckpointStore,
 		queue:               []UserMessage{},
 		messages:            []Message{},
 		usedToolCallIDs:     make(map[string]struct{}),
@@ -132,6 +137,7 @@ func (l *Loop) AddHooks(extra Hooks) error {
 }
 
 // Ask 处理一条查询并返回最后一条助手回复；与 Run 互斥。
+// 若存在未完成的 ReAct 快照，则忽略 query，从快照继续，直到该回合正常结束再扔掉快照。
 func (l *Loop) Ask(ctx context.Context, query string) (string, error) {
 	if ctx == nil {
 		panic("nil context")
@@ -141,8 +147,14 @@ func (l *Loop) Ask(ctx context.Context, query string) (string, error) {
 	}
 	defer l.finishRun()
 
-	answer, err := l.runTurn(ctx, UserMessage{Content: query})
-	return answer, err
+	restored, err := l.restoreCheckpoint()
+	if err != nil {
+		return "", err
+	}
+	if restored {
+		return l.continueTurn(ctx)
+	}
+	return l.runTurn(ctx, UserMessage{Content: query})
 }
 
 // Enqueue 将用户消息追加到先进先出队列，并唤醒正在等待的 Run。
@@ -204,18 +216,35 @@ func (l *Loop) Run(ctx context.Context) (runErr error) {
 
 // runTurn 对一条用户消息执行“模型生成—工具执行—结果回填”的 ReAct 循环。
 func (l *Loop) runTurn(ctx context.Context, input UserMessage) (string, error) {
+	return l.runReact(ctx, input, false)
+}
+
+func (l *Loop) continueTurn(ctx context.Context) (string, error) {
+	return l.runReact(ctx, checkpointUser(l.Messages()), true)
+}
+
+func (l *Loop) runReact(ctx context.Context, input UserMessage, resume bool) (string, error) {
 	turnCtx, cancel := context.WithCancel(ctx)
 	l.startTurn(cancel)
 
 	turnErr := l.hooks.beforeTurn(turnCtx, input)
 	steps := 0
 	completed := false
-	if turnErr == nil {
-		l.appendMessage(Message{
+	if turnErr == nil && !resume {
+		turnErr = l.appendMessage(Message{
 			Role:      RoleUser,
 			Content:   input.Content,
 			Timestamp: input.Timestamp,
 		})
+	}
+	if turnErr == nil && resume {
+		if pending := unpairedToolCalls(l.Messages()); len(pending) > 0 {
+			turnErr = l.executeToolCalls(turnCtx, pending)
+		} else if reactComplete(l.Messages()) {
+			completed = true
+		}
+	}
+	if turnErr == nil && !completed {
 		for steps < l.maxSteps {
 			if err := turnCtx.Err(); err != nil {
 				turnErr = err
@@ -234,7 +263,10 @@ func (l *Loop) runTurn(ctx context.Context, input UserMessage) (string, error) {
 				turnErr = err
 				break
 			}
-			l.appendMessage(messageFromAssistant(response))
+			if err := l.appendMessage(messageFromAssistant(response)); err != nil {
+				turnErr = err
+				break
+			}
 			if err := l.hooks.afterAssistant(turnCtx, response); err != nil {
 				turnErr = err
 				break
@@ -257,8 +289,12 @@ func (l *Loop) runTurn(ctx context.Context, input UserMessage) (string, error) {
 	answer := lastAssistantText(l.messages)
 	l.mu.Unlock()
 
-	if err := l.hooks.commitTurn(ctx); err != nil {
-		turnErr = errors.Join(turnErr, err)
+	if completed {
+		if err := l.hooks.commitTurn(ctx); err != nil {
+			turnErr = errors.Join(turnErr, err)
+		} else if err := l.discardReact(); err != nil {
+			turnErr = errors.Join(turnErr, err)
+		}
 	}
 	preempted := l.finishTurn()
 	if !preempted && ctx.Err() != nil && turnErr == nil {
@@ -400,8 +436,12 @@ func (l *Loop) compact(ctx context.Context, keepRecentTokens int) error {
 	l.mu.Lock()
 	local.Graph = graph
 	l.graphCopy = local
-	ctxgraph.Update(local)
+	if l.store != nil {
+		l.store.Save(l.envID, local.Graph)
+	} else {
+		ctxgraph.Update(local)
+	}
 	l.messages = tail
 	l.mu.Unlock()
-	return nil
+	return l.persistReact()
 }

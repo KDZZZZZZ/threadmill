@@ -27,13 +27,14 @@ func cloneRequest(request Request) Request {
 	}
 }
 
-// SetContextGraph 写入本 Agent 的唯一图副本，并提交到全局记忆图。
+// SetContextGraph 写入本 Agent 的图副本，并提交到已绑定的 env 或全局记忆图。
 func (l *Loop) SetContextGraph(graph ctxgraph.Graph) {
 	l.mu.Lock()
 	l.graphCopy.Graph = graph.Clone()
 	owned := l.graphCopy
+	store, envID := l.store, l.envID
 	l.mu.Unlock()
-	ctxgraph.Update(owned)
+	commitGraph(store, envID, owned)
 }
 
 // SetSubscribedSubgraphs 替换当前生效的子图订阅列表。
@@ -67,6 +68,9 @@ func (l *Loop) ContextGraph() ctxgraph.Graph {
 func (l *Loop) ownedCopy() ctxgraph.Copy {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.store != nil {
+		return ctxgraph.Copy{AgentID: l.agentID, Graph: l.store.Load(l.envID)}
+	}
 	return ctxgraph.Copy{
 		AgentID: l.graphCopy.AgentID,
 		Graph:   l.graphCopy.Graph.Clone(),
@@ -77,7 +81,39 @@ func (l *Loop) commitCopy(copy ctxgraph.Copy) {
 	l.mu.Lock()
 	l.graphCopy.Graph = copy.Graph.Clone()
 	owned := l.graphCopy
+	store, envID := l.store, l.envID
 	l.mu.Unlock()
+	commitGraph(store, envID, owned)
+}
+
+func (l *Loop) bindEnv(store *ctxgraph.Store, envID string) error {
+	l.mu.Lock()
+	listed := make([]agenttool.Tool, 0, len(l.definitions))
+	for _, def := range l.definitions {
+		listed = append(listed, l.tools[def.Name])
+	}
+	l.mu.Unlock()
+
+	tools, definitions, err := prepareTools(agenttool.Bind(store, envID, listed))
+	if err != nil {
+		return err
+	}
+
+	l.mu.Lock()
+	l.tools = tools
+	l.definitions = definitions
+	l.store = store
+	l.envID = envID
+	l.graphCopy = ctxgraph.Copy{AgentID: l.agentID, Graph: store.Load(envID)}
+	l.mu.Unlock()
+	return nil
+}
+
+func commitGraph(store *ctxgraph.Store, envID string, owned ctxgraph.Copy) {
+	if store != nil {
+		store.Save(envID, owned.Graph)
+		return
+	}
 	ctxgraph.Update(owned)
 }
 
@@ -124,6 +160,10 @@ func formatMemory(nodes []ctxgraph.Node) string {
 }
 
 func (l *Loop) refreshGraphCopyLocked() ctxgraph.Copy {
+	if l.store != nil {
+		l.graphCopy = ctxgraph.Copy{AgentID: l.agentID, Graph: l.store.Load(l.envID)}
+		return l.graphCopy
+	}
 	l.graphCopy = ctxgraph.Clone(l.agentID)
 	return l.graphCopy
 }

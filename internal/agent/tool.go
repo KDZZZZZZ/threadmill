@@ -86,7 +86,9 @@ func (l *Loop) executeToolCalls(ctx context.Context, calls []agenttool.Call) err
 		}
 
 		result, hookErr := l.executeToolCall(ctx, call)
-		l.appendToolResult(result)
+		if err := l.appendToolResult(result); err != nil {
+			return err
+		}
 		if hookErr != nil {
 			return hookErr
 		}
@@ -153,7 +155,9 @@ func (l *Loop) appendCanceledResults(ctx context.Context, calls []agenttool.Call
 			Content: "tool call canceled before execution",
 			IsError: true,
 		}
-		l.appendToolResult(result)
+		if err := l.appendToolResult(result); err != nil {
+			return err
+		}
 		hookErr = errors.Join(hookErr, l.hooks.afterTool(ctx, call, result))
 	}
 	return hookErr

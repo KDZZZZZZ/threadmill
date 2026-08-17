@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -37,7 +38,7 @@ func TestCompactHistoryUsesOneModelRequestAndKeepsTail(t *testing.T) {
       "kind": "fact",
       "statement": "user prefers blue",
       "status": "accepted",
-      "source_subgraph_ids": ["sg-a"]
+      "subgraph_ids": ["sg-a"]
     }
   ]
 }`}
@@ -103,6 +104,84 @@ func TestCompactHistoryUsesOneModelRequestAndKeepsTail(t *testing.T) {
 	upstream := gotGraph.UpstreamNodes(nodes[1].ID)
 	if len(upstream) != 1 || upstream[0].ID != "old" {
 		t.Fatalf("previous node = %#v, want old", upstream)
+	}
+}
+
+func TestCompactHistoryAssignsMembershipFromModelAndSourcesFromSubscriptions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		modelIDs   []string
+		wantMember []string
+	}{
+		{
+			name:       "model chooses membership",
+			modelIDs:   []string{"sg-b"},
+			wantMember: []string{"sg-b"},
+		},
+		{
+			name:       "unknown membership falls back to subscriptions",
+			modelIDs:   []string{"sg-missing"},
+			wantMember: []string{"sg-a", "sg-q"},
+		},
+	}
+
+	subscribed := []string{"sg-a", "sg-q"}
+	graph := ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{
+			{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask},
+			{ID: "sg-b", Kind: ctxgraph.SubgraphKindGeneral},
+			{ID: "sg-q", Kind: ctxgraph.SubgraphKindTask},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ids, err := json.Marshal(tt.modelIDs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			provider := &stubProvider{response: `{"nodes":[{"kind":"fact","statement":"user prefers blue","status":"accepted","subgraph_ids":` + string(ids) + `}]}`}
+			gotGraph, _, err := CompactHistory(
+				context.Background(),
+				provider,
+				graph,
+				[]Message{
+					{Role: RoleUser, Content: "old work, I like blue"},
+					{Role: RoleAssistant, Content: "noted"},
+				},
+				subscribed,
+				0,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var created ctxgraph.Node
+			for _, node := range gotGraph.Nodes {
+				if node.Statement == "user prefers blue" {
+					created = node
+					break
+				}
+			}
+			if created.ID == "" {
+				t.Fatal("missing compacted node")
+			}
+			if !reflect.DeepEqual(created.SubgraphIDs, tt.wantMember) {
+				t.Fatalf("membership = %v, want %v", created.SubgraphIDs, tt.wantMember)
+			}
+			if got := gotGraph.SourceSubgraphsOf(created.ID); !reflect.DeepEqual(got, subscribed) {
+				t.Fatalf("source subgraphs = %v, want subscriptions %v", got, subscribed)
+			}
+			if !slices.Contains(tt.wantMember, "sg-a") {
+				if nodes := gotGraph.NodesInSubgraphs([]string{"sg-a"}); len(nodes) != 0 {
+					t.Fatalf("subscribed subgraph gained membership %#v", nodes)
+				}
+			}
+		})
 	}
 }
 
@@ -216,6 +295,71 @@ func TestCompactHistoryReturnsProviderError(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("error = %v, want organizing memory wrapping boom", err)
+	}
+	if provider.calls != 1 {
+		t.Fatalf("model calls = %d, want 1 for provider errors", provider.calls)
+	}
+}
+
+func TestCompactHistoryRetriesInvalidJSONWithReminder(t *testing.T) {
+	t.Parallel()
+
+	var second Request
+	calls := 0
+	provider := modelFunc(func(_ context.Context, request Request) (AssistantMessage, error) {
+		calls++
+		if calls == 1 {
+			return AssistantMessage{Content: `{"nodes":[{"kind":"fact"}`}, nil
+		}
+		second = cloneRequest(request)
+		return AssistantMessage{Content: `{
+  "nodes": [
+    {
+      "kind": "fact",
+      "statement": "user prefers blue",
+      "status": "accepted",
+      "subgraph_ids": ["sg-a"]
+    }
+  ]
+}`}, nil
+	})
+
+	gotGraph, _, err := CompactHistory(
+		context.Background(),
+		provider,
+		ctxgraph.Graph{
+			Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask}},
+		},
+		[]Message{
+			{Role: RoleUser, Content: "old work, I like blue"},
+			{Role: RoleAssistant, Content: "noted, using blue"},
+			{Role: RoleAssistant, Content: "hello"},
+		},
+		[]string{"sg-a"},
+		1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("model calls = %d, want 2", calls)
+	}
+	if second.SystemPrompt != OrganizePrompt {
+		t.Fatalf("retry system prompt = %q, want OrganizePrompt", second.SystemPrompt)
+	}
+	if len(second.Messages) != 3 {
+		t.Fatalf("retry messages = %#v, want original user, bad assistant, reminder", second.Messages)
+	}
+	if second.Messages[1].Role != RoleAssistant || second.Messages[1].Content != `{"nodes":[{"kind":"fact"}` {
+		t.Fatalf("retry assistant = %#v, want the invalid json", second.Messages[1])
+	}
+	if second.Messages[2].Role != RoleUser || !strings.Contains(second.Messages[2].Content, "完整 JSON") {
+		t.Fatalf("retry reminder = %q, want a json format reminder", second.Messages[2].Content)
+	}
+
+	nodes := gotGraph.NodesInSubgraphs([]string{"sg-a"})
+	if len(nodes) != 1 || nodes[0].Statement != "user prefers blue" {
+		t.Fatalf("subgraph nodes = %#v, want recovered fact", nodes)
 	}
 }
 

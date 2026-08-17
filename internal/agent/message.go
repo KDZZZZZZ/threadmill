@@ -152,10 +152,10 @@ func (l *Loop) Messages() []Message {
 }
 
 // appendToolResult 将工具结果转换成模型可见的工具消息。
-func (l *Loop) appendToolResult(result agenttool.Result) {
+func (l *Loop) appendToolResult(result agenttool.Result) error {
 	copyOfResult := result
 	copyOfResult.Details = bytes.Clone(result.Details)
-	l.appendMessage(Message{
+	return l.appendMessage(Message{
 		Role:       RoleTool,
 		Content:    result.Content,
 		ToolResult: &copyOfResult,
@@ -163,12 +163,13 @@ func (l *Loop) appendToolResult(result agenttool.Result) {
 	})
 }
 
-// appendMessage 将一条消息的深拷贝追加到对话记录。
-func (l *Loop) appendMessage(message Message) {
+// appendMessage 将一条消息的深拷贝追加到对话记录，并刷新进行中的 ReAct 快照。
+func (l *Loop) appendMessage(message Message) error {
 	l.mu.Lock()
 	if message.Timestamp == 0 {
 		message.Timestamp = timestampMillis()
 	}
 	l.messages = append(l.messages, cloneMessage(message))
 	l.mu.Unlock()
+	return l.persistReact()
 }
