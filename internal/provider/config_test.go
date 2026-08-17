@@ -187,6 +187,51 @@ agents:
 	}
 }
 
+func TestLoadConfigAcceptsFileTools(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  api_key_env: TEST_OPENAI_API_KEY
+  model: gpt-5
+agents:
+  planner:
+    tools:
+      - read
+      - ls
+      - grep
+      - find
+  executor:
+    tools:
+      - read
+      - write
+      - edit
+  verifier:
+    tools:
+      - read
+      - ls
+      - grep
+      - find
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Agents.Planner.Tools, []string{"read", "ls", "grep", "find"}) {
+		t.Fatalf("planner tools = %v", got.Agents.Planner.Tools)
+	}
+	if !reflect.DeepEqual(got.Agents.Executor.Tools, []string{"read", "write", "edit"}) {
+		t.Fatalf("executor tools = %v", got.Agents.Executor.Tools)
+	}
+	if !reflect.DeepEqual(got.Agents.Verifier.Tools, []string{"read", "ls", "grep", "find"}) {
+		t.Fatalf("verifier tools = %v", got.Agents.Verifier.Tools)
+	}
+}
+
 func TestLoadConfigRejectsUnknownAgentTool(t *testing.T) {
 	root := t.TempDir()
 	content := []byte(`llm:

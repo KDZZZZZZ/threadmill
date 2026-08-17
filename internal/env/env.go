@@ -57,9 +57,16 @@ type ExecView interface {
 type Env struct {
 	ID     string
 	Memory MemoryView
+	Files  FileView
 }
 
-// Open 按环境 ID 装上记忆视图。
+// Open 按环境 ID 装上记忆视图。Files 为零值 nil。
 func Open(id string, memory MemoryView) Env {
 	return Env{ID: id, Memory: memory}
+}
+
+// WithFiles 挂上文件视图，不改 ID 和 Memory。
+func (e Env) WithFiles(files FileView) Env {
+	e.Files = files
+	return e
 }

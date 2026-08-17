@@ -367,6 +367,45 @@ func TestNewPlannerKeepsConfiguredAgentID(t *testing.T) {
 	}
 }
 
+func TestNewTeamRegistersFileTools(t *testing.T) {
+	resetDefaultStore(t)
+
+	team, err := NewTeam(
+		modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+			return AssistantMessage{Content: "done"}, nil
+		}),
+		0,
+		FileAgents{
+			Planner: FileAgent{
+				Tools: []string{fileReadToolName, fileLsToolName, fileGrepToolName, fileFindToolName},
+			},
+			Executor: FileAgent{
+				Tools: []string{fileReadToolName, fileWriteToolName, fileEditToolName},
+			},
+			Verifier: FileAgent{
+				Tools: []string{fileReadToolName, fileLsToolName, fileGrepToolName, fileFindToolName},
+			},
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{fileReadToolName, fileLsToolName, fileGrepToolName, fileFindToolName} {
+		if _, ok := team.Planner.tools[name]; !ok {
+			t.Fatalf("planner missing %s", name)
+		}
+		if _, ok := team.Verifier.tools[name]; !ok {
+			t.Fatalf("verifier missing %s", name)
+		}
+	}
+	for _, name := range []string{fileReadToolName, fileWriteToolName, fileEditToolName} {
+		if _, ok := team.Executor.tools[name]; !ok {
+			t.Fatalf("executor missing %s", name)
+		}
+	}
+}
+
 func TestNewTeamUsesFileAgentsAndSharesOrganizer(t *testing.T) {
 	resetDefaultStore(t)
 
