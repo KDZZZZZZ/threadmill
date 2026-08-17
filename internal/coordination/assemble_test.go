@@ -8,6 +8,7 @@ import (
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	tmexec "github.com/KDZZZZZZ/threadmill/internal/exec"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
@@ -103,6 +104,55 @@ func TestAssembleBindsVFSFiles(t *testing.T) {
 	}
 	if string(got) != "from-assemble" {
 		t.Fatalf("a.txt = %q, want from-assemble", got)
+	}
+}
+
+func TestAssembleBindsExec(t *testing.T) {
+	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
+	ctxgraph.Update(ctxgraph.Copy{})
+
+	files := vfs.NewStore(t.TempDir())
+	sched := tmexec.New(tmexec.Config{Slots: 1})
+	calls := 0
+	provider := stubProvider(func(_ context.Context, _ agent.Request) (agent.AssistantMessage, error) {
+		calls++
+		if calls == 1 {
+			return agent.AssistantMessage{
+				ToolCalls: []agenttool.Call{{
+					ID:        "b1",
+					Name:      "bash",
+					Arguments: json.RawMessage(`{"command":"true"}`),
+				}},
+			}, nil
+		}
+		return agent.AssistantMessage{Content: "done"}, nil
+	})
+
+	roles, err := Assemble(
+		Stores{Memory: ctxgraph.NewStore(), Files: files, Exec: sched},
+		provider,
+		agent.FileAgents{
+			Executor: agent.FileAgent{Tools: []string{"bash"}},
+		},
+		nil,
+		0,
+		nil,
+	)(Task{ID: "task-1", Env: Env{ID: "env-1"}})
+	if err != nil {
+		t.Fatalf("Assemble() error = %v", err)
+	}
+	got, err := roles.Executor.Ask(context.Background(), "start")
+	if err != nil {
+		if strings.Contains(err.Error(), "not bound to env") {
+			t.Fatalf("bash stayed unbound: %v", err)
+		}
+		if !strings.Contains(err.Error(), "SANDBOX_UNAVAILABLE") {
+			t.Fatalf("Ask() error = %v", err)
+		}
+		return
+	}
+	if got != "done" {
+		t.Fatalf("Ask() = %q, want done", got)
 	}
 }
 

@@ -380,7 +380,7 @@ func TestNewTeamRegistersFileTools(t *testing.T) {
 				Tools: []string{fileReadToolName, fileLsToolName, fileGrepToolName, fileFindToolName},
 			},
 			Executor: FileAgent{
-				Tools: []string{fileReadToolName, fileWriteToolName, fileEditToolName},
+				Tools: []string{fileReadToolName, fileWriteToolName, fileEditToolName, bashToolName},
 			},
 			Verifier: FileAgent{
 				Tools: []string{fileReadToolName, fileLsToolName, fileGrepToolName, fileFindToolName},
@@ -399,10 +399,16 @@ func TestNewTeamRegistersFileTools(t *testing.T) {
 			t.Fatalf("verifier missing %s", name)
 		}
 	}
-	for _, name := range []string{fileReadToolName, fileWriteToolName, fileEditToolName} {
+	for _, name := range []string{fileReadToolName, fileWriteToolName, fileEditToolName, bashToolName} {
 		if _, ok := team.Executor.tools[name]; !ok {
 			t.Fatalf("executor missing %s", name)
 		}
+	}
+	if _, ok := team.Planner.tools[bashToolName]; ok {
+		t.Fatal("planner gained bash")
+	}
+	if _, ok := team.Verifier.tools[bashToolName]; ok {
+		t.Fatal("verifier gained bash")
 	}
 }
 

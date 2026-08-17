@@ -100,7 +100,7 @@ type runner struct {
 
 // runTask 调度一个 task：先 fork 环境、再组装三个 agent，然后按 sequence 逐个 runRole。
 // runRole 返回前该节点已声明完成，因此下一阶段开始时前置阶段一定已完成。
-func (r *runner) runTask(ctx context.Context, taskID, input string) (string, error) {
+func (r *runner) runTask(ctx context.Context, taskID, input string) (output string, err error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -108,6 +108,21 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (string, err
 	if !ok {
 		return "", fmt.Errorf("%w: %q", ErrUnknownTask, taskID)
 	}
+	defer func() {
+		if r.stores.Files == nil {
+			return
+		}
+		aerr := r.stores.Files.Absorb(task.Env.ID)
+		rerr := r.stores.Files.Release(task.Env.ID)
+		if err != nil {
+			return
+		}
+		if aerr != nil {
+			err = aerr
+			return
+		}
+		err = rerr
+	}()
 
 	r.stores.Fork(task.Env.ParentID, task.Env.ID)
 	roles, err := r.assemble(task)
@@ -120,7 +135,7 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (string, err
 		return "", err
 	}
 
-	output := input
+	output = input
 	for _, node := range task.Sequence() {
 		if err := ctx.Err(); err != nil {
 			return "", err

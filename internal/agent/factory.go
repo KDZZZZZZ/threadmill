@@ -43,6 +43,7 @@ const (
 	fileLsToolName    = "ls"
 	fileGrepToolName  = "grep"
 	fileFindToolName  = "find"
+	bashToolName      = "bash"
 
 	hookInjectSubscribedMemory      = "inject_subscribed_memory"
 	hookCompactOnOverflow           = "compact_on_overflow"
@@ -96,6 +97,7 @@ var knownFileTools = map[string]struct{}{
 	fileLsToolName:                {},
 	fileGrepToolName:              {},
 	fileFindToolName:              {},
+	bashToolName:                  {},
 }
 
 var knownFileHooks = map[string]struct{}{
@@ -542,11 +544,15 @@ func toolsFromNames(
 			if files == nil {
 				files = fileToolsByName()
 			}
-			tool, ok := files[name]
-			if !ok {
-				return nil, fmt.Errorf("unknown tool %q", name)
+			if tool, ok := files[name]; ok {
+				out = append(out, tool)
+				continue
 			}
-			out = append(out, tool)
+			if name == bashToolName {
+				out = append(out, agenttool.Bash())
+				continue
+			}
+			return nil, fmt.Errorf("unknown tool %q", name)
 		}
 	}
 	return out, nil

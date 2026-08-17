@@ -47,6 +47,7 @@ type Store struct {
 	mu      sync.Mutex // ponytail: one store mutex, per-env locks if throughput matters
 	baseDir string
 	envs    map[string]*layer
+	lives   map[string]string
 }
 
 // NewStore 以只读 host 树为 base。写入不会改 baseDir。
@@ -54,6 +55,7 @@ func NewStore(baseDir string) *Store {
 	return &Store{
 		baseDir: baseDir,
 		envs:    make(map[string]*layer),
+		lives:   make(map[string]string),
 	}
 }
 
@@ -154,6 +156,13 @@ func (s *Store) Merge(from, into string) error {
 	for _, e := range apply {
 		if !e.b.tombstone {
 			applyBlob(dst, e.path, e.b)
+		}
+	}
+	if live, ok := s.lives[into]; ok {
+		for _, e := range apply {
+			if err := applyLive(live, e.path, e.b); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

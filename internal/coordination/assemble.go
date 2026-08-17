@@ -52,6 +52,9 @@ func Assemble(
 		if stores.Files != nil {
 			e = e.WithFiles(filesView{view: stores.Files.View(task.Env.ID)})
 		}
+		if stores.Exec != nil && stores.Files != nil {
+			e = e.WithExec(stores.Exec.View(task.Env.ID, stores.Files))
+		}
 		if err := team.Bind(e); err != nil {
 			return Roles{}, err
 		}

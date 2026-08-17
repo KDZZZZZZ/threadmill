@@ -2,13 +2,15 @@ package coordination
 
 import (
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	tmexec "github.com/KDZZZZZZ/threadmill/internal/exec"
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
-// Stores 是一次 Run 共用的领域存储。Files 可以为空。
+// Stores 是一次 Run 共用的领域存储。Files / Exec 可以为空。
 type Stores struct {
 	Memory *ctxgraph.Store
-	Files  *vfs.Store // 可以为空
+	Files  *vfs.Store        // 可以为空
+	Exec   *tmexec.Scheduler // 可以为空
 }
 
 // Fork 把父环境复制到子环境；Files 为空时只 fork 记忆。

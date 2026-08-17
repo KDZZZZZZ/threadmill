@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +17,49 @@ import (
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
+
+func TestGraphRunAbsorbsAndReleasesLiveAfterRoles(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	task := graph.AddTask()
+	files := vfs.NewStore(t.TempDir())
+	var live string
+	assemble := func(task Task) (Roles, error) {
+		return Roles{
+			Planner: instantAsker(),
+			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
+				dir, err := files.Materialize(task.Env.ID)
+				if err != nil {
+					return "", err
+				}
+				live = dir
+				if err := os.WriteFile(filepath.Join(dir, "from-bash.txt"), []byte("from-live"), 0o640); err != nil {
+					return "", err
+				}
+				return query + "/executor", nil
+			}),
+			Verifier: instantAsker(),
+		}, nil
+	}
+
+	if _, err := graph.Run(context.Background(), task.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	got, err := files.View(task.Env.ID).Read("from-bash.txt")
+	if err != nil {
+		t.Fatalf("Absorb did not pick up live write: %v", err)
+	}
+	if string(got) != "from-live" {
+		t.Fatalf("from-bash.txt = %q, want from-live", got)
+	}
+	if live == "" {
+		t.Fatal("executor did not materialize")
+	}
+	if _, err := os.Stat(live); !os.IsNotExist(err) {
+		t.Fatalf("live dir still exists after Run: %v", err)
+	}
+}
 
 func TestGraphRunUnknownTask(t *testing.T) {
 	t.Parallel()

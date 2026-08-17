@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
@@ -27,13 +28,16 @@ func TestLoadConfigReadsRootYAML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := FileConfig{LLM: LLMConfig{
-		Provider:      "openai-responses",
-		BaseURL:       "https://api.openai.com/v1",
-		APIKeyEnv:     "TEST_OPENAI_API_KEY",
-		Model:         "gpt-5",
-		ContextWindow: 128000,
-	}}
+	want := FileConfig{
+		LLM: LLMConfig{
+			Provider:      "openai-responses",
+			BaseURL:       "https://api.openai.com/v1",
+			APIKeyEnv:     "TEST_OPENAI_API_KEY",
+			Model:         "gpt-5",
+			ContextWindow: 128000,
+		},
+		Exec: ExecConfig{Slots: runtime.NumCPU()},
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("LoadConfig() = %#v, want %#v", got, want)
 	}
@@ -161,6 +165,7 @@ agents:
 				Hooks: []string{"remind_drop_context_on_pressure"},
 			},
 		},
+		Exec: ExecConfig{Slots: runtime.NumCPU()},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("LoadConfig() = %#v, want %#v", got, want)
@@ -332,6 +337,71 @@ func TestLoadConfigRejectsRemoteHTTP(t *testing.T) {
 	_, err := LoadConfig(root)
 	if !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("LoadConfig() error = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestLoadConfigDefaultsExecSlotsToNumCPU(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY
+  model: gpt-5
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Exec.Slots != runtime.NumCPU() {
+		t.Fatalf("Exec.Slots = %d, want runtime.NumCPU()=%d", got.Exec.Slots, runtime.NumCPU())
+	}
+}
+
+func TestLoadConfigRejectsNegativeExecSlots(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY
+  model: gpt-5
+exec:
+  slots: -1
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadConfig(root); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig() error = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestLoadConfigAcceptsBashTool(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  api_key_env: TEST_OPENAI_API_KEY
+  model: gpt-5
+agents:
+  executor:
+    tools:
+      - bash
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Agents.Executor.Tools, []string{"bash"}) {
+		t.Fatalf("executor tools = %v, want [bash]", got.Agents.Executor.Tools)
 	}
 }
 
