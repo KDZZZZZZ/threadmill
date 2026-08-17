@@ -36,6 +36,16 @@ func (t boundTool) Execute(ctx context.Context, call Call) (Output, error) {
 	return t.inner.Execute(context.WithValue(ctx, envKey{}, t.envID), call)
 }
 
+func unwrapBound(tool Tool) Tool {
+	for {
+		bound, ok := tool.(boundTool)
+		if !ok {
+			return tool
+		}
+		tool = bound.inner
+	}
+}
+
 type storeView struct {
 	store *ctxgraph.Store
 	envID string
@@ -64,8 +74,8 @@ func BindEnv(e env.Env, tools []Tool) []Tool {
 			continue
 		}
 		name := tool.Definition().Name
-		inner := tool
-		if binder, ok := tool.(EnvBinder); ok {
+		inner := unwrapBound(tool)
+		if binder, ok := inner.(EnvBinder); ok {
 			inner = binder.BindEnv(e)
 		}
 		bound := Tool(boundTool{envID: e.ID, inner: inner})

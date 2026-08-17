@@ -148,6 +148,53 @@ func TestBindEnvIsolatesMemoryViews(t *testing.T) {
 	}
 }
 
+func TestBindEnvRebindsAlreadyBoundTools(t *testing.T) {
+	t.Parallel()
+
+	graph := ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{{
+			ID:          "n1",
+			Kind:        ctxgraph.NodeKindFact,
+			Statement:   "secret",
+			Status:      ctxgraph.NodeStatusAccepted,
+			SubgraphIDs: []string{"sg"},
+		}},
+	}
+	viewA := &memView{graph: graph.Clone()}
+	viewB := &memView{graph: graph.Clone()}
+
+	tools := BindEnv(env.Open("env-a", viewA), MemoryTools(nil, nil))
+	tools = BindEnv(env.Open("env-b", viewB), tools)
+
+	if _, err := executeNamed(t, tools, memoryAddToSubgraphName, `{"subgraph_id":"secret","node_ids":["n1"]}`); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	if nodes := viewA.Snapshot().NodesInSubgraphs([]string{"secret"}); len(nodes) != 0 {
+		t.Fatalf("second BindEnv still wrote env-a: %#v", nodes)
+	}
+	if nodes := viewB.Snapshot().NodesInSubgraphs([]string{"secret"}); len(nodes) != 1 || nodes[0].ID != "n1" {
+		t.Fatal("second BindEnv did not write env-b")
+	}
+
+	var seen string
+	echo := spyTool{
+		name: "echo",
+		execute: func(ctx context.Context, _ Call) (Output, error) {
+			seen = EnvFromContext(ctx)
+			return Output{Content: "ok"}, nil
+		},
+	}
+	wrapped := BindEnv(env.Open("env-a", nil), []Tool{echo})
+	wrapped = BindEnv(env.Open("env-b", nil), wrapped)
+	if _, err := executeNamed(t, wrapped, "echo", `{}`); err != nil {
+		t.Fatalf("echo: %v", err)
+	}
+	if seen != "env-b" {
+		t.Fatalf("EnvFromContext after rebind = %q, want env-b", seen)
+	}
+}
+
 func TestUnboundMemoryToolsExecuteError(t *testing.T) {
 	t.Parallel()
 
