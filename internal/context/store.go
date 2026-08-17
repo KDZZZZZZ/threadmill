@@ -34,6 +34,27 @@ func (s *Store) Save(envID string, graph Graph) {
 	s.graphs[envID] = graph.Clone()
 }
 
+// View 返回该环境的记忆图视图。Snapshot 读 Load，Commit 写 Save。
+func (s *Store) View(envID string) *EnvView {
+	return &EnvView{store: s, envID: envID}
+}
+
+// EnvView 是某个环境在 Store 上的记忆图视图。
+type EnvView struct {
+	store *Store
+	envID string
+}
+
+// Snapshot 返回该环境的图拷贝。
+func (v *EnvView) Snapshot() Graph {
+	return v.store.Load(v.envID)
+}
+
+// Commit 用拷贝替换该环境的图快照。
+func (v *EnvView) Commit(graph Graph) {
+	v.store.Save(v.envID, graph)
+}
+
 // Fork 把父环境快照复制到子环境。子环境已存在时不覆盖。
 func (s *Store) Fork(parentID, childID string) {
 	if childID == "" {

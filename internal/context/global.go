@@ -29,3 +29,23 @@ func Update(copy Copy) {
 	defer globalMu.Unlock()
 	globalGraph = copy.Graph.Clone()
 }
+
+// SharedView 是打上 agentID 的全局图视图。
+type SharedView struct {
+	agentID string
+}
+
+// GlobalView 返回读写全局记忆图的视图。只给不走按环境 Store 的路径使用。
+func GlobalView(agentID string) *SharedView {
+	return &SharedView{agentID: agentID}
+}
+
+// Snapshot 返回全局图拷贝。
+func (v *SharedView) Snapshot() Graph {
+	return Clone(v.agentID).Graph
+}
+
+// Commit 用传入的图替换全局记忆图。
+func (v *SharedView) Commit(graph Graph) {
+	Update(Copy{AgentID: v.agentID, Graph: graph})
+}
