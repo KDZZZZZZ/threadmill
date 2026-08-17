@@ -37,6 +37,13 @@ const (
 	memoryAddToSubgraphToolName   = "memory_add_to_subgraph"
 	memoryDropFromContextToolName = "memory_drop_from_context"
 
+	fileReadToolName  = "read"
+	fileWriteToolName = "write"
+	fileEditToolName  = "edit"
+	fileLsToolName    = "ls"
+	fileGrepToolName  = "grep"
+	fileFindToolName  = "find"
+
 	hookInjectSubscribedMemory      = "inject_subscribed_memory"
 	hookCompactOnOverflow           = "compact_on_overflow"
 	hookCommitTailOnTurnEnd         = "commit_tail_on_turn_end"
@@ -83,6 +90,12 @@ var knownFileTools = map[string]struct{}{
 	memoryNodesInToolName:         {},
 	memoryAddToSubgraphToolName:   {},
 	memoryDropFromContextToolName: {},
+	fileReadToolName:              {},
+	fileWriteToolName:             {},
+	fileEditToolName:              {},
+	fileLsToolName:                {},
+	fileGrepToolName:              {},
+	fileFindToolName:              {},
 }
 
 var knownFileHooks = map[string]struct{}{
@@ -507,6 +520,7 @@ func toolsFromNames(
 	organizer *Loop,
 ) ([]agenttool.Tool, error) {
 	var memory map[string]agenttool.Tool
+	var files map[string]agenttool.Tool
 	out := make([]agenttool.Tool, 0, len(names))
 	for _, name := range names {
 		switch name {
@@ -521,7 +535,14 @@ func toolsFromNames(
 			if memory == nil {
 				memory = memoryToolsByName()
 			}
-			tool, ok := memory[name]
+			if tool, ok := memory[name]; ok {
+				out = append(out, tool)
+				continue
+			}
+			if files == nil {
+				files = fileToolsByName()
+			}
+			tool, ok := files[name]
 			if !ok {
 				return nil, fmt.Errorf("unknown tool %q", name)
 			}
@@ -533,6 +554,15 @@ func toolsFromNames(
 
 func memoryToolsByName() map[string]agenttool.Tool {
 	listed := agenttool.MemoryTools(nil, nil)
+	out := make(map[string]agenttool.Tool, len(listed))
+	for _, tool := range listed {
+		out[tool.Definition().Name] = tool
+	}
+	return out
+}
+
+func fileToolsByName() map[string]agenttool.Tool {
+	listed := agenttool.FileTools()
 	out := make(map[string]agenttool.Tool, len(listed))
 	for _, tool := range listed {
 		out[tool.Definition().Name] = tool
