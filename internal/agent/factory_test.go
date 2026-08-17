@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	"github.com/KDZZZZZZ/threadmill/internal/env"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -66,7 +67,8 @@ func TestMemoryToolsUseAgentCopyNotGlobal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	loop.SetContextGraph(ctxgraph.Graph{
+	store := ctxgraph.NewStore()
+	bindEnvGraph(t, loop, store, "env-1", ctxgraph.Graph{
 		Nodes: []ctxgraph.Node{{
 			ID:          "n-copy",
 			Statement:   "from copy",
@@ -136,7 +138,8 @@ func TestOrganizeSubgraphToolAsksOrganizer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	organizer.SetContextGraph(ctxgraph.Graph{
+	store := ctxgraph.NewStore()
+	bindEnvGraph(t, requester, store, "env-1", ctxgraph.Graph{
 		Subgraphs: []ctxgraph.Subgraph{{
 			ID:   "sg-seed",
 			Name: "seed",
@@ -260,14 +263,16 @@ func TestRoleAgentsUseMemoryHooksAndRolePrompt(t *testing.T) {
 				t.Fatal("memory hooks not registered")
 			}
 
-			loop.SetContextGraph(ctxgraph.Graph{
+			loop.SetSubscribedSubgraphs([]string{"sg-a"})
+
+			store := ctxgraph.NewStore()
+			bindEnvGraph(t, loop, store, "env-1", ctxgraph.Graph{
 				Nodes: []ctxgraph.Node{{
 					ID:          "n1",
 					Statement:   "shared fact",
 					SubgraphIDs: []string{"sg-a"},
 				}},
 			})
-			loop.SetSubscribedSubgraphs([]string{"sg-a"})
 
 			answer, err := loop.Ask(context.Background(), "start")
 			if err != nil {
@@ -320,6 +325,29 @@ func TestRoleAgentsUseMemoryHooksAndRolePrompt(t *testing.T) {
 				t.Fatalf("subscriptions = %v, want %v", got, wantSubs)
 			}
 		})
+	}
+}
+
+func TestNewPlannerBindAllowsAsk(t *testing.T) {
+	resetDefaultStore(t)
+	loop, err := NewPlanner(Config{
+		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+			return AssistantMessage{Content: "done"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := ctxgraph.NewStore()
+	if err := loop.Bind(env.Open("env-1", store.View("env-1"))); err != nil {
+		t.Fatalf("Bind() error = %v", err)
+	}
+	answer, err := loop.Ask(context.Background(), "start")
+	if err != nil {
+		t.Fatalf("Ask() error = %v", err)
+	}
+	if answer != "done" {
+		t.Fatalf("Ask() = %q, want done", answer)
 	}
 }
 
@@ -399,18 +427,9 @@ func TestNewTeamUsesFileAgentsAndSharesOrganizer(t *testing.T) {
 		)
 	}
 
-	if _, err := team.Planner.Ask(context.Background(), "start"); err != nil {
-		t.Fatalf("Planner.Ask() error = %v", err)
-	}
-	if request.SystemPrompt != "yaml plan" {
-		t.Fatalf("planner prompt = %q, want yaml plan", request.SystemPrompt)
-	}
-
-	tool, ok := team.Planner.tools[organizeSubgraphToolName].(*organizeSubgraphTool)
-	if !ok {
+	if tool, ok := team.Planner.tools[organizeSubgraphToolName].(*organizeSubgraphTool); !ok {
 		t.Fatal("planner organize_subgraph is not the organizer tool")
-	}
-	if tool.organizer != team.Organizer {
+	} else if tool.organizer != team.Organizer {
 		t.Fatal("planner does not share the yaml subgraph organizer")
 	}
 	if team.Planner.contextWindow != 9000 ||
@@ -444,6 +463,17 @@ func TestNewTeamUsesFileAgentsAndSharesOrganizer(t *testing.T) {
 	}
 	if len(team.Organizer.hooks.AssembleRequest) == 0 {
 		t.Fatal("organizer yaml drop-context reminder not registered")
+	}
+
+	store := ctxgraph.NewStore()
+	if err := team.Bind(env.Open("env-1", store.View("env-1"))); err != nil {
+		t.Fatalf("Bind() error = %v", err)
+	}
+	if _, err := team.Planner.Ask(context.Background(), "start"); err != nil {
+		t.Fatalf("Planner.Ask() error = %v", err)
+	}
+	if request.SystemPrompt != "yaml plan" {
+		t.Fatalf("planner prompt = %q, want yaml plan", request.SystemPrompt)
 	}
 }
 
@@ -500,7 +530,7 @@ func TestTeamBindUsesYamlPluginsAgainstEnvStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := team.Bind(store, "env-1"); err != nil {
+	if err := team.Bind(env.Open("env-1", store.View("env-1"))); err != nil {
 		t.Fatalf("Bind() error = %v", err)
 	}
 	team.Planner.SetSubscribedSubgraphs([]string{"sg-a"})

@@ -36,6 +36,11 @@ func (t boundTool) Execute(ctx context.Context, call Call) (Output, error) {
 	return t.inner.Execute(context.WithValue(ctx, envKey{}, t.envID), call)
 }
 
+func (t boundTool) Hidden() bool {
+	h, ok := t.inner.(interface{ Hidden() bool })
+	return ok && h.Hidden()
+}
+
 func unwrapBound(tool Tool) Tool {
 	for {
 		bound, ok := tool.(boundTool)

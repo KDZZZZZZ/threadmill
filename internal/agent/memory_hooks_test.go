@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	"github.com/KDZZZZZZ/threadmill/internal/env"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -32,13 +33,6 @@ func TestAssembleRequestOmitsSubscribedMemoryWithoutHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loop.SetContextGraph(ctxgraph.Graph{
-		Nodes: []ctxgraph.Node{{
-			ID:          "n1",
-			Statement:   "hidden fact",
-			SubgraphIDs: []string{"sg-a"},
-		}},
-	})
 	loop.SetSubscribedSubgraphs([]string{"sg-a"})
 	loop.Enqueue(UserMessage{Content: "start"})
 
@@ -98,9 +92,6 @@ func TestLoopLeavesHistoryUncompactedWithoutOverflowHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loop.SetContextGraph(ctxgraph.Graph{
-		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask}},
-	})
 	loop.SetSubscribedSubgraphs([]string{"sg-a"})
 	loop.Enqueue(UserMessage{Content: "start"})
 
@@ -150,9 +141,6 @@ func TestLoopKeepsTailWithoutCommitHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loop.SetContextGraph(ctxgraph.Graph{
-		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask}},
-	})
 	loop.SetSubscribedSubgraphs([]string{"sg-a"})
 	loop.Enqueue(UserMessage{Content: "remember blue"})
 
@@ -165,8 +153,31 @@ func TestLoopKeepsTailWithoutCommitHook(t *testing.T) {
 	if strings.Contains(secondPrompt, "remember blue") {
 		t.Fatalf("second system prompt = %q, want no committed memory", secondPrompt)
 	}
-	if nodes := loop.ContextGraph().NodesInSubgraphs([]string{"sg-a"}); len(nodes) != 0 {
-		t.Fatalf("memory nodes = %#v, want none", nodes)
+}
+
+func TestMemoryHooksRegistersHiddenTools(t *testing.T) {
+	resetDefaultStore(t)
+	loop, err := NewLoop(Config{
+		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+			return AssistantMessage{Content: "done"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.AddHooks(MemoryHooks(loop)); err != nil {
+		t.Fatal(err)
+	}
+	store := ctxgraph.NewStore()
+	if err := loop.Bind(env.Open("env-1", store.View("env-1"))); err != nil {
+		t.Fatalf("Bind() error = %v", err)
+	}
+	answer, err := loop.Ask(context.Background(), "start")
+	if err != nil {
+		t.Fatalf("Ask() error = %v", err)
+	}
+	if answer != "done" {
+		t.Fatalf("Ask() = %q, want done", answer)
 	}
 }
 

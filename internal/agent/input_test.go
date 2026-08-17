@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	"github.com/KDZZZZZZ/threadmill/internal/env"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -38,7 +39,8 @@ func TestAssembleRequestInjectsUnionMemoryFromSubscribedSubgraphs(t *testing.T) 
 	}
 	mustAddMemoryHooks(t, loop)
 
-	loop.SetContextGraph(ctxgraph.Graph{
+	store := ctxgraph.NewStore()
+	bindEnvGraph(t, loop, store, "env-1", ctxgraph.Graph{
 		Nodes: []ctxgraph.Node{
 			{
 				ID:          "shared",
@@ -130,7 +132,8 @@ func TestAssembleRequestUsesCurrentSubgraphSubscriptions(t *testing.T) {
 	}
 	mustAddMemoryHooks(t, loop)
 
-	loop.SetContextGraph(ctxgraph.Graph{
+	store := ctxgraph.NewStore()
+	bindEnvGraph(t, loop, store, "env-1", ctxgraph.Graph{
 		Nodes: []ctxgraph.Node{
 			{ID: "a", Statement: "memory a", SubgraphIDs: []string{"sg-a"}},
 			{ID: "b", Statement: "memory b", SubgraphIDs: []string{"sg-b"}},
@@ -161,14 +164,13 @@ func TestAssembleRequestReadsLiveSubscribedSubgraphContent(t *testing.T) {
 	defer cancel()
 	resetDefaultStore(t)
 
-	ctxgraph.Update(ctxgraph.Copy{
-		Graph: ctxgraph.Graph{
-			Nodes: []ctxgraph.Node{{
-				ID:          "n1",
-				Statement:   "old memory",
-				SubgraphIDs: []string{"sg-a"},
-			}},
-		},
+	store := ctxgraph.NewStore()
+	store.Save("env-1", ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{{
+			ID:          "n1",
+			Statement:   "old memory",
+			SubgraphIDs: []string{"sg-a"},
+		}},
 	})
 
 	prompts := make([]string, 0, 2)
@@ -191,14 +193,12 @@ func TestAssembleRequestReadsLiveSubscribedSubgraphContent(t *testing.T) {
 			InputSchema: json.RawMessage(`{"type":"object"}`),
 		},
 		execute: func(context.Context, agenttool.Call) (agenttool.Output, error) {
-			ctxgraph.Update(ctxgraph.Copy{
-				Graph: ctxgraph.Graph{
-					Nodes: []ctxgraph.Node{{
-						ID:          "n1",
-						Statement:   "new memory",
-						SubgraphIDs: []string{"sg-a"},
-					}},
-				},
+			store.Save("env-1", ctxgraph.Graph{
+				Nodes: []ctxgraph.Node{{
+					ID:          "n1",
+					Statement:   "new memory",
+					SubgraphIDs: []string{"sg-a"},
+				}},
 			})
 			return agenttool.Output{Content: "ok"}, nil
 		},
@@ -220,6 +220,9 @@ func TestAssembleRequestReadsLiveSubscribedSubgraphContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustAddMemoryHooks(t, loop)
+	if err := loop.Bind(env.Open("env-1", store.View("env-1"))); err != nil {
+		t.Fatalf("Bind() error = %v", err)
+	}
 	loop.SetSubscribedSubgraphs([]string{"sg-a"})
 	loop.Enqueue(UserMessage{Content: "start"})
 
@@ -265,16 +268,8 @@ func TestLoopsShareDefaultMemoryGraph(t *testing.T) {
 	}
 	mustAddMemoryHooks(t, reader)
 
-	writer, err := NewLoop(Config{
-		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
-			return AssistantMessage{Content: "unused"}, nil
-		}),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	writer.SetContextGraph(ctxgraph.Graph{
+	store := ctxgraph.NewStore()
+	bindEnvGraph(t, reader, store, "env-1", ctxgraph.Graph{
 		Nodes: []ctxgraph.Node{{
 			ID:          "n1",
 			Statement:   "shared fact",
@@ -316,28 +311,34 @@ func TestIndependentAgentCopyIsUnique(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	loopA.SetContextGraph(ctxgraph.Graph{
+	store := ctxgraph.NewStore()
+	graph := ctxgraph.Graph{
 		Nodes: []ctxgraph.Node{{
 			ID:          "n1",
 			Statement:   "only a",
 			SubgraphIDs: []string{"sg-a"},
 		}},
-	})
-
-	if loopA.graphCopy.AgentID != "agent-a" {
-		t.Fatalf("loop A copy agent id = %q, want agent-a", loopA.graphCopy.AgentID)
 	}
-	if loopB.graphCopy.AgentID != "agent-b" {
-		t.Fatalf("loop B copy agent id = %q, want agent-b", loopB.graphCopy.AgentID)
+	bindEnvGraph(t, loopA, store, "env-a", graph)
+	if err := loopB.Bind(env.Open("env-b", store.View("env-b"))); err != nil {
+		t.Fatalf("Bind() error = %v", err)
 	}
 
-	nodesA := loopA.ContextGraph().NodesInSubgraphs([]string{"sg-a"})
+	nodesA := store.Load("env-a").NodesInSubgraphs([]string{"sg-a"})
 	if len(nodesA) != 1 || nodesA[0].Statement != "only a" {
-		t.Fatalf("loop A copy = %#v, want only a", nodesA)
+		t.Fatalf("env-a = %#v, want only a", nodesA)
 	}
-	nodesB := loopB.ContextGraph().NodesInSubgraphs([]string{"sg-a"})
+	nodesB := store.Load("env-b").NodesInSubgraphs([]string{"sg-a"})
 	if len(nodesB) != 0 {
-		t.Fatalf("loop B copy = %#v, want empty unique copy", nodesB)
+		t.Fatalf("env-b = %#v, want empty unique copy", nodesB)
+	}
+}
+
+func bindEnvGraph(t *testing.T, loop *Loop, store *ctxgraph.Store, envID string, graph ctxgraph.Graph) {
+	t.Helper()
+	store.Save(envID, graph)
+	if err := loop.Bind(env.Open(envID, store.View(envID))); err != nil {
+		t.Fatalf("Bind() error = %v", err)
 	}
 }
 

@@ -53,6 +53,9 @@ func TestAssembleUsesYamlToolsHooksAndPrompt(t *testing.T) {
 	if hasTool(request.Tools, "memory_add_to_subgraph") {
 		t.Fatal("planner gained memory tools not listed in yaml")
 	}
+	if hasTool(request.Tools, "inject_subscribed_memory") || hasTool(request.Tools, "compact_memory") {
+		t.Fatal("hidden memory tools leaked to the model")
+	}
 }
 
 func TestAssembleUsesLLMContextWindowForOverflowCompact(t *testing.T) {
@@ -60,11 +63,13 @@ func TestAssembleUsesLLMContextWindowForOverflowCompact(t *testing.T) {
 	ctxgraph.Update(ctxgraph.Copy{})
 
 	var sawOrganize bool
+	var request agent.Request
 	provider := stubProvider(func(_ context.Context, got agent.Request) (agent.AssistantMessage, error) {
 		if got.SystemPrompt == agent.OrganizePrompt {
 			sawOrganize = true
 			return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
 		}
+		request = got
 		return agent.AssistantMessage{
 			Content: "done " + strings.Repeat("tail ", 20),
 			Usage:   &agent.Usage{TotalTokens: 50},
@@ -93,5 +98,8 @@ func TestAssembleUsesLLMContextWindowForOverflowCompact(t *testing.T) {
 	}
 	if !sawOrganize {
 		t.Fatal("compact_on_overflow did not run, want llm.context_window applied")
+	}
+	if hasTool(request.Tools, "compact_memory") {
+		t.Fatal("compact_memory leaked to the model")
 	}
 }

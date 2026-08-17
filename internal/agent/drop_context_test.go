@@ -21,7 +21,8 @@ func TestDropFromContextToolRemovesNodesFromHistoryNotGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loop.SetContextGraph(ctxgraph.Graph{
+	store := ctxgraph.NewStore()
+	bindEnvGraph(t, loop, store, "env-1", ctxgraph.Graph{
 		Nodes: []ctxgraph.Node{
 			{ID: "n-keep", Statement: "keep me"},
 			{ID: "n-drop", Statement: "drop me"},
@@ -67,7 +68,7 @@ func TestDropFromContextToolRemovesNodesFromHistoryNotGraph(t *testing.T) {
 		t.Fatalf("tool result = %#v, want n-drop removed", got[0].ToolResult)
 	}
 
-	graph := loop.ContextGraph()
+	graph := store.Load("env-1")
 	if len(graph.Nodes) != 2 {
 		t.Fatalf("graph nodes = %#v, want both nodes still in memory", graph.Nodes)
 	}

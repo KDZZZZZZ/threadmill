@@ -38,6 +38,9 @@ func prepareTools(registeredTools []agenttool.Tool) (
 			return nil, nil, fmt.Errorf("%w: %s", ErrDuplicateTool, definition.Name)
 		}
 		tools[definition.Name] = registered
+		if toolHidden(registered) {
+			continue
+		}
 		definitions = append(definitions, definition)
 	}
 	return tools, definitions, nil
@@ -128,7 +131,7 @@ func (l *Loop) executeToolCall(ctx context.Context, call agenttool.Call) (agentt
 			return result, l.hooks.afterTool(ctx, call, result)
 		}
 
-		output, err := registered.Execute(ctx, cloneCall(call))
+		output, err := registered.Execute(l.withTranscript(ctx), cloneCall(call))
 		if err != nil {
 			result.Content = err.Error()
 			result.IsError = true

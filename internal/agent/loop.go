@@ -8,7 +8,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -62,9 +61,6 @@ type Loop struct {
 	usedToolCallIDs     map[string]struct{}
 	subscribedSubgraphs []string
 	agentID             string
-	graphCopy           ctxgraph.Copy
-	store               *ctxgraph.Store
-	envID               string
 	running             bool
 	turnCancel          context.CancelFunc
 	turnPreempted       bool
@@ -113,7 +109,6 @@ func NewLoop(config Config) (*Loop, error) {
 		usedToolCallIDs:     make(map[string]struct{}),
 		subscribedSubgraphs: []string{},
 		agentID:             agentID,
-		graphCopy:           ctxgraph.Clone(agentID),
 	}
 
 	tools, definitions, err := prepareTools(config.Tools)
@@ -399,49 +394,4 @@ func (l *Loop) finishTurn() bool {
 
 	cancel()
 	return preempted
-}
-
-// compactIfNeeded 在用量超过上下文窗口时，把旧消息整理进订阅子图并留下尾部。
-func (l *Loop) compactIfNeeded(ctx context.Context, usage *Usage) error {
-	if !ShouldCompact(usage, l.contextWindow) {
-		return nil
-	}
-	return l.compact(ctx, keepRecentBudget(l.contextWindow))
-}
-
-// commitTail 在本轮 ReAct 结束时把剩余消息全部写入记忆图。
-func (l *Loop) commitTail(ctx context.Context) error {
-	return l.compact(ctx, 0)
-}
-
-func (l *Loop) compact(ctx context.Context, keepRecentTokens int) error {
-	l.mu.Lock()
-	messages := cloneMessages(l.messages)
-	subscribed := append([]string(nil), l.subscribedSubgraphs...)
-	local := l.refreshGraphCopyLocked()
-	l.mu.Unlock()
-
-	graph, tail, err := CompactHistory(
-		ctx,
-		l.provider,
-		local.Graph,
-		messages,
-		subscribed,
-		keepRecentTokens,
-	)
-	if err != nil {
-		return err
-	}
-
-	l.mu.Lock()
-	local.Graph = graph
-	l.graphCopy = local
-	if l.store != nil {
-		l.store.Save(l.envID, local.Graph)
-	} else {
-		ctxgraph.Update(local)
-	}
-	l.messages = tail
-	l.mu.Unlock()
-	return l.persistReact()
 }
