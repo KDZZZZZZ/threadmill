@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	"github.com/KDZZZZZZ/threadmill/internal/env"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -177,9 +178,11 @@ type requesterBinder interface {
 type organizeSubgraphTool struct {
 	organizer *Loop
 	requester *Loop
+	memory    env.MemoryView
 }
 
 var _ agenttool.Tool = (*organizeSubgraphTool)(nil)
+var _ agenttool.EnvBinder = (*organizeSubgraphTool)(nil)
 var _ requesterBinder = (*organizeSubgraphTool)(nil)
 
 // NewSubgraphOrganizer 创建只整理记忆子图的 Agent，并注册记忆图工具。
@@ -199,7 +202,7 @@ func NewSubgraphOrganizer(config Config) (*Loop, error) {
 	}
 
 	tools, definitions, err := prepareTools(append(
-		agenttool.MemoryTools(loop.ownedCopy, loop.commitCopy),
+		agenttool.MemoryTools(nil, nil),
 		extra...,
 	))
 	if err != nil {
@@ -338,19 +341,90 @@ func withFileDefaults(config Config, defaultID, defaultPrompt string) Config {
 	return config
 }
 
-// Bind 把 yaml 装好的工具接到 env 上的记忆图；hook 读到的也是同一份快照。
-func (t *Team) Bind(store *ctxgraph.Store, envID string) error {
-	if store == nil {
-		return fmt.Errorf("agent: nil store")
-	}
+// Bind 把 yaml 装好的工具接到工作区；同一 task 的角色共用这份 env。
+func (t *Team) Bind(e env.Env) error {
 	for _, loop := range []*Loop{t.Planner, t.Executor, t.Verifier, t.Organizer} {
-		if loop == nil {
-			continue
-		}
-		if err := loop.bindEnv(store, envID); err != nil {
+		if err := bindLoopTools(loop, e); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+func bindLoopTools(loop *Loop, e env.Env) error {
+	if loop == nil {
+		return nil
+	}
+	loop.mu.Lock()
+	if tool, ok := loop.tools[organizeSubgraphToolName].(*organizeSubgraphTool); ok && tool.organizer != nil {
+		organizer := tool.organizer
+		loop.mu.Unlock()
+		if err := bindLoopTools(organizer, e); err != nil {
+			return err
+		}
+		loop.mu.Lock()
+	}
+	listed := listedToolsLocked(loop)
+	loop.mu.Unlock()
+
+	tools, definitions, err := prepareTools(agenttool.BindEnv(e, listed))
+	if err != nil {
+		return err
+	}
+
+	loop.mu.Lock()
+	loop.tools = tools
+	loop.definitions = definitions
+	loop.mu.Unlock()
+	return nil
+}
+
+func listedToolsLocked(loop *Loop) []agenttool.Tool {
+	listed := make([]agenttool.Tool, 0, len(loop.tools))
+	seen := make(map[string]struct{}, len(loop.tools))
+	for _, def := range loop.definitions {
+		tool, ok := loop.tools[def.Name]
+		if !ok {
+			continue
+		}
+		listed = append(listed, tool)
+		seen[def.Name] = struct{}{}
+	}
+	for name, tool := range loop.tools {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		listed = append(listed, tool)
+	}
+	return listed
+}
+
+func registerTools(loop *Loop, extra []agenttool.Tool) error {
+	if loop == nil || len(extra) == 0 {
+		return nil
+	}
+	listed := listedToolsLocked(loop)
+	seen := make(map[string]struct{}, len(listed))
+	for _, tool := range listed {
+		seen[tool.Definition().Name] = struct{}{}
+	}
+	for _, tool := range extra {
+		if tool == nil {
+			continue
+		}
+		name := tool.Definition().Name
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		listed = append(listed, tool)
+		seen[name] = struct{}{}
+	}
+	tools, definitions, err := prepareTools(listed)
+	if err != nil {
+		return err
+	}
+	loop.tools = tools
+	loop.definitions = definitions
 	return nil
 }
 
@@ -403,21 +477,17 @@ func installNamedPlugins(
 		if err != nil {
 			return err
 		}
-		existing := make([]agenttool.Tool, 0, len(loop.definitions))
-		for _, def := range loop.definitions {
-			existing = append(existing, loop.tools[def.Name])
-		}
-		tools, definitions, err := prepareTools(append(named, existing...))
-		if err != nil {
+		if err := registerTools(loop, named); err != nil {
 			return err
 		}
-		loop.tools = tools
-		loop.definitions = definitions
-		bindRequesters(loop, tools)
+		bindRequesters(loop, loop.tools)
 	}
 
-	hooks, err := hooksFromNames(hookNames, loop)
+	hooks, hidden, err := hooksFromNames(hookNames, loop)
 	if err != nil {
+		return err
+	}
+	if err := registerTools(loop, hidden); err != nil {
 		return err
 	}
 	return loop.AddHooks(hooks)
@@ -441,7 +511,7 @@ func toolsFromNames(
 			out = append(out, DropFromContextTool(loop))
 		default:
 			if memory == nil {
-				memory = memoryToolsByName(loop)
+				memory = memoryToolsByName()
 			}
 			tool, ok := memory[name]
 			if !ok {
@@ -453,8 +523,8 @@ func toolsFromNames(
 	return out, nil
 }
 
-func memoryToolsByName(loop *Loop) map[string]agenttool.Tool {
-	listed := agenttool.MemoryTools(loop.ownedCopy, loop.commitCopy)
+func memoryToolsByName() map[string]agenttool.Tool {
+	listed := agenttool.MemoryTools(nil, nil)
 	out := make(map[string]agenttool.Tool, len(listed))
 	for _, tool := range listed {
 		out[tool.Definition().Name] = tool
@@ -462,8 +532,10 @@ func memoryToolsByName(loop *Loop) map[string]agenttool.Tool {
 	return out
 }
 
-func hooksFromNames(names []string, loop *Loop) (Hooks, error) {
+func hooksFromNames(names []string, loop *Loop) (Hooks, []agenttool.Tool, error) {
 	var hooks Hooks
+	var hidden []agenttool.Tool
+	var hasCompact, hasInject bool
 	for _, name := range names {
 		switch name {
 		case hookInjectSubscribedMemory:
@@ -471,23 +543,35 @@ func hooksFromNames(names []string, loop *Loop) (Hooks, error) {
 				hooks.AssembleRequest,
 				InjectSubscribedMemory(loop),
 			)
+			if !hasInject {
+				hidden = append(hidden, newInjectSubscribedMemoryTool())
+				hasInject = true
+			}
 		case hookCompactOnOverflow:
 			hooks.AfterAssistant = append(
 				hooks.AfterAssistant,
 				CompactOnOverflow(loop),
 			)
+			if !hasCompact {
+				hidden = append(hidden, newCompactMemoryTool())
+				hasCompact = true
+			}
 		case hookCommitTailOnTurnEnd:
 			hooks.CommitTurn = append(hooks.CommitTurn, CommitTailOnTurnEnd(loop))
+			if !hasCompact {
+				hidden = append(hidden, newCompactMemoryTool())
+				hasCompact = true
+			}
 		case hookRemindDropContextOnPressure:
 			hooks.AssembleRequest = append(
 				hooks.AssembleRequest,
 				RemindDropContextOnPressure(loop),
 			)
 		default:
-			return Hooks{}, fmt.Errorf("unknown hook %q", name)
+			return Hooks{}, nil, fmt.Errorf("unknown hook %q", name)
 		}
 	}
-	return hooks, nil
+	return hooks, hidden, nil
 }
 
 func newMemoryLoop(config Config, defaultID, prompt string, organizer *Loop) (*Loop, error) {
@@ -513,6 +597,9 @@ func newMemoryLoop(config Config, defaultID, prompt string, organizer *Loop) (*L
 	if err != nil {
 		return nil, err
 	}
+	if err := registerTools(loop, hiddenMemoryTools()); err != nil {
+		return nil, err
+	}
 	if err := loop.AddHooks(MemoryHooks(loop)); err != nil {
 		return nil, err
 	}
@@ -535,6 +622,12 @@ func bindRequesters(loop *Loop, tools map[string]agenttool.Tool) {
 
 func (t *organizeSubgraphTool) BindRequester(loop *Loop) {
 	t.requester = loop
+}
+
+func (t *organizeSubgraphTool) BindEnv(e env.Env) agenttool.Tool {
+	next := *t
+	next.memory = e.Memory
+	return &next
 }
 
 func (*organizeSubgraphTool) Definition() agenttool.Definition {
@@ -574,15 +667,17 @@ func (t *organizeSubgraphTool) Execute(ctx context.Context, call agenttool.Call)
 		Summary: query,
 		Kind:    ctxgraph.SubgraphKindTask,
 	}
-	copy := t.organizer.ownedCopy()
-	copy.Graph = copy.Graph.WithSubgraph(subgraph)
-	t.organizer.commitCopy(copy)
+	if t.memory == nil {
+		return agenttool.Output{}, fmt.Errorf("%s: unbound memory", organizeSubgraphToolName)
+	}
+	graph := t.memory.Snapshot().WithSubgraph(subgraph)
+	t.memory.Commit(graph)
 
-	if _, err := t.organizer.Ask(ctx, organizeQuery(query, subgraph.ID, t.organizer.ContextGraph())); err != nil {
+	if _, err := t.organizer.Ask(ctx, organizeQuery(query, subgraph.ID, t.memory.Snapshot())); err != nil {
 		return agenttool.Output{}, err
 	}
 
-	if found, ok := subgraphFromGraph(t.organizer.ContextGraph(), subgraph.ID); ok {
+	if found, ok := subgraphFromGraph(t.memory.Snapshot(), subgraph.ID); ok {
 		subgraph = found
 	}
 	if t.requester != nil {

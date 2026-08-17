@@ -1,20 +1,18 @@
 package agent
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // InjectSubscribedMemory 把当前订阅子图里的节点拼进系统提示词。
 func InjectSubscribedMemory(loop *Loop) AssembleRequestHook {
-	return func(_ context.Context, request Request) (Request, error) {
-		loop.mu.Lock()
-		// ponytail: clones the whole graph; copy only subscribed nodes if snapshots get large
-		graph := loop.refreshGraphCopyLocked().Graph
-		subscribed := append([]string(nil), loop.subscribedSubgraphs...)
-		loop.mu.Unlock()
-		request.SystemPrompt = assembleSystemPrompt(
-			request.SystemPrompt,
-			graph,
-			subscribed,
-		)
+	return func(ctx context.Context, request Request) (Request, error) {
+		out, err := loop.execHidden(ctx, injectSubscribedMemoryToolName, json.RawMessage(`{}`))
+		if err != nil {
+			return request, err
+		}
+		request.SystemPrompt = joinSystemPrompt(request.SystemPrompt, out.Content)
 		return request, nil
 	}
 }
@@ -22,15 +20,24 @@ func InjectSubscribedMemory(loop *Loop) AssembleRequestHook {
 // CompactOnOverflow 在用量超过上下文窗口时把旧消息整理进订阅子图。
 func CompactOnOverflow(loop *Loop) AfterAssistantHook {
 	return func(ctx context.Context, message AssistantMessage) error {
-		return loop.compactIfNeeded(ctx, message.Usage)
+		if !ShouldCompact(message.Usage, loop.contextWindow) {
+			return nil
+		}
+		keep := keepRecentBudget(loop.contextWindow)
+		return execHiddenErr(loop, ctx, compactMemoryToolName, keepRecentArgs(keep))
 	}
 }
 
 // CommitTailOnTurnEnd 在本轮结束时把剩余消息全部写入记忆图。
 func CommitTailOnTurnEnd(loop *Loop) CommitTurnHook {
 	return func(ctx context.Context) error {
-		return loop.commitTail(ctx)
+		return execHiddenErr(loop, ctx, compactMemoryToolName, keepRecentArgs(0))
 	}
+}
+
+func execHiddenErr(loop *Loop, ctx context.Context, name string, args json.RawMessage) error {
+	_, err := loop.execHidden(ctx, name, args)
+	return err
 }
 
 // MemoryHooks 挂上默认的记忆注入、溢出压缩和退出整理。

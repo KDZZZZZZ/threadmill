@@ -27,16 +27,6 @@ func cloneRequest(request Request) Request {
 	}
 }
 
-// SetContextGraph 写入本 Agent 的图副本，并提交到已绑定的 env 或全局记忆图。
-func (l *Loop) SetContextGraph(graph ctxgraph.Graph) {
-	l.mu.Lock()
-	l.graphCopy.Graph = graph.Clone()
-	owned := l.graphCopy
-	store, envID := l.store, l.envID
-	l.mu.Unlock()
-	commitGraph(store, envID, owned)
-}
-
 // SetSubscribedSubgraphs 替换当前生效的子图订阅列表。
 func (l *Loop) SetSubscribedSubgraphs(ids []string) {
 	l.mu.Lock()
@@ -58,73 +48,17 @@ func (l *Loop) subscribeSubgraph(id string) {
 	l.subscribedSubgraphs = append(l.subscribedSubgraphs, id)
 }
 
-// ContextGraph 返回本 Agent 当前持有的图副本快照。
-func (l *Loop) ContextGraph() ctxgraph.Graph {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.graphCopy.Graph.Clone()
-}
-
-func (l *Loop) ownedCopy() ctxgraph.Copy {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.store != nil {
-		return ctxgraph.Copy{AgentID: l.agentID, Graph: l.store.Load(l.envID)}
-	}
-	return ctxgraph.Copy{
-		AgentID: l.graphCopy.AgentID,
-		Graph:   l.graphCopy.Graph.Clone(),
-	}
-}
-
-func (l *Loop) commitCopy(copy ctxgraph.Copy) {
-	l.mu.Lock()
-	l.graphCopy.Graph = copy.Graph.Clone()
-	owned := l.graphCopy
-	store, envID := l.store, l.envID
-	l.mu.Unlock()
-	commitGraph(store, envID, owned)
-}
-
-func (l *Loop) bindEnv(store *ctxgraph.Store, envID string) error {
-	l.mu.Lock()
-	listed := make([]agenttool.Tool, 0, len(l.definitions))
-	for _, def := range l.definitions {
-		listed = append(listed, l.tools[def.Name])
-	}
-	l.mu.Unlock()
-
-	tools, definitions, err := prepareTools(agenttool.Bind(store, envID, listed))
-	if err != nil {
-		return err
-	}
-
-	l.mu.Lock()
-	l.tools = tools
-	l.definitions = definitions
-	l.store = store
-	l.envID = envID
-	l.graphCopy = ctxgraph.Copy{AgentID: l.agentID, Graph: store.Load(envID)}
-	l.mu.Unlock()
-	return nil
-}
-
-func commitGraph(store *ctxgraph.Store, envID string, owned ctxgraph.Copy) {
-	if store != nil {
-		store.Save(envID, owned.Graph)
-		return
-	}
-	ctxgraph.Update(owned)
-}
-
 // assembleRequest 将静态 Agent 配置、当前消息和工具定义组装成请求快照。
 func (l *Loop) assembleRequest() Request {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	definitions := make([]agenttool.Definition, len(l.definitions))
-	for i, definition := range l.definitions {
-		definitions[i] = cloneDefinition(definition)
+	definitions := make([]agenttool.Definition, 0, len(l.definitions))
+	for _, definition := range l.definitions {
+		if tool, ok := l.tools[definition.Name]; ok && toolHidden(tool) {
+			continue
+		}
+		definitions = append(definitions, cloneDefinition(definition))
 	}
 	return Request{
 		SystemPrompt: l.agentConfig.systemPrompt,
@@ -134,14 +68,17 @@ func (l *Loop) assembleRequest() Request {
 }
 
 func assembleSystemPrompt(systemPrompt string, graph ctxgraph.Graph, subscribed []string) string {
-	memory := formatMemory(graph.NodesInSubgraphs(subscribed))
-	if memory == "" {
+	return joinSystemPrompt(systemPrompt, formatMemory(graph.NodesInSubgraphs(subscribed)))
+}
+
+func joinSystemPrompt(systemPrompt, extra string) string {
+	if extra == "" {
 		return systemPrompt
 	}
 	if systemPrompt == "" {
-		return memory
+		return extra
 	}
-	return systemPrompt + "\n\n" + memory
+	return systemPrompt + "\n\n" + extra
 }
 
 func formatMemory(nodes []ctxgraph.Node) string {
@@ -157,13 +94,4 @@ func formatMemory(nodes []ctxgraph.Node) string {
 		b.WriteString(node.Statement)
 	}
 	return b.String()
-}
-
-func (l *Loop) refreshGraphCopyLocked() ctxgraph.Copy {
-	if l.store != nil {
-		l.graphCopy = ctxgraph.Copy{AgentID: l.agentID, Graph: l.store.Load(l.envID)}
-		return l.graphCopy
-	}
-	l.graphCopy = ctxgraph.Clone(l.agentID)
-	return l.graphCopy
 }

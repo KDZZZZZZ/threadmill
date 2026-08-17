@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -32,13 +31,6 @@ func TestAssembleRequestOmitsSubscribedMemoryWithoutHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loop.SetContextGraph(ctxgraph.Graph{
-		Nodes: []ctxgraph.Node{{
-			ID:          "n1",
-			Statement:   "hidden fact",
-			SubgraphIDs: []string{"sg-a"},
-		}},
-	})
 	loop.SetSubscribedSubgraphs([]string{"sg-a"})
 	loop.Enqueue(UserMessage{Content: "start"})
 
@@ -98,9 +90,6 @@ func TestLoopLeavesHistoryUncompactedWithoutOverflowHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loop.SetContextGraph(ctxgraph.Graph{
-		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask}},
-	})
 	loop.SetSubscribedSubgraphs([]string{"sg-a"})
 	loop.Enqueue(UserMessage{Content: "start"})
 
@@ -150,9 +139,6 @@ func TestLoopKeepsTailWithoutCommitHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loop.SetContextGraph(ctxgraph.Graph{
-		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask}},
-	})
 	loop.SetSubscribedSubgraphs([]string{"sg-a"})
 	loop.Enqueue(UserMessage{Content: "remember blue"})
 
@@ -165,13 +151,13 @@ func TestLoopKeepsTailWithoutCommitHook(t *testing.T) {
 	if strings.Contains(secondPrompt, "remember blue") {
 		t.Fatalf("second system prompt = %q, want no committed memory", secondPrompt)
 	}
-	if nodes := loop.ContextGraph().NodesInSubgraphs([]string{"sg-a"}); len(nodes) != 0 {
-		t.Fatalf("memory nodes = %#v, want none", nodes)
-	}
 }
 
 func mustAddMemoryHooks(t *testing.T, loop *Loop) {
 	t.Helper()
+	if err := registerTools(loop, hiddenMemoryTools()); err != nil {
+		t.Fatal(err)
+	}
 	if err := loop.AddHooks(MemoryHooks(loop)); err != nil {
 		t.Fatal(err)
 	}

@@ -5,6 +5,7 @@ import (
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	"github.com/KDZZZZZZ/threadmill/internal/env"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -47,7 +48,8 @@ func Assemble(
 			return Roles{}, err
 		}
 		team.BindCheckpoints(checkpoints, task.ID)
-		if err := team.Bind(store, task.Env.ID); err != nil {
+		e := env.Open(task.Env.ID, store.View(task.Env.ID))
+		if err := team.Bind(e); err != nil {
 			return Roles{}, err
 		}
 		return Roles{

@@ -554,7 +554,8 @@ func TestLoopCompactsOverflowIntoSubscribedMemoryAndKeepsTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustAddMemoryHooks(t, loop)
-	loop.SetContextGraph(ctxgraph.Graph{
+	store := ctxgraph.NewStore()
+	bindEnvGraph(t, loop, store, "env-1", ctxgraph.Graph{
 		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask}},
 	})
 	loop.SetSubscribedSubgraphs([]string{"sg-a"})
@@ -607,7 +608,8 @@ func TestLoopCommitsTailIntoMemoryWhenTurnEnds(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustAddMemoryHooks(t, loop)
-	loop.SetContextGraph(ctxgraph.Graph{
+	store := ctxgraph.NewStore()
+	bindEnvGraph(t, loop, store, "env-1", ctxgraph.Graph{
 		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask}},
 	})
 	loop.SetSubscribedSubgraphs([]string{"sg-a"})
@@ -623,7 +625,7 @@ func TestLoopCommitsTailIntoMemoryWhenTurnEnds(t *testing.T) {
 		t.Fatalf("second system prompt = %q, want committed first-turn memory", secondPrompt)
 	}
 
-	graph := loop.ContextGraph()
+	graph := store.Load("env-1")
 	nodes := graph.NodesInSubgraphs([]string{"sg-a"})
 	if len(nodes) != 2 {
 		t.Fatalf("memory nodes = %#v, want one node per turn", nodes)
