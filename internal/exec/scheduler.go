@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -100,6 +102,9 @@ func (v execView) Run(ctx context.Context, spec env.Cmd) (env.ExecResult, error)
 
 	live, err := v.files.Materialize(v.envID)
 	if err != nil {
+		return env.ExecResult{}, err
+	}
+	if err := os.MkdirAll(filepath.Join(live, "tmp"), 0o750); err != nil {
 		return env.ExecResult{}, err
 	}
 	timeout := spec.Timeout

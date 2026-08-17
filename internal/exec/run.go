@@ -10,16 +10,21 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/env"
 )
 
-func sandboxEnv(live string) []string {
+func sandboxEnv(home, tmpdir string) []string {
 	path := os.Getenv("PATH")
 	if path == "" {
 		path = "/usr/bin:/bin"
 	}
 	return []string{
 		"PATH=" + path,
-		"HOME=" + live,
+		"HOME=" + home,
+		"TMPDIR=" + tmpdir,
 		"LANG=C.UTF-8",
 	}
+}
+
+func bashArgs(command string) []string {
+	return []string{"bash", "-c", "trap 'kill -9 -- -$$' EXIT; " + command}
 }
 
 func collect(ctx context.Context, cmd *osexec.Cmd, capBytes int) (env.ExecResult, error) {

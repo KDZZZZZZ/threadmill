@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	osexec "os/exec"
+	"path/filepath"
 	"syscall"
 	"unsafe"
 
@@ -64,7 +65,7 @@ func runLandlock(ctx context.Context, live, command string, capBytes int) (env.E
 	}
 	cmd := osexec.CommandContext(ctx, exe, landlockChildArg, live, command)
 	cmd.Dir = live
-	cmd.Env = append(sandboxEnv(live), landlockChildEnv+"=1")
+	cmd.Env = append(sandboxEnv(live, filepath.Join(live, "tmp")), landlockChildEnv+"=1")
 	return collect(ctx, cmd, capBytes)
 }
 
@@ -82,7 +83,7 @@ func runLandlockChild(live, command string) int {
 		fmt.Fprintf(os.Stderr, "exec: chdir: %v\n", err)
 		return 127
 	}
-	if err := syscall.Exec(bash, []string{"bash", "-c", command}, sandboxEnv(live)); err != nil {
+	if err := syscall.Exec(bash, bashArgs(command), sandboxEnv(live, filepath.Join(live, "tmp"))); err != nil {
 		fmt.Fprintf(os.Stderr, "exec: bash: %v\n", err)
 		return 127
 	}
