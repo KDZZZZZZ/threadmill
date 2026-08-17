@@ -105,16 +105,23 @@ func (s *Store) Merge(from, into string) error {
 		theirs := overlayContent(theirsBlob)
 		base := s.mergeBase(fromLayer, parentID, path)
 		ours := s.lookupContent(into, path)
-		if contentEqual(theirs, base) || contentEqual(ours, theirs) {
-			continue
-		}
-		if !contentEqual(ours, base) {
+		sameAncestor := contentEqual(theirs, base) || contentEqual(ours, theirs)
+		if !sameAncestor && !contentEqual(ours, base) {
 			return fmt.Errorf("vfs: merge conflict: %s", path)
 		}
 		for _, q := range s.knownDescendants(into, baseline, path) {
-			if !contentEqual(s.lookupContent(into, q), s.mergeBase(fromLayer, parentID, q)) {
+			tq := s.lookupContent(from, q)
+			bq := s.mergeBase(fromLayer, parentID, q)
+			oq := s.lookupContent(into, q)
+			if contentEqual(tq, bq) || contentEqual(oq, tq) {
+				continue
+			}
+			if !contentEqual(oq, bq) {
 				return fmt.Errorf("vfs: merge conflict: %s", q)
 			}
+		}
+		if sameAncestor {
+			continue
 		}
 		apply = append(apply, pending{path: path, b: cloneBlob(theirsBlob)})
 	}
@@ -526,7 +533,13 @@ func (s *Store) hasOverlayChildren(envID, rel string) bool {
 func (s *Store) applyOverlayList(envID, rel string, ents map[string]DirEnt) {
 	chain := s.chain(envID)
 	for i := len(chain) - 1; i >= 0; i-- {
-		for filePath, b := range chain[i].files {
+		l := chain[i]
+		if _, ok := l.files[rel]; ok {
+			for name := range ents {
+				delete(ents, name)
+			}
+		}
+		for filePath, b := range l.files {
 			name, isDir, ok := listPart(rel, filePath)
 			if !ok {
 				continue

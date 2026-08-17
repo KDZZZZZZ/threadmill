@@ -530,6 +530,38 @@ func TestStoreMergeChildDirTombstoneHidesUnchangedDescendant(t *testing.T) {
 	if _, err := parent.Read("dir/file.txt"); err == nil {
 		t.Fatal("child dir tombstone left parent dir/file.txt visible")
 	}
+	if _, err := parent.List("dir"); err == nil {
+		t.Fatal("List still showed tombstoned dir via inherited overlay children")
+	}
+}
+
+func TestStoreMergeConflictsWhenMatchingDirTombstoneHidesTargetDescendant(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	store.Fork("parent", "child")
+	if err := parent.Delete("dir"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.View("child").Delete("dir"); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Write("dir/new.txt", []byte("ours")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Merge("child", "parent")
+	if err == nil {
+		t.Fatal("Merge succeeded, want conflict")
+	}
+	got, readErr := parent.Read("dir/new.txt")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "ours" {
+		t.Fatalf("parent dir/new.txt = %q, want ours", got)
+	}
 }
 
 func TestStoreMergeConflictsWhenGrandparentChangedDirDescendantAfterNestedFork(t *testing.T) {
@@ -637,6 +669,33 @@ func TestViewRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestViewChildDirTombstoneHidesParentOverlayChildren(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	if err := store.View("parent").Write("dir/old.txt", []byte("from-parent")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	child := store.View("child")
+	if err := child.Delete("dir"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := child.Stat("dir"); err == nil {
+		t.Fatal("Stat saw parent overlay children under child dir tombstone")
+	}
+	if _, err := child.List("dir"); err == nil {
+		t.Fatal("List saw parent overlay children under child dir tombstone")
+	}
+	ents, err := store.View("parent").List("dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dirEntNamed(ents, "old.txt") {
+		t.Fatalf("parent List(dir) = %#v, want old.txt", ents)
+	}
+}
+
 func TestViewAncestorTombstoneHidesDescendants(t *testing.T) {
 	t.Parallel()
 
@@ -650,6 +709,12 @@ func TestViewAncestorTombstoneHidesDescendants(t *testing.T) {
 	}
 	if _, err := view.Stat("sub/nested.txt"); err == nil {
 		t.Fatal("Stat saw a file under a tombstoned directory")
+	}
+	if _, err := view.Stat("sub"); err == nil {
+		t.Fatal("Stat saw tombstoned directory via inherited children")
+	}
+	if _, err := view.List("sub"); err == nil {
+		t.Fatal("List saw tombstoned directory via inherited children")
 	}
 
 	if err := view.Write("sub", []byte("now-a-file")); err != nil {
