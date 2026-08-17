@@ -100,7 +100,7 @@ type runner struct {
 
 // runTask 调度一个 task：先 fork 环境、再组装三个 agent，然后按 sequence 逐个 runRole。
 // runRole 返回前该节点已声明完成，因此下一阶段开始时前置阶段一定已完成。
-func (r *runner) runTask(ctx context.Context, taskID, input string) (string, error) {
+func (r *runner) runTask(ctx context.Context, taskID, input string) (output string, err error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -108,6 +108,21 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (string, err
 	if !ok {
 		return "", fmt.Errorf("%w: %q", ErrUnknownTask, taskID)
 	}
+	defer func() {
+		if r.stores.Files == nil {
+			return
+		}
+		aerr := r.stores.Files.Absorb(task.Env.ID)
+		rerr := r.stores.Files.Release(task.Env.ID)
+		if err != nil {
+			return
+		}
+		if aerr != nil {
+			err = aerr
+			return
+		}
+		err = rerr
+	}()
 
 	r.stores.Fork(task.Env.ParentID, task.Env.ID)
 	roles, err := r.assemble(task)
@@ -120,7 +135,7 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (string, err
 		return "", err
 	}
 
-	output := input
+	output = input
 	for _, node := range task.Sequence() {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -141,7 +156,8 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (string, err
 //  2. Ask：跑这个角色的 ReAct。
 //  3. 等 Incoming 里每个节点的完成事件（sequence 前驱、spawn 来源、join 进来的 verifier）。
 //  4. 对每条 join 入边，把前驱 task 环境 Merge 进本节点的 task 环境。
-//  5. finish：发出自己的完成事件。同一 task 的下一阶段、以及所有等这条边的节点，现在可以往下走。
+//  5. Ask 之后立刻 Absorb，让后续 spawn 的 Fork 基线和 join 的 Merge 看见 live 写入。
+//  6. finish：发出自己的完成事件。同一 task 的下一阶段、以及所有等这条边的节点，现在可以往下走。
 func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input string, outputs map[string]string, merged map[string]bool) (string, error) {
 	asker := roles.asker(node.Role)
 	if asker == nil {
@@ -173,6 +189,11 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 		}
 		outputs[node.ID] = output
 		if err := r.saveProgress(node.TaskID, outputs, merged); err != nil {
+			return "", err
+		}
+	}
+	if r.stores.Files != nil {
+		if err := r.stores.Files.Absorb(task.Env.ID); err != nil {
 			return "", err
 		}
 	}

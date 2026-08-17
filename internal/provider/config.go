@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -27,8 +28,16 @@ var ErrInvalidConfig = errors.New("provider: invalid config")
 
 // FileConfig 是 threadmill.yaml 的顶层结构。
 type FileConfig struct {
-	LLM    LLMConfig       `yaml:"llm"`
+	LLM    LLMConfig        `yaml:"llm"`
 	Agents agent.FileAgents `yaml:"agents"`
+	Exec   ExecConfig       `yaml:"exec"`
+}
+
+// ExecConfig 配置命令执行槽位、超时和输出上限。
+type ExecConfig struct {
+	Slots       int `yaml:"slots"`
+	Timeout     int `yaml:"timeout"`       // 秒；0 表示只跟 ctx
+	OutputCapKB int `yaml:"output_cap_kb"` // 0 时调度器默认 256KB
 }
 
 // LLMConfig 配置一个 OpenAI-compatible Responses API Provider。
@@ -70,7 +79,20 @@ func LoadConfig(root string) (FileConfig, error) {
 	if err := config.Agents.Validate(); err != nil {
 		return FileConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
+	if err := config.Exec.validate(); err != nil {
+		return FileConfig{}, err
+	}
 	return config, nil
+}
+
+func (c *ExecConfig) validate() error {
+	if c.Slots < 0 {
+		return fmt.Errorf("%w: exec.slots must not be negative", ErrInvalidConfig)
+	}
+	if c.Slots == 0 {
+		c.Slots = runtime.NumCPU()
+	}
+	return nil
 }
 
 // validate 拒绝缺失字段和不能安全构造请求地址的配置。

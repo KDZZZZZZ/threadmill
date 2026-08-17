@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +17,49 @@ import (
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
+
+func TestGraphRunAbsorbsAndReleasesLiveAfterRoles(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	task := graph.AddTask()
+	files := vfs.NewStore(t.TempDir())
+	var live string
+	assemble := func(task Task) (Roles, error) {
+		return Roles{
+			Planner: instantAsker(),
+			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
+				dir, err := files.Materialize(task.Env.ID)
+				if err != nil {
+					return "", err
+				}
+				live = dir
+				if err := os.WriteFile(filepath.Join(dir, "from-bash.txt"), []byte("from-live"), 0o640); err != nil {
+					return "", err
+				}
+				return query + "/executor", nil
+			}),
+			Verifier: instantAsker(),
+		}, nil
+	}
+
+	if _, err := graph.Run(context.Background(), task.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	got, err := files.View(task.Env.ID).Read("from-bash.txt")
+	if err != nil {
+		t.Fatalf("Absorb did not pick up live write: %v", err)
+	}
+	if string(got) != "from-live" {
+		t.Fatalf("from-bash.txt = %q, want from-live", got)
+	}
+	if live == "" {
+		t.Fatal("executor did not materialize")
+	}
+	if _, err := os.Stat(live); !os.IsNotExist(err) {
+		t.Fatalf("live dir still exists after Run: %v", err)
+	}
+}
 
 func TestGraphRunUnknownTask(t *testing.T) {
 	t.Parallel()
@@ -107,6 +152,80 @@ func TestGraphRunJoinMergesChildMemory(t *testing.T) {
 	}
 }
 
+func TestGraphRunVerifierReadsExecutorLiveWrite(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	task := graph.AddTask()
+	files := vfs.NewStore(t.TempDir())
+	assemble := func(task Task) (Roles, error) {
+		return Roles{
+			Planner: instantAsker(),
+			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
+				dir, err := files.Materialize(task.Env.ID)
+				if err != nil {
+					return "", err
+				}
+				if err := os.WriteFile(filepath.Join(dir, "from-exec.txt"), []byte("from-live"), 0o640); err != nil {
+					return "", err
+				}
+				return query + "/executor", nil
+			}),
+			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
+				got, err := files.View(task.Env.ID).Read("from-exec.txt")
+				if err != nil {
+					return "", fmt.Errorf("verifier missed executor live write: %w", err)
+				}
+				if string(got) != "from-live" {
+					return "", fmt.Errorf("from-exec.txt = %q, want from-live", got)
+				}
+				return query + "/verifier", nil
+			}),
+		}, nil
+	}
+	if _, err := graph.Run(context.Background(), task.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestGraphRunJoinMergesChildLiveWrites(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	child := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
+	files := vfs.NewStore(t.TempDir())
+	assemble := func(task Task) (Roles, error) {
+		return Roles{
+			Planner: instantAsker(),
+			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
+				if task.ID != child.ID {
+					return query + "/executor", nil
+				}
+				dir, err := files.Materialize(task.Env.ID)
+				if err != nil {
+					return "", err
+				}
+				if err := os.WriteFile(filepath.Join(dir, "from-child-live.txt"), []byte("from-live"), 0o640); err != nil {
+					return "", err
+				}
+				return query + "/executor", nil
+			}),
+			Verifier: instantAsker(),
+		}, nil
+	}
+	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	got, err := files.View(root.Env.ID).Read("from-child-live.txt")
+	if err != nil {
+		t.Fatalf("join did not merge child live write: %v", err)
+	}
+	if string(got) != "from-live" {
+		t.Fatalf("merged from-child-live.txt = %q, want from-live", got)
+	}
+}
+
 func TestGraphRunJoinMergesChildFiles(t *testing.T) {
 	t.Parallel()
 
@@ -142,6 +261,50 @@ func TestGraphRunJoinMergesChildFiles(t *testing.T) {
 	}
 	if string(got) != "from-child" {
 		t.Fatalf("merged from-child.txt = %q, want from-child", got)
+	}
+}
+
+func TestGraphRunJoinConflictsWhenParentAndChildWroteSameLiveFile(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	child := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
+	files := vfs.NewStore(t.TempDir())
+	_, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, func(task Task) (Roles, error) {
+		return Roles{
+			Planner: askerFunc(func(_ context.Context, query string) (string, error) {
+				if task.ID == root.ID {
+					dir, err := files.Materialize(task.Env.ID)
+					if err != nil {
+						return "", err
+					}
+					if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("parent"), 0o640); err != nil {
+						return "", err
+					}
+				}
+				return query + "/planner", nil
+			}),
+			Executor: instantAsker(),
+			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
+				if task.ID == child.ID {
+					dir, err := files.Materialize(task.Env.ID)
+					if err != nil {
+						return "", err
+					}
+					if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("child"), 0o640); err != nil {
+						return "", err
+					}
+				}
+				return query + "/verifier", nil
+			}),
+		}, nil
+	})
+	if err == nil {
+		t.Fatal("Run succeeded, want join merge conflict")
+	}
+	if !strings.Contains(err.Error(), "shared.txt") {
+		t.Fatalf("Run() error = %v, want shared.txt conflict", err)
 	}
 }
 
