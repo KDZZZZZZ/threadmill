@@ -28,6 +28,8 @@ const (
 	fileReadMaxBytes     = 50 * 1024
 	fileLsDefaultLimit   = 500
 	fileGrepDefaultLimit = 100
+	fileGrepMaxLineBytes = 4 * 1024
+	fileGrepMaxBytes     = 50 * 1024
 	fileFindDefaultLimit = 1000
 )
 
@@ -310,7 +312,9 @@ func (t fileTool) grep(ctx context.Context, raw json.RawMessage) (Output, error)
 
 	var hits []string
 	var matches int
-	err = walkFiles(ctx, t.files, root, func(full, rel string, data []byte) error {
+	used := 0
+	capped := false
+	err = walkFiles(ctx, t.files, root, true, func(full, rel string, data []byte) error {
 		if args.Glob != "" && !matchGlob(args.Glob, rel) && !matchGlob(args.Glob, full) {
 			return nil
 		}
@@ -325,8 +329,9 @@ func (t fileTool) grep(ctx context.Context, raw json.RawMessage) (Output, error)
 			}
 			matches++
 			lineNo := i + 1
+			var rows []string
 			if ctxLines == 0 {
-				hits = append(hits, fmt.Sprintf("%s:%d: %s", rel, lineNo, line))
+				rows = []string{fmt.Sprintf("%s:%d: %s", rel, lineNo, line)}
 			} else {
 				from := lineNo - ctxLines
 				if from < 1 {
@@ -338,10 +343,24 @@ func (t fileTool) grep(ctx context.Context, raw json.RawMessage) (Output, error)
 				}
 				for n := from; n <= to; n++ {
 					if n == lineNo {
-						hits = append(hits, fmt.Sprintf("%s:%d: %s", rel, n, lines[n-1]))
+						rows = append(rows, fmt.Sprintf("%s:%d: %s", rel, n, lines[n-1]))
 					} else {
-						hits = append(hits, fmt.Sprintf("%s-%d- %s", rel, n, lines[n-1]))
+						rows = append(rows, fmt.Sprintf("%s-%d- %s", rel, n, lines[n-1]))
 					}
+				}
+			}
+			for _, row := range rows {
+				next, stop, hitCap := appendBoundedLine(hits, row, used)
+				hits = next
+				used = 0
+				if len(hits) > 0 {
+					used = len(strings.Join(hits, "\n"))
+				}
+				if hitCap {
+					capped = true
+				}
+				if stop {
+					return errFileWalkDone
 				}
 			}
 			if matches >= limit {
@@ -356,7 +375,11 @@ func (t fileTool) grep(ctx context.Context, raw json.RawMessage) (Output, error)
 	if len(hits) == 0 {
 		return Output{Content: "no matches found"}, nil
 	}
-	return Output{Content: strings.Join(hits, "\n")}, nil
+	out := strings.Join(hits, "\n")
+	if capped && !strings.Contains(out, "truncated") {
+		out += "\n[grep output truncated]"
+	}
+	return Output{Content: out}, nil
 }
 
 func (t fileTool) find(ctx context.Context, raw json.RawMessage) (Output, error) {
@@ -381,7 +404,7 @@ func (t fileTool) find(ctx context.Context, raw json.RawMessage) (Output, error)
 	}
 
 	var hits []string
-	err := walkFiles(ctx, t.files, root, func(full, rel string, _ []byte) error {
+	err := walkFiles(ctx, t.files, root, false, func(full, rel string, _ []byte) error {
 		if !matchGlob(args.Pattern, rel) && !matchGlob(args.Pattern, full) {
 			return nil
 		}
@@ -451,23 +474,36 @@ func applyUniqueEdits(content string, edits []textEdit) (string, error) {
 	return b.String(), nil
 }
 
-func walkFiles(ctx context.Context, files env.FileView, root string, fn func(full, rel string, data []byte) error) error {
+func walkFiles(ctx context.Context, files env.FileView, root string, contents bool, fn func(full, rel string, data []byte) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	data, err := files.Read(root)
-	if err == nil {
-		return fn(root, displayRel(root, root), data)
+	if contents {
+		data, err := files.Read(root)
+		if err == nil {
+			return fn(root, displayRel(root, root), data)
+		}
+	} else {
+		info, err := files.Stat(root)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir {
+			return fn(root, displayRel(root, root), nil)
+		}
 	}
-	return walkDir(ctx, files, root, root, fn)
+	return walkDir(ctx, files, root, root, contents, fn)
 }
 
-func walkDir(ctx context.Context, files env.FileView, root, dir string, fn func(full, rel string, data []byte) error) error {
+func walkDir(ctx context.Context, files env.FileView, root, dir string, contents bool, fn func(full, rel string, data []byte) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	ents, err := files.List(dir)
 	if err != nil {
+		if dir == root {
+			return err
+		}
 		return nil
 	}
 	slices.SortFunc(ents, func(a, b env.DirEnt) int {
@@ -479,16 +515,19 @@ func walkDir(ctx context.Context, files env.FileView, root, dir string, fn func(
 		}
 		full := joinFilePath(dir, ent.Name)
 		if ent.IsDir {
-			if err := walkDir(ctx, files, root, full, fn); err != nil {
+			if err := walkDir(ctx, files, root, full, contents, fn); err != nil {
+				return err
+			}
+			continue
+		}
+		if !contents {
+			if err := fn(full, displayRel(root, full), nil); err != nil {
 				return err
 			}
 			continue
 		}
 		data, err := files.Read(full)
 		if err != nil {
-			if err := walkDir(ctx, files, root, full, fn); err != nil {
-				return err
-			}
 			continue
 		}
 		if err := fn(full, displayRel(root, full), data); err != nil {
@@ -496,6 +535,27 @@ func walkDir(ctx context.Context, files env.FileView, root, dir string, fn func(
 		}
 	}
 	return nil
+}
+
+func appendBoundedLine(hits []string, line string, used int) ([]string, bool, bool) {
+	capped := false
+	if len(line) > fileGrepMaxLineBytes {
+		line = line[:fileGrepMaxLineBytes] + "…"
+		capped = true
+	}
+	add := len(line)
+	if len(hits) > 0 {
+		add++
+	}
+	if used+add > fileGrepMaxBytes {
+		if len(hits) == 0 {
+			hits = append(hits, line[:min(len(line), fileGrepMaxBytes)]+"\n[grep output truncated]")
+			return hits, true, true
+		}
+		hits = append(hits, "[grep output truncated]")
+		return hits, true, true
+	}
+	return append(hits, line), false, capped
 }
 
 func joinFilePath(dir, name string) string {
@@ -556,9 +616,29 @@ func globRegexp(pattern string) (*regexp.Regexp, error) {
 			b.WriteString("[^/]*")
 		case '?':
 			b.WriteString("[^/]")
-		case '.', '+', '(', ')', '|', '^', '$', '{', '}', '[', ']', '\\':
+		case '[':
+			end := i + 1
+			if end < len(pattern) && (pattern[end] == '!' || pattern[end] == '^') {
+				end++
+			}
+			for end < len(pattern) && pattern[end] != ']' {
+				end++
+			}
+			if end >= len(pattern) {
+				b.WriteString(`\[`)
+				continue
+			}
+			class := pattern[i : end+1]
+			if len(class) > 2 && class[1] == '!' {
+				class = "[^" + class[2:]
+			}
+			b.WriteString(class)
+			i = end
+		case '.', '+', '(', ')', '|', '^', '$', '{', '}', ']':
 			b.WriteByte('\\')
 			b.WriteByte(pattern[i])
+		case '\\':
+			b.WriteString(`\\`)
 		default:
 			b.WriteByte(pattern[i])
 		}

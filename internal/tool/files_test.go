@@ -218,10 +218,130 @@ func TestFileToolsPassPathThrough(t *testing.T) {
 	}
 }
 
+func TestGrepDoesNotFollowFailedReadsAsDirectories(t *testing.T) {
+	t.Parallel()
+
+	files := &loopDirFiles{inner: newFakeFiles(map[string]string{"a.txt": "needle"})}
+	tools := BindEnv(env.Open("env-1", nil).WithFiles(files), FileTools())
+	out, err := executeNamed(t, tools, "grep", `{"pattern":"needle"}`)
+	if err != nil {
+		t.Fatalf("grep: %v", err)
+	}
+	if !strings.Contains(out.Content, "needle") {
+		t.Fatalf("grep = %q, want needle", out.Content)
+	}
+}
+
+func TestGrepTruncatesHugeMatchingLines(t *testing.T) {
+	t.Parallel()
+
+	line := strings.Repeat("x", fileGrepMaxBytes+8)
+	files := newFakeFiles(map[string]string{"big.txt": "keep " + line})
+	tools := BindEnv(env.Open("env-1", nil).WithFiles(files), FileTools())
+	out, err := executeNamed(t, tools, "grep", `{"pattern":"keep","literal":true}`)
+	if err != nil {
+		t.Fatalf("grep: %v", err)
+	}
+	if len(out.Content) > fileGrepMaxBytes+len("\n[grep output truncated]") {
+		t.Fatalf("grep output len = %d, want bounded", len(out.Content))
+	}
+	if !strings.Contains(out.Content, "truncated") {
+		t.Fatalf("grep = %q, want truncation notice", out.Content)
+	}
+}
+
+func TestGrepMissingRootReturnsError(t *testing.T) {
+	t.Parallel()
+
+	tools := BindEnv(env.Open("env-1", nil).WithFiles(newFakeFiles(nil)), FileTools())
+	_, err := executeNamed(t, tools, "grep", `{"pattern":"x","path":"missing"}`)
+	if err == nil {
+		t.Fatal("grep missing path: error = nil, want root error")
+	}
+}
+
+func TestFindDoesNotReadFileContents(t *testing.T) {
+	t.Parallel()
+
+	files := &unreadFiles{inner: newFakeFiles(map[string]string{"src/a.go": "package a"})}
+	tools := BindEnv(env.Open("env-1", nil).WithFiles(files), FileTools())
+	out, err := executeNamed(t, tools, "find", `{"pattern":"*.go"}`)
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if !strings.Contains(out.Content, "a.go") {
+		t.Fatalf("find = %q, want a.go", out.Content)
+	}
+}
+
+func TestMatchGlobRecursiveCharacterClass(t *testing.T) {
+	t.Parallel()
+
+	if !matchGlob("**/*.[ch]", "src/foo.c") {
+		t.Fatal("**/*.[ch] should match src/foo.c")
+	}
+	if matchGlob("**/*.[ch]", "src/foo.go") {
+		t.Fatal("**/*.[ch] should not match src/foo.go")
+	}
+}
+
 type fakeFiles struct {
 	mu     sync.Mutex
 	data   map[string][]byte
 	reject func(path string) error
+}
+
+type loopDirFiles struct {
+	inner *fakeFiles
+	lists int
+}
+
+func (f *loopDirFiles) Read(p string) ([]byte, error) {
+	if p == "loop" || strings.HasPrefix(p, "loop/") {
+		return nil, fmt.Errorf("%s: is a directory", p)
+	}
+	return f.inner.Read(p)
+}
+
+func (f *loopDirFiles) Write(p string, data []byte) error { return f.inner.Write(p, data) }
+func (f *loopDirFiles) Delete(p string) error             { return f.inner.Delete(p) }
+
+func (f *loopDirFiles) Stat(p string) (env.FileInfo, error) {
+	if p == "loop" {
+		return env.FileInfo{Name: "loop"}, nil
+	}
+	return f.inner.Stat(p)
+}
+
+func (f *loopDirFiles) List(dir string) ([]env.DirEnt, error) {
+	f.lists++
+	if f.lists > 32 {
+		return nil, fmt.Errorf("walk looped")
+	}
+	if dir == "loop" || strings.HasPrefix(dir, "loop/") {
+		return []env.DirEnt{{Name: "loop"}, {Name: "a.txt"}}, nil
+	}
+	ents, err := f.inner.List(dir)
+	if err != nil {
+		return nil, err
+	}
+	return append(ents, env.DirEnt{Name: "loop"}), nil
+}
+
+type unreadFiles struct {
+	inner *fakeFiles
+}
+
+func (f *unreadFiles) Read(string) ([]byte, error) {
+	return nil, fmt.Errorf("read should not be called")
+}
+func (f *unreadFiles) Write(p string, data []byte) error { return f.inner.Write(p, data) }
+func (f *unreadFiles) Delete(p string) error             { return f.inner.Delete(p) }
+func (f *unreadFiles) Stat(p string) (env.FileInfo, error) {
+	return f.inner.Stat(p)
+}
+func (f *unreadFiles) List(dir string) ([]env.DirEnt, error) {
+	return f.inner.List(dir)
 }
 
 func newFakeFiles(files map[string]string) *fakeFiles {
