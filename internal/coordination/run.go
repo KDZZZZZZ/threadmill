@@ -115,7 +115,7 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (string, err
 		return "", err
 	}
 
-	outputs, err := r.loadOutputs(taskID)
+	outputs, merged, err := r.loadProgress(taskID)
 	if err != nil {
 		return "", err
 	}
@@ -125,7 +125,7 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (string, err
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		output, err = r.runRole(ctx, node, roles, output, outputs)
+		output, err = r.runRole(ctx, node, roles, output, outputs, merged)
 		if err != nil {
 			r.fail(err)
 			return "", err
@@ -142,7 +142,7 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (string, err
 //  3. 等 Incoming 里每个节点的完成事件（sequence 前驱、spawn 来源、join 进来的 verifier）。
 //  4. 对每条 join 入边，把前驱 task 环境 Merge 进本节点的 task 环境。
 //  5. finish：发出自己的完成事件。同一 task 的下一阶段、以及所有等这条边的节点，现在可以往下走。
-func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input string, outputs map[string]string) (string, error) {
+func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input string, outputs map[string]string, merged map[string]bool) (string, error) {
 	asker := roles.asker(node.Role)
 	if asker == nil {
 		return "", fmt.Errorf("%w: %s", ErrNilAsker, node.Role)
@@ -167,7 +167,7 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 			return "", err
 		}
 		outputs[node.ID] = output
-		if err := r.saveOutputs(node.TaskID, outputs); err != nil {
+		if err := r.saveProgress(node.TaskID, outputs, merged); err != nil {
 			return "", err
 		}
 	}
@@ -180,12 +180,18 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 	if !ok {
 		return "", fmt.Errorf("%w: %q", ErrUnknownTask, node.TaskID)
 	}
-	for _, pred := range r.graph.IncomingJoins(node.ID) {
-		child, ok := r.graph.Task(pred.TaskID)
-		if !ok {
-			continue
+	if !merged[node.ID] {
+		for _, pred := range r.graph.IncomingJoins(node.ID) {
+			child, ok := r.graph.Task(pred.TaskID)
+			if !ok {
+				continue
+			}
+			if err := r.stores.Merge(child.Env.ID, target.Env.ID); err != nil {
+				return "", err
+			}
 		}
-		if err := r.stores.Merge(child.Env.ID, target.Env.ID); err != nil {
+		merged[node.ID] = true
+		if err := r.saveProgress(node.TaskID, outputs, merged); err != nil {
 			return "", err
 		}
 	}
@@ -241,22 +247,26 @@ func (r *runner) fail(err error) {
 	r.cancel()
 }
 
-func (r *runner) loadOutputs(taskID string) (map[string]string, error) {
+func (r *runner) loadProgress(taskID string) (map[string]string, map[string]bool, error) {
 	outputs := make(map[string]string)
+	merged := make(map[string]bool)
 	if r.progress == nil {
-		return outputs, nil
+		return outputs, merged, nil
 	}
 	progress, ok, err := r.progress.Load(taskID)
 	if err != nil || !ok {
-		return outputs, err
+		return outputs, merged, err
 	}
 	for id, output := range progress.Outputs {
 		outputs[id] = output
 	}
-	return outputs, nil
+	for _, id := range progress.Merged {
+		merged[id] = true
+	}
+	return outputs, merged, nil
 }
 
-func (r *runner) saveOutputs(taskID string, outputs map[string]string) error {
+func (r *runner) saveProgress(taskID string, outputs map[string]string, merged map[string]bool) error {
 	if r.progress == nil {
 		return nil
 	}
@@ -264,7 +274,13 @@ func (r *runner) saveOutputs(taskID string, outputs map[string]string) error {
 	for id, output := range outputs {
 		copied[id] = output
 	}
-	if err := r.progress.Save(taskID, TaskProgress{Outputs: copied}); err != nil {
+	mergedIDs := make([]string, 0, len(merged))
+	for id, ok := range merged {
+		if ok {
+			mergedIDs = append(mergedIDs, id)
+		}
+	}
+	if err := r.progress.Save(taskID, TaskProgress{Outputs: copied, Merged: mergedIDs}); err != nil {
 		return fmt.Errorf("saving task progress: %w", err)
 	}
 	return nil

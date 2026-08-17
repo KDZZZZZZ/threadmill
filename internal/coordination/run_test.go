@@ -145,6 +145,85 @@ func TestGraphRunJoinMergesChildFiles(t *testing.T) {
 	}
 }
 
+func TestGraphRunResumeDoesNotReplayCompletedJoinMerge(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	child := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
+	progress, err := NewDirProgressStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph.SetProgressStore(progress)
+	memory := ctxgraph.NewStore()
+	files := vfs.NewStore(t.TempDir())
+	stores := Stores{Memory: memory, Files: files}
+
+	verifierStarted := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-verifierStarted
+		cancel()
+	}()
+	_, err = graph.Run(ctx, root.ID, "in", stores, func(task Task) (Roles, error) {
+		return Roles{
+			Planner:  instantAsker(),
+			Executor: instantAsker(),
+			Verifier: askerFunc(func(ctx context.Context, query string) (string, error) {
+				if task.ID == child.ID {
+					if err := files.View(task.Env.ID).Write("shared.txt", []byte("from-child")); err != nil {
+						return "", err
+					}
+					return query + "/child-verifier", nil
+				}
+				if err := files.View(task.Env.ID).Write("shared.txt", []byte("downstream")); err != nil {
+					return "", err
+				}
+				close(verifierStarted)
+				<-ctx.Done()
+				return "", ctx.Err()
+			}),
+		}, nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+
+	got, err := graph.Run(context.Background(), root.ID, "in", stores, func(task Task) (Roles, error) {
+		return Roles{
+			Planner: askerFunc(func(_ context.Context, query string) (string, error) {
+				t.Fatal("planner replayed")
+				return query, nil
+			}),
+			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
+				t.Fatal("executor replayed")
+				return query, nil
+			}),
+			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
+				if task.ID == child.ID {
+					t.Fatal("child verifier replayed")
+				}
+				return query + "/verifier", nil
+			}),
+		}, nil
+	})
+	if err != nil {
+		t.Fatalf("resume Run() error = %v", err)
+	}
+	if !strings.HasSuffix(got, "/verifier") {
+		t.Fatalf("resume output = %q, want verifier suffix", got)
+	}
+	body, err := files.View(root.Env.ID).Read("shared.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "downstream" {
+		t.Fatalf("shared.txt = %q, want downstream", body)
+	}
+}
+
 func TestGraphRunResumesCanceledTaskWithoutReplayingFinishedRoles(t *testing.T) {
 	t.Parallel()
 

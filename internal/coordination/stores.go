@@ -23,13 +23,13 @@ func (s Stores) Fork(parentID, childID string) {
 
 // Merge 把 from 环境合入 into。
 func (s Stores) Merge(from, into string) error {
-	if s.Memory != nil {
-		if err := s.Memory.Merge(from, into); err != nil {
+	if s.Files != nil {
+		if err := s.Files.Merge(from, into); err != nil {
 			return err
 		}
 	}
-	if s.Files != nil {
-		if err := s.Files.Merge(from, into); err != nil {
+	if s.Memory != nil {
+		if err := s.Memory.Merge(from, into); err != nil {
 			return err
 		}
 	}

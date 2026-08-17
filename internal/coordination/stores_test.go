@@ -99,3 +99,29 @@ func TestStoresMergeUnionsChildFiles(t *testing.T) {
 		t.Fatalf("merged from-child.txt = %q, want from-child", got)
 	}
 }
+
+func TestStoresMergeFileConflictDoesNotApplyMemory(t *testing.T) {
+	t.Parallel()
+
+	memory := ctxgraph.NewStore()
+	memory.Fork("parent", "child")
+	memory.Save("child", ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{{ID: "c1", Statement: "from-child"}},
+	})
+	files := vfs.NewStore(t.TempDir())
+	files.Fork("parent", "child")
+	if err := files.View("parent").Write("conflict.txt", []byte("ours")); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.View("child").Write("conflict.txt", []byte("theirs")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := (Stores{Memory: memory, Files: files}).Merge("child", "parent")
+	if err == nil {
+		t.Fatal("Merge succeeded, want file conflict")
+	}
+	if got := memory.Load("parent"); len(got.Nodes) != 0 {
+		t.Fatalf("file conflict still merged memory: %#v", got.Nodes)
+	}
+}
