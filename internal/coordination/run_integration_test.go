@@ -75,9 +75,9 @@ func TestLiveGraphRunMemoryOpsAndEnvVersions(t *testing.T) {
 		ctx,
 		rootTask.ID,
 		liveGraphQuery(liveMemoryMarker),
-		store,
+		Stores{Memory: store},
 		Assemble(
-			store,
+			Stores{Memory: store},
 			recorder,
 			cfg.Agents,
 			nil,

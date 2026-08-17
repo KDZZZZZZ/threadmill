@@ -361,6 +361,40 @@ func TestGraphIncoming(t *testing.T) {
 	}
 }
 
+func TestGraphIncomingJoins(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	child := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
+
+	if got := graph.IncomingJoins(root.Planner.ID); len(got) != 0 {
+		t.Fatalf("IncomingJoins(root planner) = %#v, want empty", got)
+	}
+	if got := graph.IncomingJoins(root.Executor.ID); len(got) != 0 {
+		t.Fatalf("IncomingJoins(root executor) = %#v, want empty", got)
+	}
+	if got := nodeIDs(graph.IncomingJoins(root.Verifier.ID)); !reflect.DeepEqual(got, []string{child.Verifier.ID}) {
+		t.Fatalf("IncomingJoins(root verifier) = %v, want [%s]", got, child.Verifier.ID)
+	}
+	if got := graph.IncomingJoins(child.Planner.ID); len(got) != 0 {
+		t.Fatalf("IncomingJoins(child planner) = %#v, want empty", got)
+	}
+	if got := graph.IncomingJoins("missing"); len(got) != 0 {
+		t.Fatalf("IncomingJoins(missing) = %#v, want empty", got)
+	}
+
+	other := newGraph()
+	parent := other.AddTask()
+	nested := mustSpawn(t, other, parent.Planner.ID, parent.Executor.ID)
+	if got := nodeIDs(other.IncomingJoins(parent.Executor.ID)); !reflect.DeepEqual(got, []string{nested.Verifier.ID}) {
+		t.Fatalf("IncomingJoins(join target) = %v, want [%s]", got, nested.Verifier.ID)
+	}
+	if got := other.IncomingJoins(parent.Verifier.ID); len(got) != 0 {
+		t.Fatalf("IncomingJoins(non-join verifier) = %#v, want empty", got)
+	}
+}
+
 func TestExampleGraphs(t *testing.T) {
 	t.Parallel()
 

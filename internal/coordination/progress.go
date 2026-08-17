@@ -8,9 +8,10 @@ import (
 	"path/filepath"
 )
 
-// TaskProgress 是尚未跑完的 task 游标：已完成角色的输出。task 整棵子树跑完后扔掉。
+// TaskProgress 是尚未跑完的 task 游标：已完成角色的输出，以及已经合入过的节点。
 type TaskProgress struct {
 	Outputs map[string]string
+	Merged  []string `json:",omitempty"`
 }
 
 // ProgressStore 保存、读取、删除进行中的 task 进度。

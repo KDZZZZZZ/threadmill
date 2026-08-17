@@ -204,6 +204,37 @@ func (g *Graph) Incoming(nodeID string) []Node {
 	return nodes
 }
 
+// IncomingJoins 返回以 join 边指向该节点的上游角色节点。
+// 按边的原有顺序且按 ID 去重；节点不存在时返回空切片。
+func (g *Graph) IncomingJoins(nodeID string) []Node {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	nodes := make([]Node, 0)
+	if nodeID == "" {
+		return nodes
+	}
+	if _, ok := g.nodeByIDLocked(nodeID); !ok {
+		return nodes
+	}
+
+	seen := make(map[string]struct{})
+	for _, edge := range g.edges {
+		if edge.Kind != EdgeKindJoin || edge.To != nodeID || edge.From == "" {
+			continue
+		}
+		if _, dup := seen[edge.From]; dup {
+			continue
+		}
+		node, ok := g.nodeByIDLocked(edge.From)
+		if !ok {
+			continue
+		}
+		seen[edge.From] = struct{}{}
+		nodes = append(nodes, node)
+	}
+	return nodes
+}
+
 // SpawnedTasks 返回从该角色节点拉出的子 task，按 spawn 边顺序。
 func (g *Graph) SpawnedTasks(nodeID string) []Task {
 	g.mu.Lock()

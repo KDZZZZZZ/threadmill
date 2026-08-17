@@ -2,11 +2,14 @@ package coordination
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
+	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
 func TestAssembleUsesYamlToolsHooksAndPrompt(t *testing.T) {
@@ -20,7 +23,7 @@ func TestAssembleUsesYamlToolsHooksAndPrompt(t *testing.T) {
 	})
 
 	roles, err := Assemble(
-		ctxgraph.NewStore(),
+		Stores{Memory: ctxgraph.NewStore()},
 		provider,
 		agent.FileAgents{
 			Planner: agent.FileAgent{
@@ -58,6 +61,51 @@ func TestAssembleUsesYamlToolsHooksAndPrompt(t *testing.T) {
 	}
 }
 
+func TestAssembleBindsVFSFiles(t *testing.T) {
+	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
+	ctxgraph.Update(ctxgraph.Copy{})
+
+	files := vfs.NewStore(t.TempDir())
+	calls := 0
+	provider := stubProvider(func(_ context.Context, _ agent.Request) (agent.AssistantMessage, error) {
+		calls++
+		if calls == 1 {
+			return agent.AssistantMessage{
+				ToolCalls: []agenttool.Call{{
+					ID:        "w1",
+					Name:      "write",
+					Arguments: json.RawMessage(`{"path":"a.txt","content":"from-assemble"}`),
+				}},
+			}, nil
+		}
+		return agent.AssistantMessage{Content: "done"}, nil
+	})
+
+	roles, err := Assemble(
+		Stores{Memory: ctxgraph.NewStore(), Files: files},
+		provider,
+		agent.FileAgents{
+			Executor: agent.FileAgent{Tools: []string{"write"}},
+		},
+		nil,
+		0,
+		nil,
+	)(Task{ID: "task-1", Env: Env{ID: "env-1"}})
+	if err != nil {
+		t.Fatalf("Assemble() error = %v", err)
+	}
+	if _, err := roles.Executor.Ask(context.Background(), "start"); err != nil {
+		t.Fatalf("Ask() error = %v", err)
+	}
+	got, err := files.View("env-1").Read("a.txt")
+	if err != nil {
+		t.Fatalf("Read after write: %v", err)
+	}
+	if string(got) != "from-assemble" {
+		t.Fatalf("a.txt = %q, want from-assemble", got)
+	}
+}
+
 func TestAssembleUsesLLMContextWindowForOverflowCompact(t *testing.T) {
 	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
 	ctxgraph.Update(ctxgraph.Copy{})
@@ -77,7 +125,7 @@ func TestAssembleUsesLLMContextWindowForOverflowCompact(t *testing.T) {
 	})
 
 	roles, err := Assemble(
-		ctxgraph.NewStore(),
+		Stores{Memory: ctxgraph.NewStore()},
 		provider,
 		agent.FileAgents{
 			Planner: agent.FileAgent{
