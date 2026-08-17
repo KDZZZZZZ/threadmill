@@ -648,6 +648,58 @@ func TestStoreMergeConflictsWhenChildWritesUnderLiveFile(t *testing.T) {
 	}
 }
 
+func TestStoreMergeChildFileAtDirHidesTargetDescendant(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Write("dir/x.txt", []byte("from-parent")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	if err := store.View("child").Write("dir", []byte("now-a-file")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	got, err := parent.Read("dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "now-a-file" {
+		t.Fatalf("parent dir = %q, want now-a-file", got)
+	}
+	if _, err := parent.Read("dir/x.txt"); err == nil {
+		t.Fatal("file at dir left parent dir/x.txt visible")
+	}
+}
+
+func TestStoreMergeRepeatedDirTombstoneHidesBaselineDescendant(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Delete("dir"); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Write("dir/x.txt", []byte("recreated")); err != nil {
+		t.Fatal(err)
+	}
+	store.Fork("parent", "child")
+	if err := store.View("child").Delete("dir"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	if _, err := parent.Read("dir/x.txt"); err == nil {
+		t.Fatal("repeated dir tombstone left baseline dir/x.txt visible")
+	}
+}
+
 func TestStoreMergeConflictsWhenGrandparentChangedDirDescendantAfterNestedFork(t *testing.T) {
 	t.Parallel()
 

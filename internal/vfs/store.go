@@ -109,6 +109,7 @@ func (s *Store) Merge(from, into string) error {
 		if !sameAncestor && !contentEqual(ours, base) {
 			return fmt.Errorf("vfs: merge conflict: %s", path)
 		}
+		needApply := !sameAncestor
 		for _, q := range s.knownDescendants(into, baseline, path) {
 			tq := s.lookupContent(from, q)
 			bq := s.mergeBase(fromLayer, parentID, q)
@@ -119,8 +120,9 @@ func (s *Store) Merge(from, into string) error {
 			if !contentEqual(oq, bq) {
 				return fmt.Errorf("vfs: merge conflict: %s", q)
 			}
+			needApply = true
 		}
-		if sameAncestor {
+		if !needApply {
 			continue
 		}
 		if !theirs.tombstone && s.liveFileAncestor(into, path) {
@@ -272,15 +274,15 @@ func (s *Store) knownDescendants(into string, baseline []map[string]blob, path s
 func applyBlob(dst *layer, path string, b blob) {
 	if b.tombstone {
 		dst.files[path] = blob{tombstone: true}
-		prefix := path + "/"
-		for k := range dst.files {
-			if strings.HasPrefix(k, prefix) {
-				delete(dst.files, k)
-			}
-		}
-		return
+	} else {
+		dst.files[path] = cloneBlob(b)
 	}
-	dst.files[path] = cloneBlob(b)
+	prefix := path + "/"
+	for k := range dst.files {
+		if strings.HasPrefix(k, prefix) {
+			delete(dst.files, k)
+		}
+	}
 }
 
 func contentEqual(a, b content) bool {
