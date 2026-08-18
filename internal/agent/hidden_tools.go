@@ -24,6 +24,7 @@ type Transcript struct {
 	Subscribed    []string
 	Provider      Provider
 	ContextWindow int
+	AgentID       string
 }
 
 type transcriptKey struct{}
@@ -109,6 +110,7 @@ func (t compactMemoryTool) Execute(ctx context.Context, call agenttool.Call) (ag
 		transcript.Messages,
 		transcript.Subscribed,
 		args.KeepRecentTokens,
+		transcript.AgentID,
 	)
 	if err != nil {
 		return agenttool.Output{}, err
@@ -190,6 +192,7 @@ func (l *Loop) snapshotTranscript() Transcript {
 		Subscribed:    append([]string(nil), l.subscribedSubgraphs...),
 		Provider:      l.provider,
 		ContextWindow: l.contextWindow,
+		AgentID:       l.agentID,
 	}
 }
 

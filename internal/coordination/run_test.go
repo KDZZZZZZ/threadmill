@@ -126,6 +126,19 @@ func TestGraphRunJoinMergesChildMemory(t *testing.T) {
 					})
 					view.Commit(graph)
 				}
+				if task.ID == root.ID && role == RoleVerifier {
+					got := store.Load(root.Env.ID)
+					found := false
+					for _, node := range got.Nodes {
+						if node.ID == "c1" && node.Statement == "from-child" {
+							found = true
+							break
+						}
+					}
+					if !found {
+						return "", fmt.Errorf("verifier ask missed child memory: %#v", got.Nodes)
+					}
+				}
 				return query + "/" + role, nil
 			})
 		}
@@ -138,17 +151,6 @@ func TestGraphRunJoinMergesChildMemory(t *testing.T) {
 
 	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: store}, assemble); err != nil {
 		t.Fatalf("Run() error = %v", err)
-	}
-	got := store.Load(root.Env.ID)
-	found := false
-	for _, node := range got.Nodes {
-		if node.ID == "c1" && node.Statement == "from-child" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("join did not merge child memory into %s: %#v", root.Env.ID, got.Nodes)
 	}
 }
 
@@ -211,18 +213,23 @@ func TestGraphRunJoinMergesChildLiveWrites(t *testing.T) {
 				}
 				return query + "/executor", nil
 			}),
-			Verifier: instantAsker(),
+			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
+				if task.ID != root.ID {
+					return query + "/verifier", nil
+				}
+				got, err := files.View(root.Env.ID).Read("from-child-live.txt")
+				if err != nil {
+					return "", fmt.Errorf("verifier ask missed child live write: %w", err)
+				}
+				if string(got) != "from-live" {
+					return "", fmt.Errorf("from-child-live.txt = %q, want from-live", got)
+				}
+				return query + "/verifier", nil
+			}),
 		}, nil
 	}
 	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
 		t.Fatalf("Run() error = %v", err)
-	}
-	got, err := files.View(root.Env.ID).Read("from-child-live.txt")
-	if err != nil {
-		t.Fatalf("join did not merge child live write: %v", err)
-	}
-	if string(got) != "from-live" {
-		t.Fatalf("merged from-child-live.txt = %q, want from-live", got)
 	}
 }
 
@@ -240,6 +247,15 @@ func TestGraphRunJoinMergesChildFiles(t *testing.T) {
 				if task.ID == child.ID && role == RoleVerifier {
 					if err := files.View(task.Env.ID).Write("from-child.txt", []byte("from-child")); err != nil {
 						return "", err
+					}
+				}
+				if task.ID == root.ID && role == RoleVerifier {
+					got, err := files.View(root.Env.ID).Read("from-child.txt")
+					if err != nil {
+						return "", fmt.Errorf("verifier ask missed child file: %w", err)
+					}
+					if string(got) != "from-child" {
+						return "", fmt.Errorf("from-child.txt = %q, want from-child", got)
 					}
 				}
 				return query + "/" + role, nil
@@ -269,11 +285,12 @@ func TestGraphRunJoinConflictsWhenParentAndChildWroteSameLiveFile(t *testing.T) 
 
 	graph := newGraph()
 	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
+	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
 	files := vfs.NewStore(t.TempDir())
 	_, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, func(task Task) (Roles, error) {
 		return Roles{
-			Planner: askerFunc(func(_ context.Context, query string) (string, error) {
+			Planner: instantAsker(),
+			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
 				if task.ID == root.ID {
 					dir, err := files.Materialize(task.Env.ID)
 					if err != nil {
@@ -283,9 +300,8 @@ func TestGraphRunJoinConflictsWhenParentAndChildWroteSameLiveFile(t *testing.T) 
 						return "", err
 					}
 				}
-				return query + "/planner", nil
+				return query + "/executor", nil
 			}),
-			Executor: instantAsker(),
 			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
 				if task.ID == child.ID {
 					dir, err := files.Materialize(task.Env.ID)
@@ -313,20 +329,20 @@ func TestGraphRunJoinConflictsWhenParentAndChildWroteSameFile(t *testing.T) {
 
 	graph := newGraph()
 	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
+	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
 	files := vfs.NewStore(t.TempDir())
 
 	_, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, func(task Task) (Roles, error) {
 		return Roles{
-			Planner: askerFunc(func(_ context.Context, query string) (string, error) {
+			Planner: instantAsker(),
+			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
 				if task.ID == root.ID {
 					if err := files.View(task.Env.ID).Write("shared.txt", []byte("parent")); err != nil {
 						return "", err
 					}
 				}
-				return query + "/planner", nil
+				return query + "/executor", nil
 			}),
-			Executor: instantAsker(),
 			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
 				if task.ID == child.ID {
 					if err := files.View(task.Env.ID).Write("shared.txt", []byte("child")); err != nil {
@@ -564,8 +580,9 @@ func TestGraphRunResumesSpawnedChildWithoutReplayingFinishedRoles(t *testing.T) 
 	if len(childAsks) != 0 {
 		t.Fatalf("child replayed finished roles: %v", childAsks)
 	}
-	if got != "in" {
-		t.Fatalf("resume Run() = %q, want in", got)
+	want := "in\n\n[join] 子任务 " + child.ID + " 输出：\nin"
+	if got != want {
+		t.Fatalf("resume Run() = %q, want %q", got, want)
 	}
 }
 
@@ -642,12 +659,127 @@ func TestGraphRunResumesInProgressReact(t *testing.T) {
 	}
 }
 
-func TestGraphRunStartsSpawnWhenRoleStarts(t *testing.T) {
+func TestGraphRunStartsSpawnAfterRoleAsk(t *testing.T) {
 	t.Parallel()
 
 	graph := newGraph()
 	root := graph.AddTask()
 	child := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
+
+	execStarted := make(chan struct{})
+	execRelease := make(chan struct{})
+	childStarted := make(chan struct{})
+
+	assemble := func(task Task) (Roles, error) {
+		if task.ID == root.ID {
+			return Roles{
+				Planner:  instantAsker(),
+				Executor: gatedAsker(execStarted, execRelease),
+				Verifier: instantAsker(),
+			}, nil
+		}
+		if task.ID == child.ID {
+			return Roles{
+				Planner:  gatedAsker(childStarted, nil),
+				Executor: instantAsker(),
+				Verifier: instantAsker(),
+			}, nil
+		}
+		return instantRoles(), nil
+	}
+
+	done := runAsync(t, graph, assemble, root.ID)
+	waitChan(t, execStarted)
+	assertNotClosed(t, childStarted)
+	close(execRelease)
+	waitChan(t, childStarted)
+	if err := waitErr(t, done); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestGraphRunSpawnPassesAskOutputToChild(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
+
+	assemble := func(task Task) (Roles, error) {
+		if task.ID == root.ID {
+			return Roles{
+				Planner: askerFunc(func(_ context.Context, query string) (string, error) {
+					return "plan-out", nil
+				}),
+				Executor: instantAsker(),
+				Verifier: instantAsker(),
+			}, nil
+		}
+		if task.ID == child.ID {
+			return Roles{
+				Planner: askerFunc(func(_ context.Context, query string) (string, error) {
+					if query != "plan-out" {
+						return "", fmt.Errorf("child planner query = %q, want plan-out", query)
+					}
+					return query, nil
+				}),
+				Executor: instantAsker(),
+				Verifier: instantAsker(),
+			}, nil
+		}
+		return instantRoles(), nil
+	}
+
+	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore()}, assemble); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestGraphRunJoinPassesChildOutputToAsker(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
+
+	assemble := func(task Task) (Roles, error) {
+		if task.ID == child.ID {
+			return Roles{
+				Planner:  instantAsker(),
+				Executor: instantAsker(),
+				Verifier: askerFunc(func(_ context.Context, _ string) (string, error) {
+					return "from-child", nil
+				}),
+			}, nil
+		}
+		return Roles{
+			Planner:  instantAsker(),
+			Executor: instantAsker(),
+			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
+				want := "in\n\n[join] 子任务 " + child.ID + " 输出：\nfrom-child"
+				if query != want {
+					return "", fmt.Errorf("verifier query = %q, want %q", query, want)
+				}
+				return "verified", nil
+			}),
+		}, nil
+	}
+
+	got, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore()}, assemble)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got != "verified" {
+		t.Fatalf("Run() = %q, want verified", got)
+	}
+}
+
+func TestGraphRunSpawnedChildRunsBesideLaterRole(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
 
 	execStarted := make(chan struct{})
 	execRelease := make(chan struct{})
@@ -719,6 +851,7 @@ func TestGraphRunCompleteWaitsForIncomingJoin(t *testing.T) {
 	root := graph.AddTask()
 	_ = mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
 
+	childVStarted := make(chan struct{})
 	childVRelease := make(chan struct{})
 	rootVStarted := make(chan struct{})
 
@@ -733,14 +866,16 @@ func TestGraphRunCompleteWaitsForIncomingJoin(t *testing.T) {
 		return Roles{
 			Planner:  instantAsker(),
 			Executor: instantAsker(),
-			Verifier: gatedAsker(nil, childVRelease),
+			Verifier: gatedAsker(childVStarted, childVRelease),
 		}, nil
 	}
 
 	done := runAsync(t, graph, assemble, root.ID)
-	waitChan(t, rootVStarted)
+	waitChan(t, childVStarted)
+	assertNotClosed(t, rootVStarted)
 	assertNotDone(t, done)
 	close(childVRelease)
+	waitChan(t, rootVStarted)
 	if err := waitErr(t, done); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -780,8 +915,9 @@ func TestGraphRunNestedSpawnStartsWithParentRole(t *testing.T) {
 
 	done := runAsync(t, graph, assemble, root.ID)
 	waitChan(t, childEStarted)
-	waitChan(t, grandStarted)
+	assertNotClosed(t, grandStarted)
 	close(childERelease)
+	waitChan(t, grandStarted)
 	if err := waitErr(t, done); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -836,8 +972,8 @@ func TestGraphRunIsolatesToolsByTaskEnv(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if nodes := store.Load(root.Env.ID).NodesInSubgraphs([]string{"from-" + child.ID}); len(nodes) != 0 {
-		t.Fatalf("parent env saw child write: %#v", nodes)
+	if nodes := store.Load(root.Env.ID).NodesInSubgraphs([]string{"from-" + child.ID}); len(nodes) != 1 || nodes[0].ID != "n1" {
+		t.Fatalf("join dropped child subgraph: %#v", nodes)
 	}
 	if nodes := store.Load(child.Env.ID).NodesInSubgraphs([]string{"from-" + child.ID}); len(nodes) != 1 || nodes[0].ID != "n1" {
 		t.Fatal("child env missing its own write")
@@ -878,16 +1014,16 @@ func TestGraphRunAssembledReActIsolatesMemoryByEnv(t *testing.T) {
 		t.Fatalf("Run() = %q, want verified", got)
 	}
 
-	if nodes := ctxgraph.Clone("check").Graph.NodesInSubgraphs([]string{"mark-in", "mark-planned"}); len(nodes) != 0 {
+	if nodes := ctxgraph.Clone("check").Graph.NodesInSubgraphs([]string{"mark-in", "mark-executed"}); len(nodes) != 0 {
 		t.Fatalf("react write leaked to global graph: %#v", nodes)
 	}
 	if nodes := store.Load(root.Env.ID).NodesInSubgraphs([]string{"mark-in"}); len(nodes) != 1 || nodes[0].ID != "n1" {
 		t.Fatal("parent env missing planner write")
 	}
-	if nodes := store.Load(root.Env.ID).NodesInSubgraphs([]string{"mark-planned"}); len(nodes) != 0 {
-		t.Fatalf("parent env saw child planner write: %#v", nodes)
+	if nodes := store.Load(root.Env.ID).NodesInSubgraphs([]string{"mark-executed"}); len(nodes) != 1 || nodes[0].ID != "n1" {
+		t.Fatalf("join dropped child subgraph: %#v", nodes)
 	}
-	if nodes := store.Load(child.Env.ID).NodesInSubgraphs([]string{"mark-planned"}); len(nodes) != 1 || nodes[0].ID != "n1" {
+	if nodes := store.Load(child.Env.ID).NodesInSubgraphs([]string{"mark-executed"}); len(nodes) != 1 || nodes[0].ID != "n1" {
 		t.Fatal("child env missing planner write")
 	}
 	if nodes := store.Load(child.Env.ID).NodesInSubgraphs([]string{"mark-in"}); len(nodes) != 1 || nodes[0].ID != "n1" {

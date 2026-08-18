@@ -121,21 +121,21 @@ func TestLiveGraphRunMemoryOpsAndEnvVersions(t *testing.T) {
 		t.Fatal("parent env gained no subgraph; organize_subgraph was not called")
 	}
 	for _, id := range childOnly {
-		if containsString(parentOnly, id) {
-			t.Fatalf("child subgraph %q leaked into parent env", id)
-		}
-		if subgraphByID(parent, id) {
-			t.Fatalf("parent env saw child subgraph %q", id)
+		if !subgraphByID(parent, id) {
+			t.Fatalf("join dropped child subgraph %q", id)
 		}
 	}
 	for _, id := range parentOnly {
+		if containsString(childOnly, id) {
+			continue
+		}
 		if subgraphByID(forked, id) {
 			t.Fatalf("child env saw parent subgraph %q written after fork", id)
 		}
 	}
 
 	for _, node := range parent.Nodes {
-		if nodeIn(seed, node.ID) {
+		if nodeIn(seed, node.ID) || nodeIn(forked, node.ID) {
 			continue
 		}
 		for _, subgraphID := range node.SubgraphIDs {
@@ -151,13 +151,8 @@ func TestLiveGraphRunMemoryOpsAndEnvVersions(t *testing.T) {
 		if nodeIn(seed, node.ID) {
 			continue
 		}
-		for _, subgraphID := range node.SubgraphIDs {
-			if !containsString(childOnly, subgraphID) {
-				continue
-			}
-			if nodeInSubgraph(parent, node.ID, subgraphID) {
-				t.Fatalf("parent env saw child node %q in subgraph %q", node.ID, subgraphID)
-			}
+		if !nodeIn(parent, node.ID) {
+			t.Fatalf("join dropped child node %q", node.ID)
 		}
 	}
 

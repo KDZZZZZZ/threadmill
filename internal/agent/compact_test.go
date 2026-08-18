@@ -45,9 +45,10 @@ func TestCompactHistoryUsesOneModelRequestAndKeepsTail(t *testing.T) {
 	graph := ctxgraph.Graph{
 		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask}},
 		Nodes: []ctxgraph.Node{{
-			ID:          "old",
-			Statement:   "already known",
-			SubgraphIDs: []string{"sg-a"},
+			ID:             "old",
+			Statement:      "already known",
+			SubgraphIDs:    []string{"sg-a"},
+			CreatorAgentID: "agent-a",
 		}},
 	}
 	messages := []Message{
@@ -63,6 +64,7 @@ func TestCompactHistoryUsesOneModelRequestAndKeepsTail(t *testing.T) {
 		messages,
 		[]string{"sg-a"},
 		1,
+		"agent-a",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -98,6 +100,9 @@ func TestCompactHistoryUsesOneModelRequestAndKeepsTail(t *testing.T) {
 	if nodes[1].Kind != ctxgraph.NodeKindFact || nodes[1].Status != ctxgraph.NodeStatusAccepted {
 		t.Fatalf("node kind/status = %#v", nodes[1])
 	}
+	if nodes[1].CreatorAgentID != "agent-a" {
+		t.Fatalf("creator = %q, want agent-a", nodes[1].CreatorAgentID)
+	}
 	if got := gotGraph.SourceSubgraphsOf(nodes[1].ID); !reflect.DeepEqual(got, []string{"sg-a"}) {
 		t.Fatalf("source subgraphs = %v, want [sg-a]", got)
 	}
@@ -121,9 +126,14 @@ func TestCompactHistoryAssignsMembershipFromModelAndSourcesFromSubscriptions(t *
 			wantMember: []string{"sg-b"},
 		},
 		{
-			name:       "unknown membership falls back to subscriptions",
+			name:       "unknown membership stays empty",
 			modelIDs:   []string{"sg-missing"},
-			wantMember: []string{"sg-a", "sg-q"},
+			wantMember: []string{},
+		},
+		{
+			name:       "empty membership stays empty",
+			modelIDs:   []string{},
+			wantMember: []string{},
 		},
 	}
 
@@ -155,6 +165,7 @@ func TestCompactHistoryAssignsMembershipFromModelAndSourcesFromSubscriptions(t *
 				},
 				subscribed,
 				0,
+				"agent-a",
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -170,8 +181,13 @@ func TestCompactHistoryAssignsMembershipFromModelAndSourcesFromSubscriptions(t *
 			if created.ID == "" {
 				t.Fatal("missing compacted node")
 			}
-			if !reflect.DeepEqual(created.SubgraphIDs, tt.wantMember) {
+			if len(created.SubgraphIDs) != len(tt.wantMember) {
 				t.Fatalf("membership = %v, want %v", created.SubgraphIDs, tt.wantMember)
+			}
+			for i, id := range tt.wantMember {
+				if created.SubgraphIDs[i] != id {
+					t.Fatalf("membership = %v, want %v", created.SubgraphIDs, tt.wantMember)
+				}
 			}
 			if got := gotGraph.SourceSubgraphsOf(created.ID); !reflect.DeepEqual(got, subscribed) {
 				t.Fatalf("source subgraphs = %v, want subscriptions %v", got, subscribed)
@@ -253,12 +269,17 @@ func TestKeepRecentIndex(t *testing.T) {
 	}
 }
 
-func TestCompactHistorySkipsWhenNoSubgraphs(t *testing.T) {
+func TestCompactHistoryCompactsWhenNoSubscriptions(t *testing.T) {
 	t.Parallel()
 
-	provider := &stubProvider{response: `{"nodes":[{"statement":"should not apply"}]}`}
-	graph := ctxgraph.Graph{}
-	messages := []Message{{Role: RoleUser, Content: "keep me"}}
+	provider := &stubProvider{response: `{"nodes":[{"kind":"fact","statement":"filed away","status":"accepted","subgraph_ids":[]}]}`}
+	graph := ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask}},
+	}
+	messages := []Message{
+		{Role: RoleUser, Content: "old work"},
+		{Role: RoleAssistant, Content: "noted"},
+	}
 	gotGraph, tail, err := CompactHistory(
 		context.Background(),
 		provider,
@@ -266,18 +287,108 @@ func TestCompactHistorySkipsWhenNoSubgraphs(t *testing.T) {
 		messages,
 		nil,
 		0,
+		"agent-a",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if provider.calls != 0 {
-		t.Fatalf("model calls = %d, want 0", provider.calls)
+	if provider.calls != 1 {
+		t.Fatalf("model calls = %d, want 1", provider.calls)
 	}
-	if len(gotGraph.Nodes) != 0 {
-		t.Fatalf("nodes = %#v, want none", gotGraph.Nodes)
+	if len(tail) != 0 {
+		t.Fatalf("tail = %#v, want empty after keep=0", tail)
 	}
-	if len(tail) != 1 || tail[0].Content != "keep me" {
-		t.Fatalf("tail = %#v, want original messages", tail)
+	if len(gotGraph.Nodes) != 1 || gotGraph.Nodes[0].Statement != "filed away" {
+		t.Fatalf("nodes = %#v, want compacted node", gotGraph.Nodes)
+	}
+	if len(gotGraph.Nodes[0].SubgraphIDs) != 0 {
+		t.Fatalf("membership = %v, want empty", gotGraph.Nodes[0].SubgraphIDs)
+	}
+	if nodes := gotGraph.NodesInSubgraphs([]string{"sg-a"}); len(nodes) != 0 {
+		t.Fatalf("unsubscribed window saw compacted node: %#v", nodes)
+	}
+}
+
+func TestCompactHistoryPromptListsAllSubgraphsAndOnlySubscribedMemory(t *testing.T) {
+	t.Parallel()
+
+	provider := &stubProvider{response: `{"nodes":[]}`}
+	graph := ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{
+			{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask, Name: "mine"},
+			{ID: "sg-b", Kind: ctxgraph.SubgraphKindGeneral, Name: "other"},
+		},
+		Nodes: []ctxgraph.Node{
+			{ID: "keep", Statement: "visible fact", SubgraphIDs: []string{"sg-a"}},
+			{ID: "hide", Statement: "secret other", SubgraphIDs: []string{"sg-b"}},
+		},
+	}
+	_, _, err := CompactHistory(
+		context.Background(),
+		provider,
+		graph,
+		[]Message{
+			{Role: RoleUser, Content: "old work"},
+			{Role: RoleAssistant, Content: "noted"},
+		},
+		[]string{"sg-a"},
+		0,
+		"agent-a",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := provider.last.Messages[0].Content
+	if !strings.Contains(payload, "sg-b") {
+		t.Fatalf("payload = %q, want all subgraphs in catalog", payload)
+	}
+	if !strings.Contains(payload, "visible fact") {
+		t.Fatalf("payload = %q, want subscribed memory", payload)
+	}
+	if strings.Contains(payload, "secret other") {
+		t.Fatal("organize prompt leaked unsubscribed node statement")
+	}
+}
+
+func TestCompactHistoryLinksCreatorChainNotForeignNodes(t *testing.T) {
+	t.Parallel()
+
+	provider := &stubProvider{response: `{"nodes":[{"kind":"fact","statement":"from a","status":"accepted","subgraph_ids":["sg-a"]}]}`}
+	graph := ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask}},
+		Nodes: []ctxgraph.Node{
+			{ID: "other", Statement: "from b", CreatorAgentID: "agent-b", SubgraphIDs: []string{"sg-a"}},
+			{ID: "mine", Statement: "earlier a", CreatorAgentID: "agent-a", SubgraphIDs: []string{"sg-a"}},
+		},
+	}
+	gotGraph, _, err := CompactHistory(
+		context.Background(),
+		provider,
+		graph,
+		[]Message{
+			{Role: RoleUser, Content: "old work"},
+			{Role: RoleAssistant, Content: "noted"},
+		},
+		[]string{"sg-a"},
+		0,
+		"agent-a",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created ctxgraph.Node
+	for _, node := range gotGraph.Nodes {
+		if node.Statement == "from a" {
+			created = node
+			break
+		}
+	}
+	if created.ID == "" {
+		t.Fatal("missing compacted node")
+	}
+	upstream := gotGraph.UpstreamNodes(created.ID)
+	if len(upstream) != 1 || upstream[0].ID != "mine" {
+		t.Fatalf("previous node = %#v, want mine", upstream)
 	}
 }
 
@@ -292,6 +403,7 @@ func TestCompactHistoryReturnsProviderError(t *testing.T) {
 		[]Message{{Role: RoleUser, Content: "x"}},
 		[]string{"sg-a"},
 		0,
+		"",
 	)
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("error = %v, want organizing memory wrapping boom", err)
@@ -337,6 +449,7 @@ func TestCompactHistoryRetriesInvalidJSONWithReminder(t *testing.T) {
 		},
 		[]string{"sg-a"},
 		1,
+		"agent-a",
 	)
 	if err != nil {
 		t.Fatal(err)

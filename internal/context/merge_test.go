@@ -280,6 +280,59 @@ func TestStoreMergeSkipsIdenticalNode(t *testing.T) {
 	}
 }
 
+func TestStoreMergeUnionsIndependentSubgraphs(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	store.Save("parent", Graph{
+		Subgraphs: []Subgraph{{ID: "sg"}},
+		Nodes: []Node{{
+			ID:          "mem-1",
+			Statement:   "shared",
+			SubgraphIDs: []string{"sg"},
+		}},
+	})
+	store.Fork("parent", "child")
+
+	child := store.Load("child")
+	child.Subgraphs = append(child.Subgraphs, Subgraph{ID: "sg-b"})
+	child.Nodes[0].SubgraphIDs = []string{"sg", "sg-b"}
+	store.Save("child", child)
+
+	parent := store.Load("parent")
+	parent.Subgraphs = append(parent.Subgraphs, Subgraph{ID: "sg-a"})
+	parent.Nodes[0].SubgraphIDs = []string{"sg", "sg-a"}
+	store.Save("parent", parent)
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	got := store.Load("parent")
+	node, ok := got.nodeByID("mem-1")
+	if !ok {
+		t.Fatal("mem-1 missing after Merge")
+	}
+	if node.Statement != "shared" {
+		t.Fatalf("Statement = %q, want shared", node.Statement)
+	}
+	if !containsID(node.SubgraphIDs, "sg") ||
+		!containsID(node.SubgraphIDs, "sg-a") ||
+		!containsID(node.SubgraphIDs, "sg-b") {
+		t.Fatalf("SubgraphIDs = %#v, want sg ∪ sg-a ∪ sg-b", node.SubgraphIDs)
+	}
+	if !subgraphExists(got, "sg-b") {
+		t.Fatalf("subgraphs = %#v, want sg-b", got.Subgraphs)
+	}
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("replay Merge: %v", err)
+	}
+	again, _ := store.Load("parent").nodeByID("mem-1")
+	if len(again.SubgraphIDs) != len(node.SubgraphIDs) {
+		t.Fatalf("replay duplicated membership: first=%#v second=%#v", node.SubgraphIDs, again.SubgraphIDs)
+	}
+}
+
 func hasStatement(g Graph, statement string) bool {
 	_, ok := nodeByStatement(g, statement)
 	return ok

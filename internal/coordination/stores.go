@@ -14,13 +14,16 @@ type Stores struct {
 }
 
 // Fork 把父环境复制到子环境；Files 为空时只 fork 记忆。
-func (s Stores) Fork(parentID, childID string) {
+func (s Stores) Fork(parentID, childID string) error {
 	if s.Memory != nil {
 		s.Memory.Fork(parentID, childID)
 	}
 	if s.Files != nil {
-		s.Files.Fork(parentID, childID)
+		if err := s.Files.Fork(parentID, childID); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // Merge 把 from 环境合入 into。

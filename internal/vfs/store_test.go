@@ -130,7 +130,7 @@ func TestStoreForkIsolatesChildWritesAndInheritsReads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	child := store.View("child")
 
 	gotBase, err := child.Read("hello.txt")
@@ -184,14 +184,140 @@ func TestStoreForkDoesNotOverwriteExistingChild(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store.Fork("parent", "child")
-
+	mustFork(t, store, "parent", "child")
 	got, err := store.View("child").Read("kept.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(got) != "existing" {
 		t.Fatalf("child kept.txt = %q, want existing", got)
+	}
+}
+
+func TestStoreForkIsFrozenSnapshot(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	parent := store.View("parent")
+	if err := parent.Write("initial.txt", []byte("init")); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Write("mod.txt", []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+
+	mustFork(t, store, "parent", "child")
+	child := store.View("child")
+
+	// Parent modifies state after fork.
+	if err := parent.Write("parent-after.txt", []byte("after")); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Write("mod.txt", []byte("v2")); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Delete("initial.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Child must see the snapshot at fork time.
+	gotInit, err := child.Read("initial.txt")
+	if err != nil {
+		t.Fatalf("child failed to read initial.txt: %v", err)
+	}
+	if string(gotInit) != "init" {
+		t.Fatalf("child initial.txt = %q, want init", gotInit)
+	}
+
+	gotMod, err := child.Read("mod.txt")
+	if err != nil {
+		t.Fatalf("child failed to read mod.txt: %v", err)
+	}
+	if string(gotMod) != "v1" {
+		t.Fatalf("child mod.txt = %q, want v1 (saw parent's post-fork modification)", gotMod)
+	}
+
+	if _, err := child.Read("parent-after.txt"); err == nil {
+		t.Fatal("child saw parent's post-fork file parent-after.txt")
+	}
+	if _, err := child.Stat("parent-after.txt"); err == nil {
+		t.Fatal("child stat saw parent's post-fork file parent-after.txt")
+	}
+
+	ents, err := child.List(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make(map[string]bool)
+	for _, e := range ents {
+		names[e.Name] = true
+	}
+	if names["parent-after.txt"] {
+		t.Fatal("child list included parent-after.txt")
+	}
+	if !names["initial.txt"] {
+		t.Fatal("child list missing initial.txt")
+	}
+	if !names["mod.txt"] {
+		t.Fatal("child list missing mod.txt")
+	}
+}
+
+func TestStoreForkNestedIsFrozenSnapshot(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	gp := store.View("gp")
+	if err := gp.Write("gp.txt", []byte("g1")); err != nil {
+		t.Fatal(err)
+	}
+
+	mustFork(t, store, "gp", "parent")
+	parent := store.View("parent")
+	if err := parent.Write("parent.txt", []byte("p1")); err != nil {
+		t.Fatal(err)
+	}
+
+	mustFork(t, store, "parent", "child")
+	child := store.View("child")
+
+	// Post-fork mutations to gp and parent.
+	if err := gp.Write("gp.txt", []byte("g2")); err != nil {
+		t.Fatal(err)
+	}
+	if err := gp.Write("gp-after.txt", []byte("gafter")); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Write("parent.txt", []byte("p2")); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Write("parent-after.txt", []byte("pafter")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Child verifies isolated frozen chain.
+	gotGP, err := child.Read("gp.txt")
+	if err != nil || string(gotGP) != "g1" {
+		t.Fatalf("child gp.txt = %q (err %v), want g1", gotGP, err)
+	}
+	gotP, err := child.Read("parent.txt")
+	if err != nil || string(gotP) != "p1" {
+		t.Fatalf("child parent.txt = %q (err %v), want p1", gotP, err)
+	}
+	if _, err := child.Read("gp-after.txt"); err == nil {
+		t.Fatal("child saw gp-after.txt")
+	}
+	if _, err := child.Read("parent-after.txt"); err == nil {
+		t.Fatal("child saw parent-after.txt")
+	}
+
+	// Parent verifies isolated frozen chain.
+	parentGP, err := parent.Read("gp.txt")
+	if err != nil || string(parentGP) != "g1" {
+		t.Fatalf("parent gp.txt = %q (err %v), want g1", parentGP, err)
+	}
+	if _, err := parent.Read("gp-after.txt"); err == nil {
+		t.Fatal("parent saw gp-after.txt")
 	}
 }
 
@@ -203,7 +329,7 @@ func TestStoreMergeAppliesChildWriteAndKeepsParentWrite(t *testing.T) {
 	if err := parent.Write("only-parent.txt", []byte("parent-only")); err != nil {
 		t.Fatal(err)
 	}
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	child := store.View("child")
 	if err := child.Write("only-child.txt", []byte("child-only")); err != nil {
 		t.Fatal(err)
@@ -240,7 +366,7 @@ func TestStoreMergeAppliesChildTombstone(t *testing.T) {
 	if err := parent.Write("from-parent.txt", []byte("parent-blob")); err != nil {
 		t.Fatal(err)
 	}
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	child := store.View("child")
 	if err := child.Delete("hello.txt"); err != nil {
 		t.Fatal(err)
@@ -273,7 +399,7 @@ func TestStoreMergeConflictsWhenBothSidesWrote(t *testing.T) {
 
 	store, _ := newTestStore(t)
 	parent := store.View("parent")
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	if err := parent.Write("conflict.txt", []byte("ours")); err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +445,7 @@ func TestStoreMergeReplayDoesNotError(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	if err := store.View("child").Write("from-child.txt", []byte("only-child")); err != nil {
 		t.Fatal(err)
 	}
@@ -348,8 +474,8 @@ func TestStoreMergeConflictsWhenGrandparentChangedAfterNestedFork(t *testing.T) 
 	if err := gp.Write("shared.txt", []byte("A")); err != nil {
 		t.Fatal(err)
 	}
-	store.Fork("gp", "parent")
-	store.Fork("parent", "child")
+	mustFork(t, store, "gp", "parent")
+	mustFork(t, store, "parent", "child")
 	if err := gp.Write("shared.txt", []byte("B")); err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +507,7 @@ func TestStoreMergeAppliesChildWriteUnderParentDirTombstone(t *testing.T) {
 	if err := parent.Delete("dir"); err != nil {
 		t.Fatal(err)
 	}
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	if err := store.View("child").Write("dir/new.txt", []byte("recreated")); err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +546,7 @@ func TestStoreMergeRecreateDirKeepsMaskedHostDescendantsHidden(t *testing.T) {
 	if err := parent.Delete("sub"); err != nil {
 		t.Fatal(err)
 	}
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	if err := store.View("child").Write("sub/new.txt", []byte("recreated")); err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +581,7 @@ func TestStoreMergeOverlappingDirTombstoneAndChildWriteIsDeterministic(t *testin
 	if err := parent.Delete("sub"); err != nil {
 		t.Fatal(err)
 	}
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	child := store.View("child")
 	if err := child.Write("sub/x.txt", []byte("kept")); err != nil {
 		t.Fatal(err)
@@ -487,7 +613,7 @@ func TestStoreMergeConflictsWhenChildDeletesDirOverChangedDescendant(t *testing.
 	if err := parent.Write("dir/file.txt", []byte("A")); err != nil {
 		t.Fatal(err)
 	}
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	if err := parent.Write("dir/file.txt", []byte("B")); err != nil {
 		t.Fatal(err)
 	}
@@ -519,7 +645,7 @@ func TestStoreMergeChildDirTombstoneHidesUnchangedDescendant(t *testing.T) {
 	if err := parent.Write("dir/file.txt", []byte("A")); err != nil {
 		t.Fatal(err)
 	}
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	if err := store.View("child").Delete("dir"); err != nil {
 		t.Fatal(err)
 	}
@@ -540,7 +666,7 @@ func TestStoreMergeConflictsWhenMatchingDirTombstoneHidesTargetDescendant(t *tes
 
 	store, _ := newTestStore(t)
 	parent := store.View("parent")
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	if err := parent.Delete("dir"); err != nil {
 		t.Fatal(err)
 	}
@@ -572,7 +698,7 @@ func TestStoreMergeConflictsWhenTargetReplacesTombstonedDirWithFile(t *testing.T
 	if err := parent.Delete("dir"); err != nil {
 		t.Fatal(err)
 	}
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	if err := parent.Write("dir", []byte("now-a-file")); err != nil {
 		t.Fatal(err)
 	}
@@ -601,7 +727,7 @@ func TestStoreMergeConflictsWhenMaskingFileChangedUnderChildWrite(t *testing.T) 
 	if err := parent.Write("dir", []byte("A")); err != nil {
 		t.Fatal(err)
 	}
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	if err := parent.Write("dir", []byte("B")); err != nil {
 		t.Fatal(err)
 	}
@@ -630,7 +756,7 @@ func TestStoreMergeConflictsWhenChildWritesUnderLiveFile(t *testing.T) {
 	if err := parent.Write("dir", []byte("A")); err != nil {
 		t.Fatal(err)
 	}
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	if err := store.View("child").Write("dir/x.txt", []byte("from-child")); err != nil {
 		t.Fatal(err)
 	}
@@ -656,7 +782,7 @@ func TestStoreMergeChildFileAtDirHidesTargetDescendant(t *testing.T) {
 	if err := parent.Write("dir/x.txt", []byte("from-parent")); err != nil {
 		t.Fatal(err)
 	}
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	if err := store.View("child").Write("dir", []byte("now-a-file")); err != nil {
 		t.Fatal(err)
 	}
@@ -687,7 +813,7 @@ func TestStoreMergeRepeatedDirTombstoneHidesBaselineDescendant(t *testing.T) {
 	if err := parent.Write("dir/x.txt", []byte("recreated")); err != nil {
 		t.Fatal(err)
 	}
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	if err := store.View("child").Delete("dir"); err != nil {
 		t.Fatal(err)
 	}
@@ -704,7 +830,7 @@ func TestStoreMergeConflictsWhenChildHasFileAndDescendant(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	child := store.View("child")
 	if err := child.Write("dir", []byte("file")); err != nil {
 		t.Fatal(err)
@@ -722,11 +848,11 @@ func TestStoreMergeChildDeleteIntoGrandparentWithoutFileIsOK(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	store.Fork("gp", "parent")
+	mustFork(t, store, "gp", "parent")
 	if err := store.View("parent").Write("temporary.txt", []byte("A")); err != nil {
 		t.Fatal(err)
 	}
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	if err := store.View("child").Delete("temporary.txt"); err != nil {
 		t.Fatal(err)
 	}
@@ -747,8 +873,8 @@ func TestStoreMergeConflictsWhenGrandparentChangedDirDescendantAfterNestedFork(t
 	if err := gp.Write("dir/file.txt", []byte("A")); err != nil {
 		t.Fatal(err)
 	}
-	store.Fork("gp", "parent")
-	store.Fork("parent", "child")
+	mustFork(t, store, "gp", "parent")
+	mustFork(t, store, "parent", "child")
 	if err := gp.Write("dir/file.txt", []byte("B")); err != nil {
 		t.Fatal(err)
 	}
@@ -773,7 +899,7 @@ func TestStoreMergeEmptyIntoIsNoop(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	if err := store.View("child").Write("from-child.txt", []byte("only-child")); err != nil {
 		t.Fatal(err)
 	}
@@ -851,7 +977,7 @@ func TestViewChildDirTombstoneHidesParentOverlayChildren(t *testing.T) {
 	if err := store.View("parent").Write("dir/old.txt", []byte("from-parent")); err != nil {
 		t.Fatal(err)
 	}
-	store.Fork("parent", "child")
+	mustFork(t, store, "parent", "child")
 	child := store.View("child")
 	if err := child.Delete("dir"); err != nil {
 		t.Fatal(err)
@@ -992,6 +1118,13 @@ func newTestStore(t *testing.T) (*Store, string) {
 	mustWriteFile(t, filepath.Join(dir, "hello.txt"), "hello")
 	mustWriteFile(t, filepath.Join(dir, "sub", "nested.txt"), "nested")
 	return NewStore(dir), dir
+}
+
+func mustFork(t *testing.T, s *Store, parentID, childID string) {
+	t.Helper()
+	if err := s.Fork(parentID, childID); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func mustWriteFile(t *testing.T, path, body string) {

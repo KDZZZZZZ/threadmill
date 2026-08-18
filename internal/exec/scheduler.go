@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/KDZZZZZZ/threadmill/internal/env"
@@ -24,7 +26,6 @@ type sandboxKind int
 const (
 	sandboxNone sandboxKind = iota
 	sandboxBwrap
-	sandboxLandlock
 )
 
 // Config 是执行调度器的槽位、超时和输出上限。
@@ -41,6 +42,9 @@ type Scheduler struct {
 	outputCap int
 	sandbox   sandboxKind
 	run       func(context.Context, string, env.Cmd) (env.ExecResult, error)
+
+	mu     sync.Mutex
+	groups map[string][]int
 }
 
 // New 创建调度器。Slots <= 0 时用 runtime.NumCPU()。
@@ -68,9 +72,6 @@ func New(cfg Config) *Scheduler {
 func probeSandbox() sandboxKind {
 	if probeBwrap() {
 		return sandboxBwrap
-	}
-	if probeLandlock() {
-		return sandboxLandlock
 	}
 	return sandboxNone
 }
@@ -119,17 +120,35 @@ func (v execView) Run(ctx context.Context, spec env.Cmd) (env.ExecResult, error)
 	if v.sched.run != nil {
 		return v.sched.run(ctx, live, spec)
 	}
-	return v.sched.runSandboxed(ctx, live, spec.Command)
+	return v.sched.runSandboxed(ctx, live, spec.Command, v.envID)
 }
 
-func (s *Scheduler) runSandboxed(ctx context.Context, live, command string) (env.ExecResult, error) {
-	switch s.sandbox {
-	case sandboxBwrap:
-		return runBwrap(ctx, live, command, s.outputCap)
-	case sandboxLandlock:
-		return runLandlock(ctx, live, command, s.outputCap)
-	default:
+func (s *Scheduler) runSandboxed(ctx context.Context, live, command, envID string) (env.ExecResult, error) {
+	if s.sandbox != sandboxBwrap {
 		return env.ExecResult{}, ErrSandboxUnavailable
+	}
+	return runBwrap(ctx, live, command, s.outputCap, func(pgid int) {
+		s.track(envID, pgid)
+	})
+}
+
+func (s *Scheduler) track(envID string, pgid int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.groups == nil {
+		s.groups = map[string][]int{}
+	}
+	s.groups[envID] = append(s.groups[envID], pgid)
+}
+
+// Reap 杀掉该 env 里仍活着的命令进程组。在 task 结束时调用。
+func (s *Scheduler) Reap(envID string) {
+	s.mu.Lock()
+	pgids := s.groups[envID]
+	delete(s.groups, envID)
+	s.mu.Unlock()
+	for _, pgid := range pgids {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	}
 }
 

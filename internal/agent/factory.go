@@ -489,6 +489,24 @@ func validatePluginNames(role, field string, names []string, known map[string]st
 	return nil
 }
 
+// ValidateToolCatalog 拒绝未知或重复的顶层 tools 名。
+func ValidateToolCatalog(names []string) error {
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(name) != name {
+			return fmt.Errorf("tools must not contain an empty or padded name")
+		}
+		if _, ok := knownFileTools[name]; !ok {
+			return fmt.Errorf("tools: unknown %q", name)
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("tools: duplicate %q", name)
+		}
+		seen[name] = struct{}{}
+	}
+	return nil
+}
+
 func installNamedPlugins(
 	loop *Loop,
 	toolNames []string,

@@ -131,7 +131,11 @@ func (l *Loop) executeToolCall(ctx context.Context, call agenttool.Call) (agentt
 			return result, l.hooks.afterTool(ctx, call, result)
 		}
 
-		output, err := registered.Execute(l.withTranscript(ctx), cloneCall(call))
+		toolCtx := ctx
+		if toolHidden(registered) {
+			toolCtx = l.withTranscript(ctx)
+		}
+		output, err := registered.Execute(toolCtx, cloneCall(call))
 		if err != nil {
 			result.Content = err.Error()
 			result.IsError = true

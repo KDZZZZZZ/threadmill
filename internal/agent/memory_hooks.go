@@ -18,7 +18,7 @@ func InjectSubscribedMemory(loop *Loop) AssembleRequestHook {
 	}
 }
 
-// CompactOnOverflow 在用量超过上下文窗口时把旧消息整理进订阅子图。
+// CompactOnOverflow 在用量超过上下文窗口时把旧消息整理进记忆图。
 func CompactOnOverflow(loop *Loop) AfterAssistantHook {
 	return func(ctx context.Context, message AssistantMessage) error {
 		if !ShouldCompact(message.Usage, loop.contextWindow) {

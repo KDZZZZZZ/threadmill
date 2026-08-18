@@ -29,6 +29,7 @@ var ErrInvalidConfig = errors.New("provider: invalid config")
 // FileConfig 是 threadmill.yaml 的顶层结构。
 type FileConfig struct {
 	LLM    LLMConfig        `yaml:"llm"`
+	Tools  []string         `yaml:"tools"`
 	Agents agent.FileAgents `yaml:"agents"`
 	Exec   ExecConfig       `yaml:"exec"`
 }
@@ -75,6 +76,9 @@ func LoadConfig(root string) (FileConfig, error) {
 	}
 	if err := config.LLM.validate(); err != nil {
 		return FileConfig{}, err
+	}
+	if err := agent.ValidateToolCatalog(config.Tools); err != nil {
+		return FileConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
 	if err := config.Agents.Validate(); err != nil {
 		return FileConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)

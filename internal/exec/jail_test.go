@@ -17,7 +17,7 @@ func TestBashCwdStaysInsideLiveDir(t *testing.T) {
 
 	s := New(Config{Slots: 1})
 	if s.sandbox == sandboxNone {
-		t.Skip("no bwrap or landlock sandbox on this host")
+		t.Skip("no bwrap sandbox on this host")
 	}
 
 	files := vfs.NewStore(t.TempDir())
@@ -51,7 +51,7 @@ func TestBashCwdStaysInsideLiveDir(t *testing.T) {
 func TestSandboxHidesHostSecrets(t *testing.T) {
 	s := New(Config{Slots: 1})
 	if s.sandbox == sandboxNone {
-		t.Skip("no bwrap or landlock sandbox on this host")
+		t.Skip("no bwrap sandbox on this host")
 	}
 
 	t.Setenv("OPENCODE_API_KEY", "secret-from-host")
@@ -70,7 +70,7 @@ func TestSandboxHidesHostSecrets(t *testing.T) {
 func TestSandboxReapsBackgroundJobs(t *testing.T) {
 	s := New(Config{Slots: 1})
 	if s.sandbox == sandboxNone {
-		t.Skip("no bwrap or landlock sandbox on this host")
+		t.Skip("no bwrap sandbox on this host")
 	}
 
 	files := vfs.NewStore(t.TempDir())
@@ -83,12 +83,13 @@ func TestSandboxReapsBackgroundJobs(t *testing.T) {
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("background sleep held the exec slot")
 	}
+	s.Reap("env-a")
 }
 
 func TestSandboxHasWritableTmp(t *testing.T) {
 	s := New(Config{Slots: 1})
 	if s.sandbox == sandboxNone {
-		t.Skip("no bwrap or landlock sandbox on this host")
+		t.Skip("no bwrap sandbox on this host")
 	}
 
 	files := vfs.NewStore(t.TempDir())

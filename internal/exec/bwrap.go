@@ -36,7 +36,7 @@ func probeBwrap() bool {
 	return cmd.Run() == nil
 }
 
-func runBwrap(ctx context.Context, live, command string, capBytes int) (env.ExecResult, error) {
+func runBwrap(ctx context.Context, live, command string, capBytes int, track func(int)) (env.ExecResult, error) {
 	args := bashArgs(command)
 	cmd := osexec.CommandContext(
 		ctx,
@@ -57,5 +57,5 @@ func runBwrap(ctx context.Context, live, command string, capBytes int) (env.Exec
 		args[0], args[1], args[2],
 	)
 	cmd.Env = sandboxEnv("/", "/tmp")
-	return collect(ctx, cmd, capBytes)
+	return collect(ctx, cmd, capBytes, track)
 }

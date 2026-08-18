@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -89,5 +91,39 @@ func TestSchedulerUnavailableSandbox(t *testing.T) {
 	}
 	if err != nil && !strings.Contains(err.Error(), "SANDBOX_UNAVAILABLE") {
 		t.Fatalf("error %v missing SANDBOX_UNAVAILABLE", err)
+	}
+}
+
+func TestSchedulerReapKillsTrackedProcessGroup(t *testing.T) {
+	t.Parallel()
+
+	cmd := osexec.Command("bash", "-c", "sleep 30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := cmd.Process.Pid
+	s := New(Config{Slots: 1})
+	s.track("env-a", pgid)
+	s.Reap("env-a")
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("sleep still running after Reap")
+	}
+	if err := syscall.Kill(-pgid, 0); err == nil {
+		t.Fatal("process group still alive after Reap")
+	}
+}
+
+func TestSchedulerWithoutBwrapDoesNotRun(t *testing.T) {
+	t.Parallel()
+	if probeBwrap() {
+		t.Skip("bwrap available")
+	}
+
+	s := New(Config{Slots: 1})
+	files := vfs.NewStore(t.TempDir())
+	_, err := s.View("env-a", files).Run(context.Background(), env.Cmd{Command: "true"})
+	if !errors.Is(err, ErrSandboxUnavailable) {
+		t.Fatalf("Run error = %v, want ErrSandboxUnavailable", err)
 	}
 }

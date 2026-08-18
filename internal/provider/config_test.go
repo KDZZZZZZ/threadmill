@@ -237,6 +237,77 @@ agents:
 	}
 }
 
+func TestLoadConfigReadsToolCatalog(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  api_key_env: TEST_OPENAI_API_KEY
+  model: gpt-5
+tools:
+  - organize_subgraph
+  - read
+  - write
+  - edit
+  - ls
+  - grep
+  - find
+  - bash
+  - memory_neighbors
+  - memory_subgraphs_of
+  - memory_sources_of
+  - memory_nodes_in
+  - memory_add_to_subgraph
+  - memory_drop_from_context
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"organize_subgraph",
+		"read",
+		"write",
+		"edit",
+		"ls",
+		"grep",
+		"find",
+		"bash",
+		"memory_neighbors",
+		"memory_subgraphs_of",
+		"memory_sources_of",
+		"memory_nodes_in",
+		"memory_add_to_subgraph",
+		"memory_drop_from_context",
+	}
+	if !reflect.DeepEqual(got.Tools, want) {
+		t.Fatalf("tools = %v, want %v", got.Tools, want)
+	}
+}
+
+func TestLoadConfigRejectsUnknownCatalogTool(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY
+  model: gpt-5
+tools:
+  - not_a_tool
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadConfig(root); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig() error = %v, want ErrInvalidConfig", err)
+	}
+}
+
 func TestLoadConfigRejectsUnknownAgentTool(t *testing.T) {
 	root := t.TempDir()
 	content := []byte(`llm:

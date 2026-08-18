@@ -331,7 +331,7 @@ func TestRoleAgentsUseMemoryHooksAndRolePrompt(t *testing.T) {
 func TestNewPlannerBindAllowsAsk(t *testing.T) {
 	resetDefaultStore(t)
 	loop, err := NewPlanner(Config{
-		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+		Provider: ignoreOrganize(func(context.Context, Request) (AssistantMessage, error) {
 			return AssistantMessage{Content: "done"}, nil
 		}),
 	})

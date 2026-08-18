@@ -27,6 +27,9 @@ const (
 // ErrUnknownNode 表示 spawn 的起始点或合入点不在图中。
 var ErrUnknownNode = errors.New("coordination: unknown node")
 
+// ErrJoinCycle 表示 spawn/join 会在 Ask 前形成开始依赖环，或 join 跨了任务树。
+var ErrJoinCycle = errors.New("coordination: join cycle")
+
 var defaultGraph = newGraph()
 
 // Default 返回全局协调图单例。
@@ -112,6 +115,7 @@ func (g *Graph) AddTask() Task {
 
 // Spawn 从已有角色节点拉出新 task，并在合入点接回。
 // 新 task 仍是 planner → executor → verifier；from 连到其 planner，其 verifier 连到 join。
+// join 与 from 必须同属一棵任务树，且 start/ask 依赖不能成环（含 Spawn(x, x)），否则返回 ErrJoinCycle。
 func (g *Graph) Spawn(from, join string) (Task, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -119,8 +123,13 @@ func (g *Graph) Spawn(from, join string) (Task, error) {
 	if !ok {
 		return Task{}, fmt.Errorf("%w: %q", ErrUnknownNode, from)
 	}
-	if _, ok := g.nodeByIDLocked(join); !ok {
+	joinNode, ok := g.nodeByIDLocked(join)
+	if !ok {
 		return Task{}, fmt.Errorf("%w: %q", ErrUnknownNode, join)
+	}
+	if g.treeRootLocked(fromNode.TaskID) != g.treeRootLocked(joinNode.TaskID) ||
+		g.reachesStartAskLocked(join+"/start", from+"/ask") {
+		return Task{}, fmt.Errorf("%w: %q -> %q", ErrJoinCycle, from, join)
 	}
 	parent, ok := g.taskByIDLocked(fromNode.TaskID)
 	if !ok {
@@ -354,6 +363,65 @@ func (g *Graph) nodeByIDLocked(id string) (Node, bool) {
 		}
 	}
 	return Node{}, false
+}
+
+func (g *Graph) treeRootLocked(taskID string) string {
+	id := taskID
+	seen := make(map[string]struct{})
+	for id != "" {
+		if _, dup := seen[id]; dup {
+			return id
+		}
+		seen[id] = struct{}{}
+		task, ok := g.taskByIDLocked(id)
+		if !ok {
+			return id
+		}
+		parent := g.spawnedFromLocked(task)
+		if parent == "" {
+			return id
+		}
+		id = parent
+	}
+	return id
+}
+
+func (g *Graph) reachesStartAskLocked(start, goal string) bool {
+	if start == "" || goal == "" {
+		return false
+	}
+	adj := make(map[string][]string)
+	add := func(from, to string) {
+		adj[from] = append(adj[from], to)
+	}
+	for _, task := range g.tasks {
+		for _, node := range task.Sequence() {
+			add(node.ID+"/start", node.ID+"/ask")
+		}
+	}
+	for _, edge := range g.edges {
+		add(edge.From+"/ask", edge.To+"/start")
+	}
+	if start == goal {
+		return true
+	}
+	seen := map[string]struct{}{start: {}}
+	queue := []string{start}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, next := range adj[cur] {
+			if next == goal {
+				return true
+			}
+			if _, ok := seen[next]; ok {
+				continue
+			}
+			seen[next] = struct{}{}
+			queue = append(queue, next)
+		}
+	}
+	return false
 }
 
 func (g *Graph) decorateLocked(task Task) Task {

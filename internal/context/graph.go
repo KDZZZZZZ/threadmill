@@ -101,6 +101,20 @@ func (g Graph) NodesInSubgraphs(subgraphIDs []string) []Node {
 	return nodes
 }
 
+// LastNodeOfCreator 返回该创建者在图中按 Nodes 顺序的最后一个节点。
+// agentID 为空或没有匹配节点时 ok 为 false。
+func (g Graph) LastNodeOfCreator(agentID string) (Node, bool) {
+	if agentID == "" {
+		return Node{}, false
+	}
+	for i := len(g.Nodes) - 1; i >= 0; i-- {
+		if g.Nodes[i].CreatorAgentID == agentID {
+			return cloneNode(g.Nodes[i]), true
+		}
+	}
+	return Node{}, false
+}
+
 // SubgraphsOf 返回节点正式归属的子图 ID。
 // 归属写在 Node.SubgraphIDs 上，与来源子图无关；节点不存在时返回空切片。
 func (g Graph) SubgraphsOf(nodeID string) []string {

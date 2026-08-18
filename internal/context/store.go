@@ -87,8 +87,9 @@ func (s *Store) Fork(parentID, childID string) {
 	s.baselines[childID] = parent.Clone()
 }
 
-// Merge 把 from 相对其 Fork 基线的增量并入 into。纯加法：同 ID 同陈述跳过；
-// 同 ID 不同陈述则保留 into、给 from 的节点换新 ID 并重写边引用。缺图当空图。
+// Merge 把 from 相对其 Fork 基线的增量并入 into。同 ID 同陈述则并集 SubgraphIDs
+//（加入 A 与加入 B 互不影响）；同 ID 不同陈述则保留 into、给 from 换新 ID 并重写边。
+// 缺图当空图。
 func (s *Store) Merge(from, into string) error {
 	if into == "" {
 		return nil
@@ -134,13 +135,21 @@ func mergeAdditive(fromID string, base, ours, theirs Graph) Graph {
 		}
 		seen[node.ID] = struct{}{}
 
+		oursNode, oursOK := result.nodeByID(node.ID)
+		if oursOK && oursNode.Statement == node.Statement {
+			for i := range result.Nodes {
+				if result.Nodes[i].ID != node.ID {
+					continue
+				}
+				result.Nodes[i].SubgraphIDs = unionIDs(result.Nodes[i].SubgraphIDs, node.SubgraphIDs)
+				break
+			}
+			continue
+		}
 		if baseNode, ok := base.nodeByID(node.ID); ok && baseNode.Statement == node.Statement {
 			continue
 		}
-		if oursNode, ok := result.nodeByID(node.ID); ok {
-			if oursNode.Statement == node.Statement {
-				continue
-			}
+		if oursOK {
 			newID, existed := collisionNodeID(fromID, node, result, used)
 			remap[node.ID] = newID
 			if existed {
@@ -196,6 +205,17 @@ func collisionNodeID(fromID string, node Node, result Graph, used map[string]str
 		}
 		return id, false
 	}
+}
+
+func unionIDs(dst, extra []string) []string {
+	out := append([]string(nil), dst...)
+	for _, id := range extra {
+		if id == "" || containsID(out, id) {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 func rewriteEdge(edge Edge, remap map[string]string) Edge {

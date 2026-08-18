@@ -57,6 +57,11 @@ func TestGraphAddTaskHasExactlyThreeRolesInOrder(t *testing.T) {
 func TestGraphSpawnFromAnyRoleAndJoinToAnyRole(t *testing.T) {
 	t.Parallel()
 
+	order := map[string]int{
+		RolePlanner:  0,
+		RoleExecutor: 1,
+		RoleVerifier: 2,
+	}
 	roles := []string{RolePlanner, RoleExecutor, RoleVerifier}
 	for _, fromRole := range roles {
 		for _, joinRole := range roles {
@@ -69,6 +74,15 @@ func TestGraphSpawnFromAnyRoleAndJoinToAnyRole(t *testing.T) {
 				join := nodeByRole(parent, joinRole)
 
 				child, err := graph.Spawn(from.ID, join.ID)
+				if order[joinRole] <= order[fromRole] {
+					if !errors.Is(err, ErrJoinCycle) {
+						t.Fatalf("Spawn() error = %v, want %v", err, ErrJoinCycle)
+					}
+					if graph.taskCount() != 1 {
+						t.Fatalf("task count = %d, want 1 after rejected Spawn", graph.taskCount())
+					}
+					return
+				}
 				if err != nil {
 					t.Fatalf("Spawn() error = %v", err)
 				}
@@ -130,6 +144,45 @@ func TestGraphSpawnUnknownNode(t *testing.T) {
 				t.Fatalf("Spawn() error = %v, want %v", err, ErrUnknownNode)
 			}
 		})
+	}
+}
+
+func TestGraphSpawnRejectsCrossTreeJoin(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	a := graph.AddTask()
+	b := graph.AddTask()
+	_, err := graph.Spawn(a.Planner.ID, b.Verifier.ID)
+	if !errors.Is(err, ErrJoinCycle) {
+		t.Fatalf("Spawn() error = %v, want %v", err, ErrJoinCycle)
+	}
+	if graph.taskCount() != 2 {
+		t.Fatalf("task count = %d, want 2 after rejected Spawn", graph.taskCount())
+	}
+}
+
+func TestGraphSpawnAllowsSiblingJoin(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	first := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
+	second := mustSpawn(t, graph, root.Planner.ID, first.Executor.ID)
+	if !containsID(nodeIDs(graph.Downstream(second.Verifier.ID)), first.Executor.ID) {
+		t.Fatalf("sibling join missing: downstream=%v", nodeIDs(graph.Downstream(second.Verifier.ID)))
+	}
+}
+
+func TestGraphSpawnRejectsJoinBeforeSpawnSource(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
+	_, err := graph.Spawn(child.Executor.ID, root.Planner.ID)
+	if !errors.Is(err, ErrJoinCycle) {
+		t.Fatalf("Spawn() error = %v, want %v", err, ErrJoinCycle)
 	}
 }
 

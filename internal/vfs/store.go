@@ -16,7 +16,18 @@ import (
 )
 
 // ErrInvalidPath 表示路径越出工作区或不是相对路径。
-var ErrInvalidPath = errors.New("vfs: invalid path")
+var (
+	ErrInvalidPath       = errors.New("vfs: invalid path")
+	ErrSpecialFile       = errors.New("vfs: special file not supported")
+	ErrFileTooLarge      = errors.New("vfs: file too large")
+	ErrTotalSizeExceeded = errors.New("vfs: total size exceeded")
+)
+
+// Default limits for VFS absorb/file operations.
+const (
+	MaxFileSize  = 50 * 1024 * 1024  // 50 MB
+	MaxTotalSize = 200 * 1024 * 1024 // 200 MB
+)
 
 // FileInfo 是路径上的文件元数据。
 type FileInfo struct {
@@ -42,7 +53,7 @@ type layer struct {
 	baseline []map[string]blob // Fork 瞬间从父到根的 overlay 快照；nil 表示不是 Fork 出来的
 }
 
-// Store 按环境保存 overlay。Fork 只挂 parent 指针，不复制树。
+// Store 按环境保存 overlay。Fork 拍父 overlay 快照作基线，不复制 host 树。
 type Store struct {
 	mu      sync.Mutex // ponytail: one store mutex, per-env locks if throughput matters
 	baseDir string
@@ -59,28 +70,45 @@ func NewStore(baseDir string) *Store {
 	}
 }
 
-// Fork 给 child 挂上 parent 指针和空 overlay，并记下当时从父到根的 overlay 作为合入基线。
-// 子环境已存在时不覆盖，也不改基线。
-func (s *Store) Fork(parentID, childID string) {
+// Fork 先把 parent 的 live 收进 overlay，再给 child 挂上当时从父到根的 overlay 快照作基线。
+// 子环境已存在时不覆盖，也不改基线。parent 未物化则 Absorb 是空操作。
+func (s *Store) Fork(parentID, childID string) error {
 	if childID == "" {
-		return
+		return nil
+	}
+	s.mu.Lock()
+	if _, exists := s.envs[childID]; exists {
+		s.mu.Unlock()
+		return nil
+	}
+	s.mu.Unlock()
+	if err := s.Absorb(parentID); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, exists := s.envs[childID]; exists {
-		return
+		return nil
 	}
 	s.envs[childID] = &layer{
 		parentID: parentID,
 		files:    make(map[string]blob),
 		baseline: s.snapshotOverlays(parentID),
 	}
+	return nil
 }
 
 // Merge 把 from 的 overlay 增量三路并入 into。冲突失败，不改 into。
+// 合入前先把双方 live 收进 overlay。
 func (s *Store) Merge(from, into string) error {
 	if into == "" {
 		return nil
+	}
+	if err := s.Absorb(from); err != nil {
+		return err
+	}
+	if err := s.Absorb(into); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -207,19 +235,35 @@ func (s *Store) mergeBase(fromLayer *layer, parentID, rel string) content {
 }
 
 func (s *Store) snapshotOverlays(envID string) []map[string]blob {
-	out := []map[string]blob{}
-	seen := map[string]struct{}{}
-	for id := envID; id != ""; {
-		if _, loop := seen[id]; loop {
-			break
+	if envID == "" {
+		return nil
+	}
+	l, ok := s.envs[envID]
+	if !ok {
+		return []map[string]blob{}
+	}
+	out := []map[string]blob{cloneFiles(l.files)}
+	if l.baseline != nil {
+		for _, m := range l.baseline {
+			out = append(out, cloneFiles(m))
 		}
-		seen[id] = struct{}{}
-		l, ok := s.envs[id]
-		if !ok {
-			break
-		}
-		out = append(out, cloneFiles(l.files))
-		id = l.parentID
+	} else if l.parentID != "" {
+		out = append(out, s.snapshotOverlays(l.parentID)...)
+	}
+	return out
+}
+
+func (s *Store) overlayMaps(envID string) []map[string]blob {
+	l, ok := s.envs[envID]
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]blob, 0, 1+len(l.baseline))
+	out = append(out, l.files)
+	if l.baseline != nil {
+		out = append(out, l.baseline...)
+	} else if l.parentID != "" {
+		out = append(out, s.overlayMaps(l.parentID)...)
 	}
 	return out
 }
@@ -237,25 +281,7 @@ func (s *Store) lookupFrozen(chain []map[string]blob, rel string) content {
 }
 
 func (s *Store) lookupContent(envID, rel string) content {
-	seen := map[string]struct{}{}
-	for id := envID; id != ""; {
-		if _, loop := seen[id]; loop {
-			break
-		}
-		seen[id] = struct{}{}
-		l, ok := s.envs[id]
-		if !ok {
-			break
-		}
-		if b, ok := l.files[rel]; ok {
-			return overlayContent(b)
-		}
-		if c, ok := filesMask(l.files, rel); ok {
-			return c
-		}
-		id = l.parentID
-	}
-	return s.lookupHost(rel)
+	return s.lookupFrozen(s.overlayMaps(envID), rel)
 }
 
 func (s *Store) lookupHost(rel string) content {
@@ -290,8 +316,8 @@ func (s *Store) knownDescendants(into string, baseline []map[string]blob, path s
 			}
 		}
 	}
-	for _, l := range s.chain(into) {
-		add(l.files)
+	for _, files := range s.overlayMaps(into) {
+		add(files)
 	}
 	for _, files := range baseline {
 		add(files)
@@ -544,30 +570,12 @@ func (s *Store) ensure(envID string) *layer {
 	return l
 }
 
-func (s *Store) chain(envID string) []*layer {
-	var out []*layer
-	seen := map[string]struct{}{}
-	for id := envID; id != ""; {
-		if _, loop := seen[id]; loop {
-			break
-		}
-		seen[id] = struct{}{}
-		l, ok := s.envs[id]
-		if !ok {
-			break
-		}
-		out = append(out, l)
-		id = l.parentID
-	}
-	return out
-}
-
 func (s *Store) lookupBlob(envID, rel string) ([]byte, bool, bool) {
-	for _, l := range s.chain(envID) {
-		if b, ok := l.files[rel]; ok {
+	for _, files := range s.overlayMaps(envID) {
+		if b, ok := files[rel]; ok {
 			return b.data, b.tombstone, true
 		}
-		if layerMasks(l, rel) {
+		if _, ok := filesMask(files, rel); ok {
 			return nil, true, true
 		}
 	}
@@ -627,16 +635,16 @@ func (s *Store) hasOverlayChildren(envID, rel string) bool {
 }
 
 func (s *Store) applyOverlayList(envID, rel string, ents map[string]DirEnt) {
-	chain := s.chain(envID)
-	for i := len(chain) - 1; i >= 0; i-- {
-		l := chain[i]
-		if _, ok := l.files[rel]; ok {
+	maps := s.overlayMaps(envID)
+	for i := len(maps) - 1; i >= 0; i-- {
+		files := maps[i]
+		if _, ok := files[rel]; ok {
 			for name := range ents {
 				delete(ents, name)
 			}
 		}
-		applyLayerList(l.files, rel, ents, true)
-		applyLayerList(l.files, rel, ents, false)
+		applyLayerList(files, rel, ents, true)
+		applyLayerList(files, rel, ents, false)
 	}
 }
 

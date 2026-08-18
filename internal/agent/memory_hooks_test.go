@@ -158,7 +158,7 @@ func TestLoopKeepsTailWithoutCommitHook(t *testing.T) {
 func TestMemoryHooksRegistersHiddenTools(t *testing.T) {
 	resetDefaultStore(t)
 	loop, err := NewLoop(Config{
-		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+		Provider: ignoreOrganize(func(context.Context, Request) (AssistantMessage, error) {
 			return AssistantMessage{Content: "done"}, nil
 		}),
 	})

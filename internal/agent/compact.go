@@ -23,7 +23,8 @@ const OrganizePrompt = `你是记忆整理器。把一段对话整理成记忆�
 - 一条陈述只写一件事，短句，保留确切路径、名称和错误原文。
 - kind 只能是 directive（约束/偏好）、fact（已成立）、hypothesis（待验证）。
 - status 只能是 accepted、disputed、superseded、outdated。
-- subgraph_ids 只能从用户消息里给出的子图 ID 中选：按内容判断这条知识正式属于哪些子图。不知道就用当前订阅。
+- subgraph_ids 从用户消息「可选归属子图」里选已有子图 ID；按内容判断这条知识属于哪些子图。也可以不标（空数组或不写）。
+- 不要因为不知道归属就把节点写进当前订阅。
 - 不要填写来源子图；来源由当前订阅列表决定。
 - 不要重复「已有记忆」里已经有的陈述。
 - 只输出 JSON，不要 markdown，不要其它文字。
@@ -43,6 +44,8 @@ type organizeNode struct {
 }
 
 // CompactHistory 将切点之前的消息整理进记忆图，并返回保留的尾部消息。
+// subgraphIDs 是本 agent 当前订阅，只影响来源边和整理提示里的「已有记忆」；
+// 节点归属可以是图中任意已有子图，也可以为空。agentID 写入 CreatorAgentID，并用于创建者链。
 func CompactHistory(
 	ctx context.Context,
 	provider Provider,
@@ -50,11 +53,9 @@ func CompactHistory(
 	messages []Message,
 	subgraphIDs []string,
 	keepRecentTokens int,
+	agentID string,
 ) (ctxgraph.Graph, []Message, error) {
 	subgraphIDs = uniqueIDs(subgraphIDs)
-	if len(subgraphIDs) == 0 {
-		return graph.Clone(), cloneMessages(messages), nil
-	}
 
 	cut := keepRecentIndex(messages, keepRecentTokens)
 	if cut == 0 {
@@ -73,14 +74,15 @@ func CompactHistory(
 	}
 
 	previousID := ""
-	if existing := graph.NodesInSubgraphs(subgraphIDs); len(existing) > 0 {
-		previousID = existing[len(existing)-1].ID
+	if last, ok := graph.LastNodeOfCreator(agentID); ok {
+		previousID = last.ID
 	}
 	nodes, edges := nodesFromDrafts(
 		drafts,
 		subgraphIDs,
-		catalogIDs(graph, subgraphIDs),
+		allSubgraphIDs(graph),
 		previousID,
+		agentID,
 		graph.Nodes,
 	)
 	tail := cloneMessages(messages[cut:])
@@ -130,14 +132,13 @@ func organizeWithModel(
 }
 
 func buildOrganizeUserPrompt(graph ctxgraph.Graph, subgraphIDs []string, messages []Message) string {
-	catalog := catalogIDs(graph, subgraphIDs)
 	var b strings.Builder
 	b.WriteString("当前订阅：\n")
 	writeSubgraphCatalog(&b, graph, subgraphIDs)
 	b.WriteString("\n可选归属子图：\n")
-	writeSubgraphCatalog(&b, graph, catalog)
+	writeSubgraphCatalog(&b, graph, allSubgraphIDs(graph))
 	b.WriteString("\n已有记忆：\n")
-	existing := graph.NodesInSubgraphs(catalog)
+	existing := graph.NodesInSubgraphs(subgraphIDs)
 	if len(existing) == 0 {
 		b.WriteString("（无）\n")
 	}
@@ -167,8 +168,8 @@ func writeSubgraphCatalog(b *strings.Builder, graph ctxgraph.Graph, ids []string
 	}
 }
 
-func catalogIDs(graph ctxgraph.Graph, subscribed []string) []string {
-	ids := append([]string(nil), subscribed...)
+func allSubgraphIDs(graph ctxgraph.Graph) []string {
+	ids := make([]string, 0, len(graph.Subgraphs))
 	for _, subgraph := range graph.Subgraphs {
 		ids = append(ids, subgraph.ID)
 	}
@@ -206,6 +207,7 @@ func nodesFromDrafts(
 	subscribed []string,
 	allowedMemberIDs []string,
 	previousNodeID string,
+	agentID string,
 	existing []ctxgraph.Node,
 ) ([]ctxgraph.Node, []ctxgraph.Edge) {
 	allowedMembers := make(map[string]struct{}, len(allowedMemberIDs))
@@ -237,15 +239,13 @@ func nodesFromDrafts(
 			}
 			members = append(members, memberID)
 		}
-		if len(members) == 0 {
-			members = append([]string(nil), subscribed...)
-		}
 		node := ctxgraph.Node{
-			ID:          id,
-			Kind:        normalizeKind(draft.Kind),
-			Statement:   statement,
-			Status:      normalizeStatus(draft.Status),
-			SubgraphIDs: members,
+			ID:             id,
+			Kind:           normalizeKind(draft.Kind),
+			Statement:      statement,
+			Status:         normalizeStatus(draft.Status),
+			SubgraphIDs:    members,
+			CreatorAgentID: agentID,
 		}
 		nodes = append(nodes, node)
 		if prev != "" {

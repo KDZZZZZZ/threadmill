@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -50,8 +51,11 @@ func (s *Store) Materialize(envID string) (string, error) {
 	return live, nil
 }
 
-// Absorb 把 live 相对 overlay+host 的增量写回 overlay。未物化则是空操作。
+// Absorb 把 live 相对 overlay+host 的增量写回 overlay。未物化或 envID 为空则是空操作。
 func (s *Store) Absorb(envID string) error {
+	if envID == "" {
+		return nil
+	}
 	s.mu.Lock()
 	live, ok := s.lives[envID]
 	s.mu.Unlock()
@@ -89,8 +93,9 @@ func (s *Store) Absorb(envID string) error {
 	return nil
 }
 
-// Release 删掉 live 目录。未物化则是空操作。
+// Release 先把 live 收进 overlay，再删掉 live 目录。未物化则是空操作。
 func (s *Store) Release(envID string) error {
+	aerr := s.Absorb(envID)
 	s.mu.Lock()
 	live, ok := s.lives[envID]
 	if ok {
@@ -98,12 +103,12 @@ func (s *Store) Release(envID string) error {
 	}
 	s.mu.Unlock()
 	if !ok {
-		return nil
+		return aerr
 	}
 	if err := os.RemoveAll(live); err != nil {
-		return fmt.Errorf("vfs: release: %w", err)
+		return errors.Join(aerr, fmt.Errorf("vfs: release: %w", err))
 	}
-	return nil
+	return aerr
 }
 
 type overlayFile struct {
@@ -112,11 +117,11 @@ type overlayFile struct {
 }
 
 func (s *Store) overlayBlobs(envID string) []overlayFile {
-	chain := s.chain(envID)
+	maps := s.overlayMaps(envID)
 	var out []overlayFile
-	for i := len(chain) - 1; i >= 0; i-- {
+	for i := len(maps) - 1; i >= 0; i-- {
 		var tombs, writes []overlayFile
-		for path, b := range chain[i].files {
+		for path, b := range maps[i] {
 			item := overlayFile{path: path, b: cloneBlob(b)}
 			if b.tombstone {
 				tombs = append(tombs, item)
@@ -130,8 +135,15 @@ func (s *Store) overlayBlobs(envID string) []overlayFile {
 	return out
 }
 
+// walkRegularFiles 扫 live 树并读出每个文件的内容。
+// overlay 只存路径到字节（和删除标记），不跟踪 live inode。Absorb 用这份
+// 内容和 overlay+host 的可见树做比对，只把增删改写回 overlay，所以必须读字节，
+// 不能只看文件名。
+// 仅允许常规普通文件；发现 FIFO、socket、设备等特殊文件或文件/总大小超限时返回错误。
 func walkRegularFiles(root string) (map[string][]byte, error) {
 	out := map[string][]byte{}
+	var totalSize int64
+
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -146,9 +158,27 @@ func walkRegularFiles(root string) (map[string][]byte, error) {
 		if filepath.IsAbs(rel) || !filepath.IsLocal(rel) || escapesRoot(root, path) {
 			return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
 		}
-		if d.Type()&os.ModeSymlink != 0 || d.IsDir() {
+		mode := d.Type()
+		if mode&os.ModeSymlink != 0 || d.IsDir() {
 			return nil
 		}
+		// 校验是否为普通文件（非 FIFO、Socket、Device 等特殊文件）
+		if mode.Type() != 0 {
+			return fmt.Errorf("%w: %q (mode %s)", ErrSpecialFile, rel, mode.String())
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Size() > MaxFileSize {
+			return fmt.Errorf("%w: %q (%d > %d)", ErrFileTooLarge, rel, info.Size(), MaxFileSize)
+		}
+		totalSize += info.Size()
+		if totalSize > MaxTotalSize {
+			return fmt.Errorf("%w: limit %d", ErrTotalSizeExceeded, MaxTotalSize)
+		}
+
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
@@ -182,8 +212,12 @@ func (s *Store) visibleRegularFiles(envID string) (map[string][]byte, error) {
 		if filepath.IsAbs(rel) || !filepath.IsLocal(rel) || escapesRoot(base, path) {
 			return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
 		}
-		if d.Type()&os.ModeSymlink != 0 || d.IsDir() {
+		mode := d.Type()
+		if mode&os.ModeSymlink != 0 || d.IsDir() {
 			return nil
+		}
+		if mode.Type() != 0 {
+			return fmt.Errorf("%w: %q (mode %s)", ErrSpecialFile, rel, mode.String())
 		}
 		candidates[filepath.ToSlash(rel)] = struct{}{}
 		return nil
@@ -191,8 +225,8 @@ func (s *Store) visibleRegularFiles(envID string) (map[string][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, l := range s.chain(envID) {
-		for path := range l.files {
+	for _, files := range s.overlayMaps(envID) {
+		for path := range files {
 			candidates[path] = struct{}{}
 		}
 	}
@@ -222,7 +256,7 @@ func (s *Store) regularFileContent(envID, rel string) ([]byte, bool) {
 		return nil, false
 	}
 	fi, err := os.Stat(host)
-	if err != nil || fi.IsDir() {
+	if err != nil || fi.IsDir() || fi.Mode().Type() != 0 || fi.Size() > MaxFileSize {
 		return nil, false
 	}
 	b, err := os.ReadFile(host)
@@ -243,6 +277,16 @@ func readLive(live, rel string) ([]byte, error) {
 	dest, err := resolveLive(live, rel)
 	if err != nil {
 		return nil, err
+	}
+	fi, err := os.Lstat(dest)
+	if err != nil {
+		return nil, mapIOError("read", rel, err)
+	}
+	if fi.Mode().Type() != 0 {
+		return nil, fmt.Errorf("%w: %q (mode %s)", ErrSpecialFile, rel, fi.Mode().Type().String())
+	}
+	if fi.Size() > MaxFileSize {
+		return nil, fmt.Errorf("%w: %q (%d > %d)", ErrFileTooLarge, rel, fi.Size(), MaxFileSize)
 	}
 	data, err := os.ReadFile(dest)
 	if err != nil {

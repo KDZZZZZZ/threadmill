@@ -1,8 +1,11 @@
 package vfs
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -34,8 +37,8 @@ func TestMaterializeChildWriteSurvivesParentDirTombstone(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	store.Fork("", "parent")
-	store.Fork("parent", "child")
+	mustFork(t, store, "", "parent")
+	mustFork(t, store, "parent", "child")
 	if err := store.View("parent").Delete("sub"); err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +75,37 @@ func TestMaterializeAppliesOverlayWrites(t *testing.T) {
 	}
 	if string(got) != "from-overlay" {
 		t.Fatalf("live overlay.txt = %q, want from-overlay", got)
+	}
+}
+
+func TestMaterializeChildUsesFrozenSnapshot(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	if err := store.View("parent").Write("base-mod.txt", []byte("p1")); err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, store, "parent", "child")
+	if err := store.View("parent").Write("parent-after.txt", []byte("after")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.View("parent").Write("base-mod.txt", []byte("p2")); err != nil {
+		t.Fatal(err)
+	}
+
+	live, err := store.Materialize("child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(live, "base-mod.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "p1" {
+		t.Fatalf("live base-mod.txt = %q, want p1", got)
+	}
+	if _, err := os.Stat(filepath.Join(live, "parent-after.txt")); !os.IsNotExist(err) {
+		t.Fatalf("child live materialized parent's post-fork file: %v", err)
 	}
 }
 
@@ -264,8 +298,8 @@ func TestMergeUpdatesMaterializedLive(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	store.Fork("", "parent")
-	store.Fork("parent", "child")
+	mustFork(t, store, "", "parent")
+	mustFork(t, store, "parent", "child")
 	live, err := store.Materialize("parent")
 	if err != nil {
 		t.Fatal(err)
@@ -282,5 +316,195 @@ func TestMergeUpdatesMaterializedLive(t *testing.T) {
 	}
 	if string(got) != "hi" {
 		t.Fatalf("live from-child.txt = %q, want hi", got)
+	}
+}
+
+func TestForkAbsorbsParentLiveIntoChildSnapshot(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	mustFork(t, store, "", "parent")
+	live, err := store.Materialize("parent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "from-live.txt"), []byte("at-fork"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, store, "parent", "child")
+	if err := os.WriteFile(filepath.Join(live, "from-live.txt"), []byte("after-fork"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.View("child").Read("from-live.txt")
+	if err != nil {
+		t.Fatalf("child missed parent live write: %v", err)
+	}
+	if string(got) != "at-fork" {
+		t.Fatalf("child from-live.txt = %q, want at-fork", got)
+	}
+}
+
+func TestMergeAbsorbsChildLiveWrites(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	mustFork(t, store, "", "parent")
+	mustFork(t, store, "parent", "child")
+	live, err := store.Materialize("child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "from-live.txt"), []byte("from-live"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.View("parent").Read("from-live.txt")
+	if err != nil {
+		t.Fatalf("merge missed child live write: %v", err)
+	}
+	if string(got) != "from-live" {
+		t.Fatalf("parent from-live.txt = %q, want from-live", got)
+	}
+}
+
+func TestReleaseAbsorbsLiveWrites(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	live, err := store.Materialize("env-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "from-live.txt"), []byte("from-live"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Release("env-a"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.View("env-a").Read("from-live.txt")
+	if err != nil {
+		t.Fatalf("release dropped live write: %v", err)
+	}
+	if string(got) != "from-live" {
+		t.Fatalf("overlay from-live.txt = %q, want from-live", got)
+	}
+}
+
+func TestAbsorbRejectsSpecialFiles(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	live, err := store.Materialize("env-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fifo := filepath.Join(live, "pipe")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Skipf("mkfifo not supported: %v", err)
+	}
+	err = store.Absorb("env-a")
+	if err == nil || !errors.Is(err, ErrSpecialFile) {
+		t.Fatalf("Absorb error = %v, want ErrSpecialFile", err)
+	}
+}
+
+func TestAbsorbRejectsFileExceedingMaxSize(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	live, err := store.Materialize("env-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	big := filepath.Join(live, "big.bin")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(int64(MaxFileSize + 1)); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	err = store.Absorb("env-a")
+	if err == nil || !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("Absorb error = %v, want ErrFileTooLarge", err)
+	}
+}
+
+func TestAbsorbRejectsTotalSizeExceeded(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	live, err := store.Materialize("env-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 创建多个文件，单个不超限，但累加超总上限
+	const perFileSize = 40 * 1024 * 1024
+	numFiles := int((MaxTotalSize / perFileSize) + 1)
+	for i := 0; i < numFiles; i++ {
+		p := filepath.Join(live, fmt.Sprintf("chunk%d.bin", i))
+		f, err := os.Create(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Truncate(perFileSize); err != nil {
+			_ = f.Close()
+			t.Fatal(err)
+		}
+		_ = f.Close()
+	}
+
+	err = store.Absorb("env-a")
+	if err == nil || !errors.Is(err, ErrTotalSizeExceeded) {
+		t.Fatalf("Absorb error = %v, want ErrTotalSizeExceeded", err)
+	}
+}
+
+func TestFileViewReadRejectsSpecialFileInLive(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	live, err := store.Materialize("env-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fifo := filepath.Join(live, "pipe")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Skipf("mkfifo not supported: %v", err)
+	}
+	_, err = store.View("env-a").Read("pipe")
+	if err == nil || !errors.Is(err, ErrSpecialFile) {
+		t.Fatalf("Read special file error = %v, want ErrSpecialFile", err)
+	}
+}
+
+func TestFileViewReadRejectsTooLargeFileInLive(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	live, err := store.Materialize("env-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	big := filepath.Join(live, "big.bin")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(int64(MaxFileSize + 1)); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	_, err = store.View("env-a").Read("big.bin")
+	if err == nil || !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("Read large file error = %v, want ErrFileTooLarge", err)
 	}
 }

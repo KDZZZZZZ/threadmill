@@ -31,10 +31,11 @@ func ignoreOrganize(next modelFunc) modelFunc {
 func withOrganizeJSON(next modelFunc) modelFunc {
 	return func(ctx context.Context, request Request) (AssistantMessage, error) {
 		if request.SystemPrompt == OrganizePrompt {
-			body := ""
+			full := ""
 			if len(request.Messages) > 0 {
-				body = request.Messages[0].Content
+				full = request.Messages[0].Content
 			}
+			body := full
 			if i := strings.Index(body, "待整理对话："); i >= 0 {
 				body = body[i:]
 			}
@@ -47,9 +48,10 @@ func withOrganizeJSON(next modelFunc) modelFunc {
 			}
 			payload, err := json.Marshal(organizeOutput{
 				Nodes: []organizeNode{{
-					Kind:      ctxgraph.NodeKindFact,
-					Statement: statement,
-					Status:    ctxgraph.NodeStatusAccepted,
+					Kind:        ctxgraph.NodeKindFact,
+					Statement:   statement,
+					Status:      ctxgraph.NodeStatusAccepted,
+					SubgraphIDs: subscribedFromOrganizePrompt(full),
 				}},
 			})
 			if err != nil {
@@ -59,6 +61,36 @@ func withOrganizeJSON(next modelFunc) modelFunc {
 		}
 		return next(ctx, request)
 	}
+}
+
+func subscribedFromOrganizePrompt(content string) []string {
+	const header = "当前订阅：\n"
+	i := strings.Index(content, header)
+	if i < 0 {
+		return nil
+	}
+	rest := content[i+len(header):]
+	if strings.HasPrefix(strings.TrimSpace(rest), "（无）") {
+		return nil
+	}
+	ids := make([]string, 0)
+	for _, line := range strings.Split(rest, "\n") {
+		if line == "" || line == "可选归属子图：" {
+			break
+		}
+		if !strings.HasPrefix(line, "- ") {
+			continue
+		}
+		id := strings.TrimPrefix(line, "- ")
+		if j := strings.IndexByte(id, ' '); j >= 0 {
+			id = id[:j]
+		}
+		if id == "" {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 type testTool struct {
@@ -640,5 +672,61 @@ func TestLoopCommitsTailIntoMemoryWhenTurnEnds(t *testing.T) {
 	upstream := graph.UpstreamNodes(nodes[1].ID)
 	if len(upstream) != 1 || upstream[0].ID != nodes[0].ID {
 		t.Fatalf("assistant previous node = %#v", upstream)
+	}
+}
+
+func TestRegularToolDoesNotReceiveTranscriptOrProvider(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var toolReceivedTranscript bool
+	spyTool := &testTool{
+		definition: agenttool.Definition{
+			Name:        "spy",
+			Description: "Spy tool",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		execute: func(ctx context.Context, call agenttool.Call) (agenttool.Output, error) {
+			_, ok := TranscriptFromContext(ctx)
+			if ok {
+				toolReceivedTranscript = true
+			}
+			return agenttool.Output{Content: "ok"}, nil
+		},
+	}
+
+	modelCalls := 0
+	model := modelFunc(func(_ context.Context, request Request) (AssistantMessage, error) {
+		modelCalls++
+		if modelCalls == 1 {
+			return AssistantMessage{
+				ToolCalls: []agenttool.Call{{
+					ID:        "call-1",
+					Name:      "spy",
+					Arguments: json.RawMessage(`{}`),
+				}},
+			}, nil
+		}
+		cancel()
+		return AssistantMessage{Content: "done"}, nil
+	})
+
+	loop, err := NewLoop(Config{
+		Provider: model,
+		Tools:    []agenttool.Tool{spyTool},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loop.Enqueue(UserMessage{Content: "run spy tool"})
+	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+
+	if toolReceivedTranscript {
+		t.Fatal("regular tool received Transcript / Provider in context, want transcript isolated to hidden memory tools")
 	}
 }

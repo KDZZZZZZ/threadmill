@@ -20,7 +20,9 @@ func TestStoresForkCopiesMemoryAndFiles(t *testing.T) {
 	}
 
 	stores := Stores{Memory: memory, Files: files}
-	stores.Fork("parent", "child")
+	if err := stores.Fork("parent", "child"); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := memory.Load("child"); len(got.Nodes) != 1 || got.Nodes[0].Statement != "from-parent" {
 		t.Fatalf("forked memory = %#v, want from-parent", got)
@@ -83,7 +85,9 @@ func TestStoresMergeUnionsChildFiles(t *testing.T) {
 	t.Parallel()
 
 	files := vfs.NewStore(t.TempDir())
-	files.Fork("parent", "child")
+	if err := files.Fork("parent", "child"); err != nil {
+		t.Fatal(err)
+	}
 	if err := files.View("child").Write("from-child.txt", []byte("from-child")); err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +113,9 @@ func TestStoresMergeFileConflictDoesNotApplyMemory(t *testing.T) {
 		Nodes: []ctxgraph.Node{{ID: "c1", Statement: "from-child"}},
 	})
 	files := vfs.NewStore(t.TempDir())
-	files.Fork("parent", "child")
+	if err := files.Fork("parent", "child"); err != nil {
+		t.Fatal(err)
+	}
 	if err := files.View("parent").Write("conflict.txt", []byte("ours")); err != nil {
 		t.Fatal(err)
 	}

@@ -76,6 +76,33 @@ func TestGraphNodesInSubgraphs(t *testing.T) {
 	}
 }
 
+func TestGraphLastNodeOfCreator(t *testing.T) {
+	t.Parallel()
+
+	graph := Graph{
+		Nodes: []Node{
+			{ID: "a1", CreatorAgentID: "agent-a", Statement: "first"},
+			{ID: "b1", CreatorAgentID: "agent-b", Statement: "other"},
+			{ID: "a2", CreatorAgentID: "agent-a", Statement: "second"},
+		},
+	}
+
+	got, ok := graph.LastNodeOfCreator("agent-a")
+	if !ok || got.ID != "a2" {
+		t.Fatalf("LastNodeOfCreator(agent-a) = %#v, %v, want a2", got, ok)
+	}
+	got, ok = graph.LastNodeOfCreator("agent-b")
+	if !ok || got.ID != "b1" {
+		t.Fatalf("LastNodeOfCreator(agent-b) = %#v, %v, want b1", got, ok)
+	}
+	if _, ok = graph.LastNodeOfCreator("missing"); ok {
+		t.Fatal("LastNodeOfCreator(missing) ok, want false")
+	}
+	if _, ok = graph.LastNodeOfCreator(""); ok {
+		t.Fatal("LastNodeOfCreator empty id ok, want false")
+	}
+}
+
 func TestGraphSubgraphsOf(t *testing.T) {
 	t.Parallel()
 
