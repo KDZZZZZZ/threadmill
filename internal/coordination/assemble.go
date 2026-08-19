@@ -9,6 +9,8 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
+const managerEnvID = "manager"
+
 // Asker 执行一个角色的 ReAct 循环。
 type Asker interface {
 	Ask(ctx context.Context, query string) (string, error)
@@ -33,28 +35,24 @@ func Assemble(
 	extra []agenttool.Tool,
 	contextWindow int,
 	checkpoints agent.CheckpointStore,
+	overlay ...agent.FileOverlay,
 ) AssembleFunc {
 	return func(task Task) (Roles, error) {
-		if stores.Memory == nil {
-			return Roles{}, ErrNilStore
+		e, err := openEnv(stores, task.Env.ID)
+		if err != nil {
+			return Roles{}, err
 		}
 		team, err := agent.NewTeam(
 			provider,
 			contextWindow,
 			agents,
 			extra,
+			overlay...,
 		)
 		if err != nil {
 			return Roles{}, err
 		}
 		team.BindCheckpoints(checkpoints, task.ID)
-		e := env.Open(task.Env.ID, stores.Memory.View(task.Env.ID))
-		if stores.Files != nil {
-			e = e.WithFiles(filesView{view: stores.Files.View(task.Env.ID)})
-		}
-		if stores.Exec != nil && stores.Files != nil {
-			e = e.WithExec(stores.Exec.View(task.Env.ID, stores.Files))
-		}
 		if err := team.Bind(e); err != nil {
 			return Roles{}, err
 		}
@@ -64,6 +62,48 @@ func Assemble(
 			Verifier: team.Verifier,
 		}, nil
 	}
+}
+
+// NewManagerLoop 装配长命的经理 Agent，装上本图的协调图工具，并绑到独立的 manager 环境。
+func NewManagerLoop(
+	graph *Graph,
+	stores Stores,
+	provider agent.Provider,
+	agents agent.FileAgents,
+	extra []agenttool.Tool,
+	contextWindow int,
+	overlay agent.FileOverlay,
+) (*agent.Loop, error) {
+	overlay.NamedTools = GraphToolMap(graph)
+	loop, err := agent.NewManager(provider, contextWindow, agents, extra, overlay)
+	if err != nil {
+		return nil, err
+	}
+	if err := loop.AddHooks(InjectCoordinationGraph(graph)); err != nil {
+		return nil, err
+	}
+	e, err := openEnv(stores, managerEnvID)
+	if err != nil {
+		return nil, err
+	}
+	if err := loop.Bind(e); err != nil {
+		return nil, err
+	}
+	return loop, nil
+}
+
+func openEnv(stores Stores, envID string) (env.Env, error) {
+	if stores.Memory == nil {
+		return env.Env{}, ErrNilStore
+	}
+	e := env.Open(envID, stores.Memory.View(envID))
+	if stores.Files != nil {
+		e = e.WithFiles(filesView{view: stores.Files.View(envID)})
+	}
+	if stores.Exec != nil && stores.Files != nil {
+		e = e.WithExec(stores.Exec.View(envID, stores.Files))
+	}
+	return e, nil
 }
 
 func (r Roles) asker(role string) Asker {

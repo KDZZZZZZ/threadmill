@@ -20,11 +20,13 @@ type hidden interface {
 
 // Transcript 是隐藏记忆工具执行时需要的对话快照；由 Loop/Hook 注入 context。
 type Transcript struct {
-	Messages      []Message
-	Subscribed    []string
-	Provider      Provider
-	ContextWindow int
-	AgentID       string
+	Messages            []Message
+	Subscribed          []string
+	Provider            Provider
+	ContextWindow       int
+	AgentID             string
+	CompactPrompt       string
+	CompactJSONReminder string
 }
 
 type transcriptKey struct{}
@@ -188,11 +190,13 @@ func (l *Loop) snapshotTranscript() Transcript {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return Transcript{
-		Messages:      cloneMessages(l.messages),
-		Subscribed:    append([]string(nil), l.subscribedSubgraphs...),
-		Provider:      l.provider,
-		ContextWindow: l.contextWindow,
-		AgentID:       l.agentID,
+		Messages:            cloneMessages(l.messages),
+		Subscribed:          append([]string(nil), l.subscribedSubgraphs...),
+		Provider:            l.provider,
+		ContextWindow:       l.contextWindow,
+		AgentID:             l.agentID,
+		CompactPrompt:       l.compactPrompt,
+		CompactJSONReminder: l.compactJSONReminder,
 	}
 }
 

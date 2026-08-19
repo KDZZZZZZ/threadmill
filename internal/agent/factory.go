@@ -13,19 +13,6 @@ import (
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
-// DefaultSystemPrompt 是 Agent 默认使用的系统提示词。
-const DefaultSystemPrompt = `你是 Threadmill，一个通过 ReAct 循环完成任务的 AI Agent。
-
-根据用户请求决定下一步行动。需要读取信息或执行操作时，调用可用工具；不要编造工具结果。收到工具结果后继续处理，直到可以直接回答用户。`
-
-// SubgraphOrganizerPrompt 是根据查询整理对应记忆子图的系统提示词。
-const SubgraphOrganizerPrompt = `你是记忆子图整理 Agent。根据用户查询，使用记忆图工具找出相关节点，并把它们加入用户消息指定的目标子图。
-
-规则：
-- 只使用工具返回的节点 ID，不要编造。
-- 用 memory_add_to_subgraph 把选中节点加入目标子图 ID，不要更换 ID。
-- 完成后用简短文字确认即可。`
-
 const subgraphOrganizerID = "subgraph-organizer"
 const organizeSubgraphToolName = "organize_subgraph"
 
@@ -45,6 +32,8 @@ const (
 	fileFindToolName  = "find"
 	bashToolName      = "bash"
 
+	coordReplacePendingToolName = "coordination.replacePending"
+
 	hookInjectSubscribedMemory      = "inject_subscribed_memory"
 	hookCompactOnOverflow           = "compact_on_overflow"
 	hookCommitTailOnTurnEnd         = "commit_tail_on_turn_end"
@@ -55,31 +44,8 @@ const (
 	plannerID  = "planner"
 	executorID = "executor"
 	verifierID = "verifier"
+	managerID  = "manager"
 )
-
-// PlannerPrompt 是规划 Agent 的系统提示词。
-const PlannerPrompt = `你是规划 Agent。根据用户目标和订阅记忆，产出可执行的分步计划。
-
-规则：
-- 只规划，不要执行计划中的操作。
-- 每一步具体、可独立执行，按合理顺序排列。
-- 不要编造工具结果；需要读信息时才调用可用工具。`
-
-// ExecutorPrompt 是执行 Agent 的系统提示词。
-const ExecutorPrompt = `你是执行 Agent。按给定计划逐步完成当前任务。
-
-规则：
-- 严格按计划执行，不要擅自改写目标。
-- 需要操作时调用可用工具；不要编造工具结果。
-- 完成后用简短文字报告这一步的结果。`
-
-// VerifierPrompt 是核验 Agent 的系统提示词。
-const VerifierPrompt = `你是核验 Agent。根据目标、计划和执行结果，判断任务是否完成。
-
-规则：
-- 只核验，不要继续执行计划，不要改写计划。
-- 明确给出通过或不通过，并列出依据。
-- 不要编造未出现在记忆或对话里的事实。`
 
 var nextQuerySubgraphID atomic.Uint64
 
@@ -98,6 +64,7 @@ var knownFileTools = map[string]struct{}{
 	fileGrepToolName:              {},
 	fileFindToolName:              {},
 	bashToolName:                  {},
+	coordReplacePendingToolName:   {},
 }
 
 var knownFileHooks = map[string]struct{}{
@@ -105,6 +72,10 @@ var knownFileHooks = map[string]struct{}{
 	hookCompactOnOverflow:           {},
 	hookCommitTailOnTurnEnd:         {},
 	hookRemindDropContextOnPressure: {},
+}
+
+var managerOnlyTools = map[string]struct{}{
+	coordReplacePendingToolName: {},
 }
 
 // FileAgent 是 threadmill.yaml 里单个 Agent 的配置。
@@ -116,8 +87,33 @@ type FileAgent struct {
 	Hooks        []string `yaml:"hooks"`
 }
 
-// FileAgents 是 threadmill.yaml 里四个内置 Agent 的配置。
+// FileTool 是 threadmill.yaml 里一条工具介绍，发给模型的 Description。
+type FileTool struct {
+	Description string `yaml:"description"`
+}
+
+// FileToolCatalog 是顶层 tools 名到介绍的映射。
+type FileToolCatalog map[string]FileTool
+
+// FilePrompts 是 threadmill.yaml 里发给模型的提示词。空字段不覆盖。
+type FilePrompts struct {
+	Default             string `yaml:"default"`
+	Compact             string `yaml:"compact"`
+	CompactJSONReminder string `yaml:"compact_json_reminder"`
+	DropContextPressure string `yaml:"drop_context_pressure"`
+	OrganizeQuery       string `yaml:"organize_query"`
+}
+
+// FileOverlay 把 yaml 的 tools/prompts 盖到装配出的 Agent 上。
+type FileOverlay struct {
+	Tools      FileToolCatalog
+	Prompts    FilePrompts
+	NamedTools map[string]agenttool.Tool
+}
+
+// FileAgents 是 threadmill.yaml 里内置 Agent 的配置。
 type FileAgents struct {
+	Manager           FileAgent `yaml:"manager"`
 	Planner           FileAgent `yaml:"planner"`
 	Executor          FileAgent `yaml:"executor"`
 	Verifier          FileAgent `yaml:"verifier"`
@@ -138,6 +134,7 @@ func (agents FileAgents) Validate() error {
 		name string
 		role FileAgent
 	}{
+		{"manager", agents.Manager},
 		{"planner", agents.Planner},
 		{"executor", agents.Executor},
 		{"verifier", agents.Verifier},
@@ -163,6 +160,32 @@ func (role FileAgent) validate(name string) error {
 	if err := validatePluginNames(name, "hooks", role.Hooks, knownFileHooks); err != nil {
 		return err
 	}
+	if name == "manager" {
+		return nil
+	}
+	for _, tool := range role.Tools {
+		if _, ok := managerOnlyTools[tool]; ok {
+			return fmt.Errorf("agents.%s.tools: %q is manager-only", name, tool)
+		}
+	}
+	return nil
+}
+
+func (p FilePrompts) Validate() error {
+	for _, item := range []struct {
+		name  string
+		value string
+	}{
+		{"prompts.default", p.Default},
+		{"prompts.compact", p.Compact},
+		{"prompts.compact_json_reminder", p.CompactJSONReminder},
+		{"prompts.drop_context_pressure", p.DropContextPressure},
+		{"prompts.organize_query", p.OrganizeQuery},
+	} {
+		if strings.TrimSpace(item.value) != item.value {
+			return fmt.Errorf("%s must not have surrounding whitespace", item.name)
+		}
+	}
 	return nil
 }
 
@@ -174,16 +197,6 @@ func (role FileAgent) loopConfig(provider Provider, tools []agenttool.Tool) Conf
 		MaxSteps:     role.MaxSteps,
 		SystemPrompt: role.SystemPrompt,
 	}
-}
-
-// agentConfig 是 Factory 在 Run 前确定的静态 Agent 配置。
-type agentConfig struct {
-	systemPrompt string
-}
-
-// newAgentConfig 创建当前 Agent 的静态配置快照。
-func newAgentConfig() agentConfig {
-	return agentConfig{systemPrompt: DefaultSystemPrompt}
 }
 
 type requesterBinder interface {
@@ -207,9 +220,6 @@ func NewSubgraphOrganizer(config Config) (*Loop, error) {
 	if config.AgentID == "" {
 		config.AgentID = subgraphOrganizerID
 	}
-	if config.SystemPrompt == "" {
-		config.SystemPrompt = SubgraphOrganizerPrompt
-	}
 
 	loop, err := NewLoop(config)
 	if err != nil {
@@ -230,32 +240,17 @@ func NewSubgraphOrganizer(config Config) (*Loop, error) {
 
 // NewPlanner 创建规划 Agent，挂上记忆 hook，并注册向子图整理 Agent 发 query 的工具。
 func NewPlanner(config Config) (*Loop, error) {
-	return newMemoryLoop(
-		config,
-		plannerID,
-		PlannerPrompt,
-		nil,
-	)
+	return newMemoryLoop(config, plannerID, nil)
 }
 
 // NewExecutor 创建执行 Agent，挂上记忆 hook，并注册向子图整理 Agent 发 query 的工具。
 func NewExecutor(config Config) (*Loop, error) {
-	return newMemoryLoop(
-		config,
-		executorID,
-		ExecutorPrompt,
-		nil,
-	)
+	return newMemoryLoop(config, executorID, nil)
 }
 
 // NewVerifier 创建核验 Agent，挂上记忆 hook，并注册向子图整理 Agent 发 query 的工具。
 func NewVerifier(config Config) (*Loop, error) {
-	return newMemoryLoop(
-		config,
-		verifierID,
-		VerifierPrompt,
-		nil,
-	)
+	return newMemoryLoop(config, verifierID, nil)
 }
 
 // NewTeam 按 yaml 配置装配四个 Agent，上下文窗口来自模型，规划/执行/核验共用同一个整理 Agent。
@@ -264,10 +259,12 @@ func NewTeam(
 	contextWindow int,
 	agents FileAgents,
 	extra []agenttool.Tool,
+	overlay ...FileOverlay,
 ) (*Team, error) {
 	if err := agents.Validate(); err != nil {
 		return nil, err
 	}
+	o := firstOverlay(overlay)
 
 	organizerCfg := agents.SubgraphOrganizer.loopConfig(provider, nil)
 	organizerCfg.ContextWindow = contextWindow
@@ -275,8 +272,8 @@ func NewTeam(
 		organizerCfg,
 		agents.SubgraphOrganizer,
 		subgraphOrganizerID,
-		SubgraphOrganizerPrompt,
 		nil,
+		o,
 	)
 	if err != nil {
 		return nil, err
@@ -288,8 +285,8 @@ func NewTeam(
 		plannerCfg,
 		agents.Planner,
 		plannerID,
-		PlannerPrompt,
 		organizer,
+		o,
 	)
 	if err != nil {
 		return nil, err
@@ -301,8 +298,8 @@ func NewTeam(
 		executorCfg,
 		agents.Executor,
 		executorID,
-		ExecutorPrompt,
 		organizer,
+		o,
 	)
 	if err != nil {
 		return nil, err
@@ -314,8 +311,8 @@ func NewTeam(
 		verifierCfg,
 		agents.Verifier,
 		verifierID,
-		VerifierPrompt,
 		organizer,
+		o,
 	)
 	if err != nil {
 		return nil, err
@@ -327,6 +324,41 @@ func NewTeam(
 		Verifier:  verifier,
 		Organizer: organizer,
 	}, nil
+}
+
+// NewManager 装配对接用户的经理 Agent；协调图工具通过 overlay.NamedTools 注入。
+func NewManager(
+	provider Provider,
+	contextWindow int,
+	agents FileAgents,
+	extra []agenttool.Tool,
+	overlay ...FileOverlay,
+) (*Loop, error) {
+	if err := agents.Validate(); err != nil {
+		return nil, err
+	}
+	o := firstOverlay(overlay)
+	organizerCfg := agents.SubgraphOrganizer.loopConfig(provider, nil)
+	organizerCfg.ContextWindow = contextWindow
+	organizer, err := newFileLoop(
+		organizerCfg,
+		agents.SubgraphOrganizer,
+		subgraphOrganizerID,
+		nil,
+		o,
+	)
+	if err != nil {
+		return nil, err
+	}
+	managerCfg := agents.Manager.loopConfig(provider, extra)
+	managerCfg.ContextWindow = contextWindow
+	return newFileLoop(
+		managerCfg,
+		agents.Manager,
+		managerID,
+		organizer,
+		o,
+	)
 }
 
 // BindCheckpoints 把进行中 ReAct 快照绑到 task 角色 ID 上，避免多个 task 互相覆盖。
@@ -346,12 +378,9 @@ func (t *Team) BindCheckpoints(store CheckpointStore, taskID string) {
 	bind(t.Organizer, subgraphOrganizerID)
 }
 
-func withFileDefaults(config Config, defaultID, defaultPrompt string) Config {
+func withFileID(config Config, defaultID string) Config {
 	if config.AgentID == "" {
 		config.AgentID = defaultID
-	}
-	if config.SystemPrompt == "" {
-		config.SystemPrompt = defaultPrompt
 	}
 	return config
 }
@@ -379,8 +408,7 @@ func bindLoopTools(loop *Loop, e env.Env) error {
 		return nil
 	}
 	loop.mu.Lock()
-	if tool, ok := loop.tools[organizeSubgraphToolName].(*organizeSubgraphTool); ok && tool.organizer != nil {
-		organizer := tool.organizer
+	if organizer := organizerFromTool(loop.tools[organizeSubgraphToolName]); organizer != nil {
 		loop.mu.Unlock()
 		if err := bindLoopTools(organizer, e); err != nil {
 			return err
@@ -455,16 +483,22 @@ func newFileLoop(
 	config Config,
 	file FileAgent,
 	defaultID string,
-	defaultPrompt string,
 	organizer *Loop,
+	overlay FileOverlay,
 ) (*Loop, error) {
-	config = withFileDefaults(config, defaultID, defaultPrompt)
+	config = withFileID(config, defaultID)
+	if config.SystemPrompt == "" {
+		config.SystemPrompt = overlay.Prompts.Default
+	}
 	loop, err := NewLoop(config)
 	if err != nil {
 		return nil, err
 	}
-	if err := installNamedPlugins(loop, file.Tools, file.Hooks, organizer); err != nil {
+	if err := installNamedPlugins(loop, file.Tools, file.Hooks, organizer, overlay.NamedTools); err != nil {
 		return nil, fmt.Errorf("install %s plugins: %w", loop.agentID, err)
+	}
+	if err := applyFileOverlay(loop, overlay); err != nil {
+		return nil, err
 	}
 	return loop, nil
 }
@@ -489,22 +523,30 @@ func validatePluginNames(role, field string, names []string, known map[string]st
 	return nil
 }
 
-// ValidateToolCatalog 拒绝未知或重复的顶层 tools 名。
-func ValidateToolCatalog(names []string) error {
-	seen := make(map[string]struct{}, len(names))
-	for _, name := range names {
+// ValidateToolCatalog 拒绝未知工具名，以及缺介绍或介绍带首尾空白。
+func ValidateToolCatalog(catalog FileToolCatalog) error {
+	for name, spec := range catalog {
 		if strings.TrimSpace(name) == "" || strings.TrimSpace(name) != name {
 			return fmt.Errorf("tools must not contain an empty or padded name")
 		}
-		if _, ok := knownFileTools[name]; !ok {
+		if !knownCatalogTool(name) {
 			return fmt.Errorf("tools: unknown %q", name)
 		}
-		if _, dup := seen[name]; dup {
-			return fmt.Errorf("tools: duplicate %q", name)
+		if strings.TrimSpace(spec.Description) == "" {
+			return fmt.Errorf("tools.%s.description is required", name)
 		}
-		seen[name] = struct{}{}
+		if strings.TrimSpace(spec.Description) != spec.Description {
+			return fmt.Errorf("tools.%s.description must not have surrounding whitespace", name)
+		}
 	}
 	return nil
+}
+
+func knownCatalogTool(name string) bool {
+	if _, ok := knownFileTools[name]; ok {
+		return true
+	}
+	return name == compactMemoryToolName || name == injectSubscribedMemoryToolName
 }
 
 func installNamedPlugins(
@@ -512,13 +554,14 @@ func installNamedPlugins(
 	toolNames []string,
 	hookNames []string,
 	organizer *Loop,
+	named map[string]agenttool.Tool,
 ) error {
 	if len(toolNames) > 0 {
-		named, err := toolsFromNames(toolNames, loop, organizer)
+		listed, err := toolsFromNames(toolNames, loop, organizer, named)
 		if err != nil {
 			return err
 		}
-		if err := registerTools(loop, named); err != nil {
+		if err := registerTools(loop, listed); err != nil {
 			return err
 		}
 		bindRequesters(loop, loop.tools)
@@ -538,11 +581,16 @@ func toolsFromNames(
 	names []string,
 	loop *Loop,
 	organizer *Loop,
+	named map[string]agenttool.Tool,
 ) ([]agenttool.Tool, error) {
 	var memory map[string]agenttool.Tool
 	var files map[string]agenttool.Tool
 	out := make([]agenttool.Tool, 0, len(names))
 	for _, name := range names {
+		if tool, ok := named[name]; ok && tool != nil {
+			out = append(out, tool)
+			continue
+		}
 		switch name {
 		case organizeSubgraphToolName:
 			if organizer == nil {
@@ -636,13 +684,8 @@ func hooksFromNames(names []string, loop *Loop) (Hooks, []agenttool.Tool, error)
 	return hooks, hidden, nil
 }
 
-func newMemoryLoop(config Config, defaultID, prompt string, organizer *Loop) (*Loop, error) {
-	if config.AgentID == "" {
-		config.AgentID = defaultID
-	}
-	if config.SystemPrompt == "" {
-		config.SystemPrompt = prompt
-	}
+func newMemoryLoop(config Config, defaultID string, organizer *Loop) (*Loop, error) {
+	config = withFileID(config, defaultID)
 	if organizer == nil {
 		var err error
 		organizer, err = NewSubgraphOrganizer(Config{
@@ -735,7 +778,12 @@ func (t *organizeSubgraphTool) Execute(ctx context.Context, call agenttool.Call)
 	graph := t.memory.Snapshot().WithSubgraph(subgraph)
 	t.memory.Commit(graph)
 
-	if _, err := t.organizer.Ask(ctx, organizeQuery(query, subgraph.ID, t.memory.Snapshot())); err != nil {
+	if _, err := t.organizer.Ask(ctx, organizeQuery(
+		query,
+		subgraph.ID,
+		t.memory.Snapshot(),
+		t.organizer.organizeQueryText(),
+	)); err != nil {
 		return agenttool.Output{}, err
 	}
 
@@ -753,9 +801,9 @@ func (t *organizeSubgraphTool) Execute(ctx context.Context, call agenttool.Call)
 	return agenttool.Output{Content: string(payload)}, nil
 }
 
-func organizeQuery(query, subgraphID string, graph ctxgraph.Graph) string {
+func organizeQuery(query, subgraphID string, graph ctxgraph.Graph, instruction string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n\n目标子图 ID：%s\n请把相关节点加入这个子图，不要更换 ID。查询字符串不是节点 ID。\n", query, subgraphID)
+	fmt.Fprintf(&b, "%s\n\n目标子图 ID：%s\n%s\n", query, subgraphID, instruction)
 	b.WriteString("\n已有子图：\n")
 	if len(graph.Subgraphs) == 0 {
 		b.WriteString("（无）\n")

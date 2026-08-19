@@ -15,6 +15,7 @@ func TestBindMemoryToolsStayInTheirEnv(t *testing.T) {
 
 	store := ctxgraph.NewStore()
 	graph := ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{ID: "secret"}},
 		Nodes: []ctxgraph.Node{{
 			ID:          "n1",
 			Kind:        ctxgraph.NodeKindFact,
@@ -56,6 +57,7 @@ func TestBindReplacesGlobalMemoryTools(t *testing.T) {
 
 	store := ctxgraph.NewStore()
 	store.Save("env-1", ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{ID: "bound"}},
 		Nodes: []ctxgraph.Node{{
 			ID:          "n1",
 			Kind:        ctxgraph.NodeKindFact,
@@ -139,6 +141,7 @@ func TestBindEnvIsolatesMemoryViews(t *testing.T) {
 	t.Parallel()
 
 	graph := ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{ID: "secret"}},
 		Nodes: []ctxgraph.Node{{
 			ID:          "n1",
 			Kind:        ctxgraph.NodeKindFact,
@@ -170,6 +173,7 @@ func TestBindEnvRebindsAlreadyBoundTools(t *testing.T) {
 	t.Parallel()
 
 	graph := ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{ID: "secret"}},
 		Nodes: []ctxgraph.Node{{
 			ID:          "n1",
 			Kind:        ctxgraph.NodeKindFact,

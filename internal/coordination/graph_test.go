@@ -569,6 +569,78 @@ func (g *Graph) taskCount() int {
 	return len(g.tasks)
 }
 
+func TestGraphUnspawnRemovesUnusedSubtree(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
+	grand := mustSpawn(t, graph, child.Executor.ID, root.Verifier.ID)
+
+	removed, err := graph.Unspawn(child.ID)
+	if err != nil {
+		t.Fatalf("Unspawn() error = %v", err)
+	}
+	if !containsID(removed, child.ID) || !containsID(removed, grand.ID) {
+		t.Fatalf("removed = %v, want %s and %s", removed, child.ID, grand.ID)
+	}
+	if _, ok := graph.Task(child.ID); ok {
+		t.Fatal("child still on graph")
+	}
+	if _, ok := graph.Task(grand.ID); ok {
+		t.Fatal("grandchild still on graph")
+	}
+	parent, ok := graph.Task(root.ID)
+	if !ok {
+		t.Fatal("root missing")
+	}
+	if got := parent.JoinedBy; !reflect.DeepEqual(got, []string{}) {
+		t.Fatalf("root.JoinedBy = %v, want empty", got)
+	}
+	if graph.taskCount() != 1 {
+		t.Fatalf("task count = %d, want 1", graph.taskCount())
+	}
+}
+
+func TestGraphUnspawnRejectsRoot(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	_, err := graph.Unspawn(root.ID)
+	if !errors.Is(err, ErrUnspawnRoot) {
+		t.Fatalf("Unspawn() error = %v, want %v", err, ErrUnspawnRoot)
+	}
+}
+
+func TestGraphUnspawnUnknownTask(t *testing.T) {
+	t.Parallel()
+
+	_, err := newGraph().Unspawn("missing")
+	if !errors.Is(err, ErrUnknownTask) {
+		t.Fatalf("Unspawn() error = %v, want %v", err, ErrUnknownTask)
+	}
+}
+
+func TestGraphSpawnAfterUnspawnRejoins(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
+	if _, err := graph.Unspawn(child.ID); err != nil {
+		t.Fatal(err)
+	}
+	again := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
+	parent, ok := graph.Task(root.ID)
+	if !ok {
+		t.Fatal("root missing")
+	}
+	if !reflect.DeepEqual(parent.JoinedBy, []string{again.ID}) {
+		t.Fatalf("JoinedBy = %v, want [%s]", parent.JoinedBy, again.ID)
+	}
+}
+
 func dumpMermaid(g *Graph) string {
 	g.mu.Lock()
 	defer g.mu.Unlock()

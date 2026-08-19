@@ -300,6 +300,7 @@ func seedMemoryCopy() ctxgraph.Copy {
 	return ctxgraph.Copy{
 		AgentID: "test",
 		Graph: ctxgraph.Graph{
+			Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a"}, {ID: "sg-b"}},
 			Nodes: []ctxgraph.Node{
 				{ID: "n0", Kind: ctxgraph.NodeKindFact, Statement: "zero", Status: ctxgraph.NodeStatusAccepted, SubgraphIDs: []string{"sg-a"}},
 				{ID: "n1", Kind: ctxgraph.NodeKindFact, Statement: "one", Status: ctxgraph.NodeStatusAccepted, SubgraphIDs: []string{"sg-a"}},

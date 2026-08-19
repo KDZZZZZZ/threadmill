@@ -13,6 +13,11 @@ import (
 
 const defaultMaxSteps = 512
 
+// DefaultSystemPrompt 是未配置 SystemPrompt 时 Loop 使用的系统提示词。
+const DefaultSystemPrompt = `你是 Threadmill，一个通过 ReAct 循环完成任务的 AI Agent。
+
+根据用户请求决定下一步行动。需要读取信息或执行操作时，调用可用工具；不要编造工具结果。收到工具结果后继续处理，直到可以直接回答用户。`
+
 var nextAgentID atomic.Uint64
 
 var (
@@ -25,6 +30,15 @@ var (
 	// ErrMaxSteps 表示单次 ReAct 迭代超过了模型调用上限。
 	ErrMaxSteps = errors.New("agent: maximum react steps exceeded")
 )
+
+// agentConfig 是 Loop 在 Run 前确定的静态 Agent 配置。
+type agentConfig struct {
+	systemPrompt string
+}
+
+func newAgentConfig() agentConfig {
+	return agentConfig{systemPrompt: DefaultSystemPrompt}
+}
 
 // Provider 生成下一条助手消息；具体实现负责 LLM 协议与鉴权。
 type Provider interface {
@@ -55,15 +69,20 @@ type Loop struct {
 	wake          chan struct{}
 	checkpoints   CheckpointStore
 
-	mu                  sync.Mutex
-	queue               []UserMessage
-	messages            []Message
-	usedToolCallIDs     map[string]struct{}
-	subscribedSubgraphs []string
-	agentID             string
-	running             bool
-	turnCancel          context.CancelFunc
-	turnPreempted       bool
+	mu                       sync.Mutex
+	queue                    []UserMessage
+	messages                 []Message
+	usedToolCallIDs          map[string]struct{}
+	subscribedSubgraphs      []string
+	agentID                  string
+	running                  bool
+	compactPrompt            string
+	compactJSONReminder      string
+	dropContextReminder      string
+	organizeQueryInstruction string
+	reactCommitted           bool
+	turnCancel               context.CancelFunc
+	turnPreempted            bool
 }
 
 // NewLoop 校验并复制配置，创建一个尚未运行的 ReAct 循环。
@@ -211,11 +230,24 @@ func (l *Loop) Run(ctx context.Context) (runErr error) {
 
 // runTurn 对一条用户消息执行“模型生成—工具执行—结果回填”的 ReAct 循环。
 func (l *Loop) runTurn(ctx context.Context, input UserMessage) (string, error) {
+	l.mu.Lock()
+	l.reactCommitted = false
+	l.mu.Unlock()
 	return l.runReact(ctx, input, false)
 }
 
 func (l *Loop) continueTurn(ctx context.Context) (string, error) {
+	if l.committed() {
+		return l.finishCommittedTurn()
+	}
 	return l.runReact(ctx, checkpointUser(l.Messages()), true)
+}
+
+func (l *Loop) finishCommittedTurn() (string, error) {
+	l.mu.Lock()
+	answer := lastAssistantText(l.messages)
+	l.mu.Unlock()
+	return answer, l.discardReact()
 }
 
 func (l *Loop) runReact(ctx context.Context, input UserMessage, resume bool) (string, error) {
@@ -285,10 +317,17 @@ func (l *Loop) runReact(ctx context.Context, input UserMessage, resume bool) (st
 	l.mu.Unlock()
 
 	if completed {
-		if err := l.hooks.commitTurn(ctx); err != nil {
-			turnErr = errors.Join(turnErr, err)
-		} else if err := l.discardReact(); err != nil {
-			turnErr = errors.Join(turnErr, err)
+		if !l.committed() {
+			if err := l.hooks.commitTurn(ctx); err != nil {
+				turnErr = errors.Join(turnErr, err)
+			} else if err := l.markReactCommitted(); err != nil {
+				turnErr = errors.Join(turnErr, err)
+			}
+		}
+		if turnErr == nil {
+			if err := l.discardReact(); err != nil {
+				turnErr = errors.Join(turnErr, err)
+			}
 		}
 	}
 	preempted := l.finishTurn()

@@ -47,8 +47,18 @@ func (g *Graph) Run(
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	g.mu.Lock()
+	if g.executing {
+		g.mu.Unlock()
+		return "", ErrGraphBusy
+	}
+	g.executing = true
 	progress := g.progress
 	g.mu.Unlock()
+	defer func() {
+		g.mu.Lock()
+		g.executing = false
+		g.mu.Unlock()
+	}()
 	r := &runner{
 		graph:     g,
 		stores:    stores,

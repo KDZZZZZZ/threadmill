@@ -7,6 +7,7 @@
 package coordination
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -16,6 +17,16 @@ const (
 	RolePlanner  = "planner"
 	RoleExecutor = "executor"
 	RoleVerifier = "verifier"
+)
+
+const (
+	OutcomeActive   = "active"
+	OutcomeDone     = "done"
+	OutcomeCanceled = "canceled"
+	OutcomeFailed   = "failed"
+
+	RunPolicyEnabled = "enabled"
+	RunPolicyHeld    = "held"
 )
 
 const (
@@ -29,6 +40,15 @@ var ErrUnknownNode = errors.New("coordination: unknown node")
 
 // ErrJoinCycle 表示 spawn/join 会在 Ask 前形成开始依赖环，或 join 跨了任务树。
 var ErrJoinCycle = errors.New("coordination: join cycle")
+
+// ErrGraphBusy 表示图正在 Run，不能再改拓扑。
+var ErrGraphBusy = errors.New("coordination: graph is executing")
+
+// ErrUnspawnRoot 表示不能拆掉独立根 task。
+var ErrUnspawnRoot = errors.New("coordination: cannot unspawn root task")
+
+// ErrUnknownRevision 表示请求的图 revision 不是当前 revision。
+var ErrUnknownRevision = errors.New("coordination: unknown revision")
 
 var defaultGraph = newGraph()
 
@@ -58,6 +78,8 @@ type Task struct {
 	Planner     Node
 	Executor    Node
 	Verifier    Node
+	Outcome     string   // active | done | canceled | failed
+	RunPolicy   string   // enabled | held
 	SpawnedFrom string   // 拉出本 task 的父 task；根为空
 	Joins       []string // 本 task 合入的 task
 	JoinedBy    []string // 合入本 task 的 task
@@ -77,11 +99,13 @@ type Edge struct {
 
 // Graph 是可并发访问的协调图。
 type Graph struct {
-	mu       sync.Mutex
-	tasks    []Task
-	edges    []Edge
-	nextID   uint64
-	progress ProgressStore
+	mu        sync.Mutex
+	tasks     []Task
+	edges     []Edge
+	nextID    uint64
+	progress  ProgressStore
+	executing bool
+	revision  int64
 }
 
 func newGraph() *Graph {
@@ -104,13 +128,17 @@ func (g *Graph) reset() {
 	g.tasks = []Task{}
 	g.edges = []Edge{}
 	g.nextID = 0
+	g.executing = false
+	g.revision = 0
 }
 
 // AddTask 追加一个独立 task，内部连好 planner → executor → verifier。
 func (g *Graph) AddTask() Task {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.decorateLocked(g.addTaskLocked(""))
+	task := g.decorateLocked(g.addTaskLocked(""))
+	g.revision++
+	return task
 }
 
 // Spawn 从已有角色节点拉出新 task，并在合入点接回。
@@ -119,6 +147,18 @@ func (g *Graph) AddTask() Task {
 func (g *Graph) Spawn(from, join string) (Task, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.executing {
+		return Task{}, ErrGraphBusy
+	}
+	child, err := g.spawnLocked(from, join)
+	if err != nil {
+		return Task{}, err
+	}
+	g.revision++
+	return child, nil
+}
+
+func (g *Graph) spawnLocked(from, join string) (Task, error) {
 	fromNode, ok := g.nodeByIDLocked(from)
 	if !ok {
 		return Task{}, fmt.Errorf("%w: %q", ErrUnknownNode, from)
@@ -141,6 +181,138 @@ func (g *Graph) Spawn(from, join string) (Task, error) {
 		Edge{From: child.Verifier.ID, To: join, Kind: EdgeKindJoin},
 	)
 	return g.decorateLocked(child), nil
+}
+
+// Snapshot 是图的只读拷贝，供 manager 查看。
+type Snapshot struct {
+	Revision  int64  `json:"revision"`
+	Executing bool   `json:"executing"`
+	Tasks     []Task `json:"tasks"`
+	Edges     []Edge `json:"edges"`
+}
+
+// Snapshot 返回当前 tasks 和边；Run 期间 executing 为 true。
+func (g *Graph) Snapshot() Snapshot {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.snapshotLocked()
+}
+
+func (g *Graph) snapshotLocked() Snapshot {
+	tasks := make([]Task, 0, len(g.tasks))
+	for _, task := range g.tasks {
+		tasks = append(tasks, g.decorateLocked(task))
+	}
+	return Snapshot{
+		Revision:  g.revision,
+		Executing: g.executing,
+		Tasks:     tasks,
+		Edges:     append([]Edge(nil), g.edges...),
+	}
+}
+
+// SnapshotAt 返回 revision-consistent 快照；revision=0 表示最新。
+func (g *Graph) SnapshotAt(ctx context.Context, revision int64) (Snapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return Snapshot{}, err
+	}
+	if g == nil {
+		return Snapshot{}, fmt.Errorf("snapshot: nil graph")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	snap := g.snapshotLocked()
+	if revision != 0 && revision != snap.Revision {
+		return Snapshot{}, fmt.Errorf("%w: %d", ErrUnknownRevision, revision)
+	}
+	return snap, nil
+}
+
+// Unspawn 拆掉尚未开跑的子 task 及其子孙。根 task 返回 ErrUnspawnRoot；Run 期间返回 ErrGraphBusy。
+func (g *Graph) Unspawn(taskID string) ([]string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.executing {
+		return nil, ErrGraphBusy
+	}
+	removed, err := g.unspawnLocked(taskID)
+	if err != nil {
+		return nil, err
+	}
+	g.revision++
+	return removed, nil
+}
+
+func (g *Graph) unspawnLocked(taskID string) ([]string, error) {
+	task, ok := g.taskByIDLocked(taskID)
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownTask, taskID)
+	}
+	if g.spawnedFromLocked(task) == "" {
+		return nil, fmt.Errorf("%w: %q", ErrUnspawnRoot, taskID)
+	}
+	remove := g.spawnedSubtreeLocked(taskID)
+	nodeIDs := make(map[string]struct{})
+	removed := make([]string, 0, len(remove))
+	for _, existing := range g.tasks {
+		if _, ok := remove[existing.ID]; !ok {
+			continue
+		}
+		removed = append(removed, existing.ID)
+		for _, node := range existing.Sequence() {
+			nodeIDs[node.ID] = struct{}{}
+		}
+	}
+	edges := g.edges[:0]
+	for _, edge := range g.edges {
+		if _, ok := nodeIDs[edge.From]; ok {
+			continue
+		}
+		if _, ok := nodeIDs[edge.To]; ok {
+			continue
+		}
+		edges = append(edges, edge)
+	}
+	g.edges = edges
+	tasks := g.tasks[:0]
+	for _, existing := range g.tasks {
+		if _, ok := remove[existing.ID]; ok {
+			continue
+		}
+		tasks = append(tasks, existing)
+	}
+	g.tasks = tasks
+	return removed, nil
+}
+
+func (g *Graph) spawnedSubtreeLocked(rootID string) map[string]struct{} {
+	seen := map[string]struct{}{rootID: {}}
+	queue := []string{rootID}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		task, ok := g.taskByIDLocked(id)
+		if !ok {
+			continue
+		}
+		for _, node := range task.Sequence() {
+			for _, edge := range g.edges {
+				if edge.Kind != EdgeKindSpawn || edge.From != node.ID {
+					continue
+				}
+				to, ok := g.nodeByIDLocked(edge.To)
+				if !ok || to.TaskID == "" {
+					continue
+				}
+				if _, dup := seen[to.TaskID]; dup {
+					continue
+				}
+				seen[to.TaskID] = struct{}{}
+				queue = append(queue, to.TaskID)
+			}
+		}
+	}
+	return seen
 }
 
 // Task 按 ID 查找 task；不存在时 ok 为 false。
@@ -309,7 +481,9 @@ func (g *Graph) addTaskLocked(parentEnvID string) Task {
 	g.nextID++
 	id := fmt.Sprintf("task-%d", g.nextID)
 	task := Task{
-		ID: id,
+		ID:        id,
+		Outcome:   OutcomeActive,
+		RunPolicy: RunPolicyEnabled,
 		Env: Env{
 			ID:       fmt.Sprintf("env-%d", g.nextID),
 			ParentID: parentEnvID,

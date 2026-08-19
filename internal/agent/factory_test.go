@@ -21,6 +21,7 @@ func TestNewSubgraphOrganizerRegistersMemoryTools(t *testing.T) {
 			request = got
 			return AssistantMessage{Content: "done"}, nil
 		}),
+		SystemPrompt: "yaml organize",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -33,8 +34,8 @@ func TestNewSubgraphOrganizerRegistersMemoryTools(t *testing.T) {
 	if answer != "done" {
 		t.Fatalf("Ask() = %q, want done", answer)
 	}
-	if request.SystemPrompt != SubgraphOrganizerPrompt {
-		t.Fatalf("system prompt = %q, want organizer prompt", request.SystemPrompt)
+	if request.SystemPrompt != "yaml organize" {
+		t.Fatalf("system prompt = %q, want yaml organize", request.SystemPrompt)
 	}
 
 	got := make(map[string]struct{}, len(request.Tools))
@@ -200,7 +201,7 @@ func TestOrganizeQueryListsTokenMatchedNodes(t *testing.T) {
 			ID:        "n-seed",
 			Statement: "user preference marker THREADMILL_GRAPH_MEM_7f3a",
 		}},
-	})
+	}, "")
 	if !strings.Contains(got, "n-seed") || !strings.Contains(got, "sg-seed") {
 		t.Fatalf("organizeQuery() = %q, want token match n-seed and subgraph catalog", got)
 	}
@@ -235,9 +236,9 @@ func TestRoleAgentsUseMemoryHooksAndRolePrompt(t *testing.T) {
 		prompt  string
 		newLoop func(Config) (*Loop, error)
 	}{
-		{"planner", plannerID, PlannerPrompt, NewPlanner},
-		{"executor", executorID, ExecutorPrompt, NewExecutor},
-		{"verifier", verifierID, VerifierPrompt, NewVerifier},
+		{"planner", plannerID, "yaml planner", NewPlanner},
+		{"executor", executorID, "yaml executor", NewExecutor},
+		{"verifier", verifierID, "yaml verifier", NewVerifier},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -249,7 +250,8 @@ func TestRoleAgentsUseMemoryHooksAndRolePrompt(t *testing.T) {
 					request = got
 					return AssistantMessage{Content: "done"}, nil
 				}),
-				Tools: []agenttool.Tool{echo},
+				Tools:        []agenttool.Tool{echo},
+				SystemPrompt: tt.prompt,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -412,6 +414,55 @@ func TestNewTeamRegistersFileTools(t *testing.T) {
 	}
 }
 
+func TestNewTeamDoesNotInjectRolePrompt(t *testing.T) {
+	resetDefaultStore(t)
+
+	var request Request
+	team, err := NewTeam(
+		modelFunc(func(_ context.Context, got Request) (AssistantMessage, error) {
+			request = got
+			return AssistantMessage{Content: "done"}, nil
+		}),
+		0,
+		FileAgents{},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := team.Planner.Ask(context.Background(), "start"); err != nil {
+		t.Fatalf("Ask() error = %v", err)
+	}
+	if strings.Contains(request.SystemPrompt, "规划 Agent") {
+		t.Fatalf("factory injected planner prompt: %q", request.SystemPrompt)
+	}
+}
+
+func TestNewTeamUsesYamlDefaultPromptWhenRolePromptEmpty(t *testing.T) {
+	resetDefaultStore(t)
+
+	var request Request
+	team, err := NewTeam(
+		modelFunc(func(_ context.Context, got Request) (AssistantMessage, error) {
+			request = got
+			return AssistantMessage{Content: "done"}, nil
+		}),
+		0,
+		FileAgents{},
+		nil,
+		FileOverlay{Prompts: FilePrompts{Default: "yaml default"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := team.Planner.Ask(context.Background(), "start"); err != nil {
+		t.Fatalf("Ask() error = %v", err)
+	}
+	if request.SystemPrompt != "yaml default" {
+		t.Fatalf("system prompt = %q, want yaml default", request.SystemPrompt)
+	}
+}
+
 func TestNewTeamUsesFileAgentsAndSharesOrganizer(t *testing.T) {
 	resetDefaultStore(t)
 
@@ -527,6 +578,7 @@ func TestTeamBindUsesYamlPluginsAgainstEnvStore(t *testing.T) {
 
 	store := ctxgraph.NewStore()
 	store.Save("env-1", ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{ID: "bound"}},
 		Nodes: []ctxgraph.Node{{
 			ID:          "n1",
 			Kind:        ctxgraph.NodeKindFact,
@@ -604,6 +656,280 @@ func TestTeamBindUsesYamlPluginsAgainstEnvStore(t *testing.T) {
 	}
 	if nodes := store.Load("env-1").NodesInSubgraphs([]string{"bound"}); len(nodes) != 1 || nodes[0].ID != "n1" {
 		t.Fatal("write did not stay in env-1")
+	}
+}
+
+func TestFileAgentsRejectsGraphToolOnPlanner(t *testing.T) {
+	err := FileAgents{
+		Planner: FileAgent{Tools: []string{coordReplacePendingToolName}},
+	}.Validate()
+	if err == nil || !strings.Contains(err.Error(), "manager-only") {
+		t.Fatalf("Validate() error = %v, want manager-only", err)
+	}
+}
+
+func TestNewManagerInstallsGraphTools(t *testing.T) {
+	resetDefaultStore(t)
+
+	var request Request
+	graphTool := &testTool{
+		definition: agenttool.Definition{
+			Name:        coordReplacePendingToolName,
+			Description: "replace pending",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		execute: func(context.Context, agenttool.Call) (agenttool.Output, error) {
+			return agenttool.Output{Content: "{}"}, nil
+		},
+	}
+	loop, err := NewManager(
+		modelFunc(func(_ context.Context, got Request) (AssistantMessage, error) {
+			request = got
+			return AssistantMessage{Content: "done"}, nil
+		}),
+		0,
+		FileAgents{
+			Manager: FileAgent{
+				SystemPrompt: "yaml manager",
+				Tools:        []string{coordReplacePendingToolName, organizeSubgraphToolName},
+			},
+		},
+		nil,
+		FileOverlay{
+			NamedTools: map[string]agenttool.Tool{
+				coordReplacePendingToolName: graphTool,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := loop.Ask(context.Background(), "start"); err != nil {
+		t.Fatalf("Ask() error = %v", err)
+	}
+	if request.SystemPrompt != "yaml manager" {
+		t.Fatalf("system prompt = %q, want yaml manager", request.SystemPrompt)
+	}
+	if !hasRequestTool(request.Tools, coordReplacePendingToolName) {
+		t.Fatal("manager missing coordination.replacePending")
+	}
+	if !hasRequestTool(request.Tools, organizeSubgraphToolName) {
+		t.Fatal("manager missing organize_subgraph")
+	}
+}
+
+func TestNewTeamDoesNotInstallGraphTools(t *testing.T) {
+	resetDefaultStore(t)
+
+	var request Request
+	team, err := NewTeam(
+		modelFunc(func(_ context.Context, got Request) (AssistantMessage, error) {
+			request = got
+			return AssistantMessage{Content: "done"}, nil
+		}),
+		0,
+		FileAgents{
+			Planner: FileAgent{Tools: []string{organizeSubgraphToolName}},
+		},
+		nil,
+		FileOverlay{
+			NamedTools: map[string]agenttool.Tool{
+				coordReplacePendingToolName: &testTool{
+					definition: agenttool.Definition{
+						Name:        coordReplacePendingToolName,
+						Description: "replace pending",
+						InputSchema: json.RawMessage(`{"type":"object"}`),
+					},
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := team.Planner.Ask(context.Background(), "start"); err != nil {
+		t.Fatalf("Ask() error = %v", err)
+	}
+	if hasRequestTool(request.Tools, coordReplacePendingToolName) {
+		t.Fatal("planner gained coordination.replacePending")
+	}
+}
+
+func TestNewManagerRequiresNamedGraphTools(t *testing.T) {
+	resetDefaultStore(t)
+
+	_, err := NewManager(
+		modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+			return AssistantMessage{Content: "done"}, nil
+		}),
+		0,
+		FileAgents{
+			Manager: FileAgent{Tools: []string{coordReplacePendingToolName}},
+		},
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), `unknown tool "coordination.replacePending"`) {
+		t.Fatalf("NewManager() error = %v, want unknown coordination.replacePending", err)
+	}
+}
+
+func TestNewTeamAppliesYamlToolDescription(t *testing.T) {
+	resetDefaultStore(t)
+
+	var request Request
+	team, err := NewTeam(
+		modelFunc(func(_ context.Context, got Request) (AssistantMessage, error) {
+			request = got
+			return AssistantMessage{Content: "done"}, nil
+		}),
+		0,
+		FileAgents{
+			Planner: FileAgent{Tools: []string{fileReadToolName}},
+		},
+		nil,
+		FileOverlay{
+			Tools: FileToolCatalog{
+				fileReadToolName: {Description: "yaml read intro"},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := team.Planner.Ask(context.Background(), "start"); err != nil {
+		t.Fatalf("Ask() error = %v", err)
+	}
+	got := ""
+	for _, tool := range request.Tools {
+		if tool.Name == fileReadToolName {
+			got = tool.Description
+			break
+		}
+	}
+	if got != "yaml read intro" {
+		t.Fatalf("read description = %q, want yaml read intro", got)
+	}
+}
+
+func TestNewTeamAppliesYamlDropContextReminder(t *testing.T) {
+	resetDefaultStore(t)
+
+	var prompt string
+	team, err := NewTeam(
+		modelFunc(func(_ context.Context, request Request) (AssistantMessage, error) {
+			prompt = request.SystemPrompt
+			return AssistantMessage{Content: "done"}, nil
+		}),
+		40,
+		FileAgents{
+			SubgraphOrganizer: FileAgent{
+				SystemPrompt: "org",
+				Hooks:        []string{hookRemindDropContextOnPressure},
+			},
+		},
+		nil,
+		FileOverlay{
+			Prompts: FilePrompts{DropContextPressure: "yaml drop reminder"},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := team.Organizer.Ask(context.Background(), strings.Repeat("n", 400)); err != nil {
+		t.Fatalf("Ask() error = %v", err)
+	}
+	if !strings.Contains(prompt, "yaml drop reminder") {
+		t.Fatalf("prompt = %q, want yaml drop reminder", prompt)
+	}
+	if strings.Contains(prompt, dropContextPressureReminder) {
+		t.Fatalf("prompt = %q, want yaml reminder instead of default", prompt)
+	}
+}
+
+func TestNewTeamAppliesYamlOrganizeQuery(t *testing.T) {
+	resetDefaultStore(t)
+
+	var query string
+	team, err := NewTeam(
+		ignoreOrganize(func(_ context.Context, request Request) (AssistantMessage, error) {
+			if len(request.Messages) > 0 {
+				query = request.Messages[0].Content
+			}
+			return AssistantMessage{Content: "ok"}, nil
+		}),
+		0,
+		FileAgents{
+			Planner: FileAgent{Tools: []string{organizeSubgraphToolName}},
+			SubgraphOrganizer: FileAgent{
+				Tools: []string{memoryNeighborsToolName},
+			},
+		},
+		nil,
+		FileOverlay{
+			Prompts: FilePrompts{OrganizeQuery: "yaml organize query"},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := ctxgraph.NewStore()
+	bindEnvGraph(t, team.Planner, store, "env-1", ctxgraph.Graph{})
+
+	tool, ok := team.Planner.tools[organizeSubgraphToolName]
+	if !ok {
+		t.Fatal("organize_subgraph missing")
+	}
+	if _, err := tool.Execute(context.Background(), agenttool.Call{
+		ID:        "call-1",
+		Name:      organizeSubgraphToolName,
+		Arguments: json.RawMessage(`{"query":"blue"}`),
+	}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(query, "yaml organize query") {
+		t.Fatalf("organizer query = %q, want yaml organize query", query)
+	}
+}
+
+func TestNewTeamDoesNotInjectOrganizeQuery(t *testing.T) {
+	resetDefaultStore(t)
+
+	var query string
+	team, err := NewTeam(
+		ignoreOrganize(func(_ context.Context, request Request) (AssistantMessage, error) {
+			if len(request.Messages) > 0 {
+				query = request.Messages[0].Content
+			}
+			return AssistantMessage{Content: "ok"}, nil
+		}),
+		0,
+		FileAgents{
+			Planner: FileAgent{Tools: []string{organizeSubgraphToolName}},
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := ctxgraph.NewStore()
+	bindEnvGraph(t, team.Planner, store, "env-1", ctxgraph.Graph{})
+
+	tool, ok := team.Planner.tools[organizeSubgraphToolName]
+	if !ok {
+		t.Fatal("organize_subgraph missing")
+	}
+	if _, err := tool.Execute(context.Background(), agenttool.Call{
+		ID:        "call-1",
+		Name:      organizeSubgraphToolName,
+		Arguments: json.RawMessage(`{"query":"blue"}`),
+	}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if strings.Contains(query, "请把相关节点加入这个子图") {
+		t.Fatalf("organizer query injected factory prompt: %q", query)
 	}
 }
 

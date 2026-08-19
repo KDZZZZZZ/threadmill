@@ -221,3 +221,91 @@ func TestAskResumesUnpairedToolCallsFromCheckpoint(t *testing.T) {
 		t.Fatal("checkpoint kept after the resumed turn completed")
 	}
 }
+
+type stickyDeleteStore struct {
+	data      map[string]Checkpoint
+	deleteErr error
+}
+
+func (s *stickyDeleteStore) Save(agentID string, checkpoint Checkpoint) error {
+	if s.data == nil {
+		s.data = make(map[string]Checkpoint)
+	}
+	s.data[agentID] = checkpoint
+	return nil
+}
+
+func (s *stickyDeleteStore) Load(agentID string) (Checkpoint, bool, error) {
+	checkpoint, ok := s.data[agentID]
+	return checkpoint, ok, nil
+}
+
+func (s *stickyDeleteStore) Delete(agentID string) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+	delete(s.data, agentID)
+	return nil
+}
+
+func TestAskDoesNotRecommitWhenCheckpointDeleteFails(t *testing.T) {
+	t.Parallel()
+
+	deleteErr := errors.New("delete checkpoint")
+	store := &stickyDeleteStore{deleteErr: deleteErr}
+	commits := 0
+	loop, err := NewLoop(Config{
+		AgentID:         "commit-once",
+		CheckpointStore: store,
+		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+			return AssistantMessage{Content: "done"}, nil
+		}),
+		Hooks: Hooks{
+			CommitTurn: []CommitTurnHook{
+				func(context.Context) error {
+					commits++
+					return nil
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := loop.Ask(context.Background(), "start"); !errors.Is(err, deleteErr) {
+		t.Fatalf("Ask() error = %v, want %v", err, deleteErr)
+	}
+	if commits != 1 {
+		t.Fatalf("commits after failed delete = %d, want 1", commits)
+	}
+	if _, ok, err := store.Load("commit-once"); err != nil {
+		t.Fatal(err)
+	} else if !ok {
+		t.Fatal("checkpoint discarded after delete failed")
+	}
+
+	if _, err := loop.Ask(context.Background(), "ignored"); !errors.Is(err, deleteErr) {
+		t.Fatalf("retry Ask() error = %v, want %v", err, deleteErr)
+	}
+	if commits != 1 {
+		t.Fatalf("commits after retry = %d, want 1", commits)
+	}
+
+	store.deleteErr = nil
+	answer, err := loop.Ask(context.Background(), "ignored")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "done" {
+		t.Fatalf("Ask() = %q, want done", answer)
+	}
+	if commits != 1 {
+		t.Fatalf("commits after successful discard = %d, want 1", commits)
+	}
+	if _, ok, err := store.Load("commit-once"); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatal("checkpoint kept after discard succeeded")
+	}
+}

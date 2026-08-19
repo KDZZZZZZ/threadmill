@@ -52,6 +52,15 @@ func TestLoadConfigReadsAgents(t *testing.T) {
   model: gpt-5
   context_window: 128000
 agents:
+  manager:
+    id: manager
+    max_steps: 48
+    system_prompt: |-
+      manager prompt
+    tools:
+      - coordination.replacePending
+    hooks:
+      - inject_subscribed_memory
   planner:
     id: planner
     max_steps: 32
@@ -117,6 +126,13 @@ agents:
 			ContextWindow: 128000,
 		},
 		Agents: agent.FileAgents{
+			Manager: agent.FileAgent{
+				ID:           "manager",
+				MaxSteps:     48,
+				SystemPrompt: "manager prompt",
+				Tools:        []string{"coordination.replacePending"},
+				Hooks:        []string{"inject_subscribed_memory"},
+			},
 			Planner: agent.FileAgent{
 				ID:           "planner",
 				MaxSteps:     32,
@@ -245,20 +261,10 @@ func TestLoadConfigReadsToolCatalog(t *testing.T) {
   api_key_env: TEST_OPENAI_API_KEY
   model: gpt-5
 tools:
-  - organize_subgraph
-  - read
-  - write
-  - edit
-  - ls
-  - grep
-  - find
-  - bash
-  - memory_neighbors
-  - memory_subgraphs_of
-  - memory_sources_of
-  - memory_nodes_in
-  - memory_add_to_subgraph
-  - memory_drop_from_context
+  read:
+    description: 读取工作区文本文件。
+  compact_memory:
+    description: 把旧对话整理进记忆图。
 `)
 	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
 		t.Fatal(err)
@@ -268,24 +274,46 @@ tools:
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{
-		"organize_subgraph",
-		"read",
-		"write",
-		"edit",
-		"ls",
-		"grep",
-		"find",
-		"bash",
-		"memory_neighbors",
-		"memory_subgraphs_of",
-		"memory_sources_of",
-		"memory_nodes_in",
-		"memory_add_to_subgraph",
-		"memory_drop_from_context",
+	want := agent.FileToolCatalog{
+		"read":           {Description: "读取工作区文本文件。"},
+		"compact_memory": {Description: "把旧对话整理进记忆图。"},
 	}
 	if !reflect.DeepEqual(got.Tools, want) {
-		t.Fatalf("tools = %v, want %v", got.Tools, want)
+		t.Fatalf("tools = %#v, want %#v", got.Tools, want)
+	}
+}
+
+func TestLoadConfigReadsPrompts(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  api_key_env: TEST_OPENAI_API_KEY
+  model: gpt-5
+prompts:
+  default: generic agent
+  compact: compact memory
+  compact_json_reminder: json only
+  drop_context_pressure: drop nodes
+  organize_query: add nodes to subgraph
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := agent.FilePrompts{
+		Default:             "generic agent",
+		Compact:             "compact memory",
+		CompactJSONReminder: "json only",
+		DropContextPressure: "drop nodes",
+		OrganizeQuery:       "add nodes to subgraph",
+	}
+	if !reflect.DeepEqual(got.Prompts, want) {
+		t.Fatalf("prompts = %#v, want %#v", got.Prompts, want)
 	}
 }
 
@@ -297,7 +325,8 @@ func TestLoadConfigRejectsUnknownCatalogTool(t *testing.T) {
   api_key_env: OPENAI_API_KEY
   model: gpt-5
 tools:
-  - not_a_tool
+  not_a_tool:
+    description: unknown
 `)
 	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
 		t.Fatal(err)
@@ -319,6 +348,27 @@ agents:
   planner:
     tools:
       - not_a_tool
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadConfig(root); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig() error = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestLoadConfigRejectsPlannerGraphTool(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY
+  model: gpt-5
+agents:
+  planner:
+    tools:
+      - coordination.replacePending
 `)
 	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
 		t.Fatal(err)
@@ -491,5 +541,88 @@ func TestLoadConfigRejectsNegativeContextWindow(t *testing.T) {
 
 	if _, err := LoadConfig(root); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("LoadConfig() error = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestLoadConfigRejectsCatalogToolMissingDescription(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY
+  model: gpt-5
+tools:
+  read: {}
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadConfig(root); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig() error = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestLoadConfigRejectsPaddedPrompt(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY
+  model: gpt-5
+prompts:
+  compact: " padded "
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadConfig(root); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig() error = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate config test")
+	}
+	root := filepath.Clean(filepath.Join(filepath.Dir(filename), "../.."))
+
+	got, err := LoadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Tools["read"].Description == "" {
+		t.Fatal("workspace tools.read.description is empty")
+	}
+	if got.Prompts.Compact == "" || got.Prompts.OrganizeQuery == "" {
+		t.Fatalf("workspace prompts missing: %#v", got.Prompts)
+	}
+	if got.Agents.Planner.SystemPrompt == "" {
+		t.Fatal("workspace planner system_prompt is empty")
+	}
+	if got.Prompts.Default == "" {
+		t.Fatal("workspace prompts.default is empty")
+	}
+	if got.Agents.Manager.SystemPrompt == "" {
+		t.Fatal("workspace manager system_prompt is empty")
+	}
+	if got.Tools["coordination.replacePending"].Description == "" {
+		t.Fatal("workspace tools.coordination.replacePending.description is empty")
+	}
+	for _, name := range got.Agents.Planner.Tools {
+		if name == "coordination.replacePending" {
+			t.Fatalf("planner tools include manager-only %q", name)
+		}
+	}
+	for _, name := range got.Agents.Manager.Tools {
+		switch name {
+		case "read", "write", "edit", "ls", "grep", "find", "bash":
+			t.Fatalf("manager tools include file/exec %q", name)
+		}
+	}
+	if got.Tools["read"].Description != "读取工作区文本文件。offset 是从 1 起的行号，limit 是最大行数。约 2000 行或 50KB 截断；截断时给出下一个 offset。" {
+		t.Fatalf("tools.read.description = %q", got.Tools["read"].Description)
 	}
 }

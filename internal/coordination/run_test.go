@@ -628,7 +628,7 @@ func TestGraphRunResumesInProgressReact(t *testing.T) {
 	assemble := Assemble(
 		Stores{Memory: ctxgraph.NewStore()},
 		provider,
-		agent.FileAgents{},
+		rolePromptAgents(),
 		[]agenttool.Tool{&blockingTool{started: started}},
 		0,
 		react,
@@ -807,6 +807,91 @@ func TestGraphRunSpawnedChildRunsBesideLaterRole(t *testing.T) {
 	waitChan(t, execStarted)
 	waitChan(t, childStarted)
 	close(execRelease)
+	if err := waitErr(t, done); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestGraphSpawnRejectedWhileExecuting(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	assemble := func(Task) (Roles, error) {
+		return Roles{
+			Planner:  gatedAsker(started, release),
+			Executor: instantAsker(),
+			Verifier: instantAsker(),
+		}, nil
+	}
+
+	done := runAsync(t, graph, assemble, root.ID)
+	waitChan(t, started)
+	_, err := graph.Spawn(root.Executor.ID, root.Verifier.ID)
+	if !errors.Is(err, ErrGraphBusy) {
+		close(release)
+		t.Fatalf("Spawn() while running error = %v, want %v", err, ErrGraphBusy)
+	}
+	close(release)
+	if err := waitErr(t, done); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestGraphUnspawnRejectedWhileExecuting(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	assemble := func(Task) (Roles, error) {
+		return Roles{
+			Planner:  gatedAsker(started, release),
+			Executor: instantAsker(),
+			Verifier: instantAsker(),
+		}, nil
+	}
+
+	done := runAsync(t, graph, assemble, root.ID)
+	waitChan(t, started)
+	_, err := graph.Unspawn(child.ID)
+	if !errors.Is(err, ErrGraphBusy) {
+		close(release)
+		t.Fatalf("Unspawn() while running error = %v, want %v", err, ErrGraphBusy)
+	}
+	close(release)
+	if err := waitErr(t, done); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestGraphRunRejectedWhileExecuting(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	assemble := func(Task) (Roles, error) {
+		return Roles{
+			Planner:  gatedAsker(started, release),
+			Executor: instantAsker(),
+			Verifier: instantAsker(),
+		}, nil
+	}
+
+	done := runAsync(t, graph, assemble, root.ID)
+	waitChan(t, started)
+	_, err := graph.Run(context.Background(), root.ID, "again", Stores{Memory: ctxgraph.NewStore()}, assemble)
+	if !errors.Is(err, ErrGraphBusy) {
+		close(release)
+		t.Fatalf("Run() while running error = %v, want %v", err, ErrGraphBusy)
+	}
+	close(release)
 	if err := waitErr(t, done); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -1108,6 +1193,7 @@ func TestAssembleBindsLeakingMemoryToolsToTaskEnv(t *testing.T) {
 
 	store := ctxgraph.NewStore()
 	store.Save("env-1", ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{ID: "bound"}},
 		Nodes: []ctxgraph.Node{{
 			ID:          "n1",
 			Kind:        ctxgraph.NodeKindFact,
@@ -1357,15 +1443,19 @@ func lastToolContent(messages []agent.Message) string {
 	return ""
 }
 
-func envMemoryAgents() agent.FileAgents {
+func rolePromptAgents() agent.FileAgents {
 	return agent.FileAgents{
-		Planner: agent.FileAgent{
-			Tools: []string{"memory_add_to_subgraph"},
-		},
-		Executor: agent.FileAgent{
-			Tools: []string{"memory_nodes_in"},
-		},
+		Planner:  agent.FileAgent{SystemPrompt: "规划 Agent"},
+		Executor: agent.FileAgent{SystemPrompt: "执行 Agent"},
+		Verifier: agent.FileAgent{SystemPrompt: "核验 Agent"},
 	}
+}
+
+func envMemoryAgents() agent.FileAgents {
+	agents := rolePromptAgents()
+	agents.Planner.Tools = []string{"memory_add_to_subgraph"}
+	agents.Executor.Tools = []string{"memory_nodes_in"}
+	return agents
 }
 
 func seededMemoryGraph() ctxgraph.Graph {

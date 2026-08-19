@@ -16,6 +16,7 @@ type Checkpoint struct {
 	Messages            []Message
 	UsedToolCallIDs     []string
 	SubscribedSubgraphs []string
+	Committed           bool
 }
 
 // CheckpointStore 保存、读取、删除进行中的 ReAct。
@@ -114,6 +115,19 @@ func (l *Loop) discardReact() error {
 	return nil
 }
 
+func (l *Loop) markReactCommitted() error {
+	l.mu.Lock()
+	l.reactCommitted = true
+	l.mu.Unlock()
+	return l.persistReact()
+}
+
+func (l *Loop) committed() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.reactCommitted
+}
+
 func (l *Loop) restoreCheckpoint() (bool, error) {
 	if l.checkpoints == nil {
 		return false, nil
@@ -129,6 +143,7 @@ func (l *Loop) restoreCheckpoint() (bool, error) {
 		l.usedToolCallIDs[id] = struct{}{}
 	}
 	l.subscribedSubgraphs = append([]string(nil), checkpoint.SubscribedSubgraphs...)
+	l.reactCommitted = checkpoint.Committed
 	l.mu.Unlock()
 	return true, nil
 }
@@ -182,5 +197,6 @@ func (l *Loop) snapshotReactLocked() Checkpoint {
 		Messages:            cloneMessages(l.messages),
 		UsedToolCallIDs:     ids,
 		SubscribedSubgraphs: append([]string(nil), l.subscribedSubgraphs...),
+		Committed:           l.reactCommitted,
 	}
 }
