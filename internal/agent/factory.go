@@ -10,6 +10,7 @@ import (
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	"github.com/KDZZZZZZ/threadmill/internal/env"
+	"github.com/KDZZZZZZ/threadmill/internal/event"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -104,11 +105,12 @@ type FilePrompts struct {
 	OrganizeQuery       string `yaml:"organize_query"`
 }
 
-// FileOverlay 把 yaml 的 tools/prompts 盖到装配出的 Agent 上。
+// FileOverlay 把 yaml 的 tools/prompts 盖到装配出的 Agent 上，并可注入运行时工具和事件总线。
 type FileOverlay struct {
 	Tools      FileToolCatalog
 	Prompts    FilePrompts
 	NamedTools map[string]agenttool.Tool
+	Events     *event.Bus
 }
 
 // FileAgents 是 threadmill.yaml 里内置 Agent 的配置。
@@ -378,6 +380,17 @@ func (t *Team) BindCheckpoints(store CheckpointStore, taskID string) {
 	bind(t.Organizer, subgraphOrganizerID)
 }
 
+// BindEvents 把同一条事件总线接到 team 里所有 Loop。
+func (t *Team) BindEvents(bus *event.Bus) {
+	if t == nil {
+		return
+	}
+	t.Planner.BindEvents(bus)
+	t.Executor.BindEvents(bus)
+	t.Verifier.BindEvents(bus)
+	t.Organizer.BindEvents(bus)
+}
+
 func withFileID(config Config, defaultID string) Config {
 	if config.AgentID == "" {
 		config.AgentID = defaultID
@@ -489,6 +502,9 @@ func newFileLoop(
 	config = withFileID(config, defaultID)
 	if config.SystemPrompt == "" {
 		config.SystemPrompt = overlay.Prompts.Default
+	}
+	if config.Events == nil {
+		config.Events = overlay.Events
 	}
 	loop, err := NewLoop(config)
 	if err != nil {

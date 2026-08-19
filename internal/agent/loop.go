@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/KDZZZZZZ/threadmill/internal/event"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -45,7 +47,7 @@ type Provider interface {
 	Generate(ctx context.Context, request Request) (AssistantMessage, error)
 }
 
-// Config 配置 LLM Provider、工具、生命周期钩子、单次迭代上限、上下文窗口，以及可选的进行中 ReAct 快照。
+// Config 配置 LLM Provider、工具、生命周期钩子、单次迭代上限、上下文窗口、可选的进行中 ReAct 快照，以及运行时事件总线。
 type Config struct {
 	AgentID         string
 	Provider        Provider
@@ -55,6 +57,7 @@ type Config struct {
 	ContextWindow   int
 	SystemPrompt    string
 	CheckpointStore CheckpointStore
+	Events          *event.Bus
 }
 
 // Loop 串行执行 ReAct 迭代，其公开方法可安全地并发调用。
@@ -68,6 +71,7 @@ type Loop struct {
 	contextWindow int
 	wake          chan struct{}
 	checkpoints   CheckpointStore
+	events        *event.Bus
 
 	mu                       sync.Mutex
 	queue                    []UserMessage
@@ -117,18 +121,19 @@ func NewLoop(config Config) (*Loop, error) {
 
 	loop := &Loop{
 		agentConfig:         cfg,
-		provider:            config.Provider,
 		hooks:               cloneHooks(config.Hooks),
 		maxSteps:            maxSteps,
 		contextWindow:       config.ContextWindow,
 		wake:                make(chan struct{}, 1),
 		checkpoints:         config.CheckpointStore,
+		events:              config.Events,
 		queue:               []UserMessage{},
 		messages:            []Message{},
 		usedToolCallIDs:     make(map[string]struct{}),
 		subscribedSubgraphs: []string{},
 		agentID:             agentID,
 	}
+	loop.provider = eventProvider{inner: config.Provider, loop: loop}
 
 	tools, definitions, err := prepareTools(config.Tools)
 	if err != nil {
@@ -433,4 +438,43 @@ func (l *Loop) finishTurn() bool {
 
 	cancel()
 	return preempted
+}
+
+// BindEvents 设置运行时事件总线；应在 Run 之前调用。
+func (l *Loop) BindEvents(bus *event.Bus) {
+	if l == nil {
+		return
+	}
+	l.events = bus
+}
+
+type eventProvider struct {
+	inner Provider
+	loop  *Loop
+}
+
+func (p eventProvider) Generate(ctx context.Context, request Request) (AssistantMessage, error) {
+	p.loop.publish(ctx, event.ModelStart(p.loop.agentID, len(request.Messages), len(request.Tools)))
+	started := time.Now()
+	message, err := p.inner.Generate(ctx, request)
+	tokens := 0
+	if message.Usage != nil {
+		tokens = message.Usage.TotalTokens
+	}
+	p.loop.publish(ctx, event.ModelEnd(
+		p.loop.agentID,
+		message.Model,
+		started,
+		len(message.ToolCalls),
+		tokens,
+		err,
+	))
+	return message, err
+}
+
+func (l *Loop) publish(ctx context.Context, ev event.RuntimeEvent) {
+	if l == nil {
+		return
+	}
+	l.events.Publish(ctx, ev)
 }

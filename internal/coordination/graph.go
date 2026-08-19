@@ -50,11 +50,19 @@ var ErrUnspawnRoot = errors.New("coordination: cannot unspawn root task")
 // ErrUnknownRevision 表示请求的图 revision 不是当前 revision。
 var ErrUnknownRevision = errors.New("coordination: unknown revision")
 
-var defaultGraph = newGraph()
+var defaultGraph = New()
 
 // Default 返回全局协调图单例。
 func Default() *Graph {
 	return defaultGraph
+}
+
+// New 返回一张空的协调图。
+func New() *Graph {
+	return &Graph{
+		tasks: []Task{},
+		edges: []Edge{},
+	}
 }
 
 // Node 是某个 task 里的一个角色。
@@ -110,10 +118,7 @@ type Graph struct {
 }
 
 func newGraph() *Graph {
-	return &Graph{
-		tasks: []Task{},
-		edges: []Edge{},
-	}
+	return New()
 }
 
 // SetProgressStore 设置进行中 task 的进度存储。入口 Run 成功结束后扔掉整棵子树的进度。
