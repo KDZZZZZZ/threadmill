@@ -16,7 +16,7 @@ func TestGraphToolsReplacePendingDiffsSpawns(t *testing.T) {
 	graph := newGraph()
 	tools := GraphTools(graph)
 
-	if _, err := executeGraphTool(t, tools, coordReplacePendingName, `{"roots":1}`); err != nil {
+	if _, err := executeGraphTool(t, tools, coordReplacePendingName, `{"roots":[{"info":"root"}]}`); err != nil {
 		t.Fatalf("replacePending root: %v", err)
 	}
 	root, ok := graph.Task("task-1")
@@ -25,7 +25,7 @@ func TestGraphToolsReplacePendingDiffsSpawns(t *testing.T) {
 	}
 
 	spawnArgs, err := json.Marshal(PendingSubgraph{
-		Roots:  1,
+		Roots:  []PendingRoot{{Info: "root"}},
 		Spawns: []PendingSpawn{{From: root.Planner.ID, Join: root.Verifier.ID}},
 	})
 	if err != nil {
@@ -36,7 +36,7 @@ func TestGraphToolsReplacePendingDiffsSpawns(t *testing.T) {
 	}
 
 	againArgs, err := json.Marshal(PendingSubgraph{
-		Roots:  1,
+		Roots:  []PendingRoot{{Info: "root"}},
 		Spawns: []PendingSpawn{{From: root.Executor.ID, Join: root.Verifier.ID}},
 	})
 	if err != nil {
@@ -55,7 +55,7 @@ func TestGraphToolsReplacePendingRejectsCycle(t *testing.T) {
 
 	graph := newGraph()
 	tools := GraphTools(graph)
-	if _, err := executeGraphTool(t, tools, coordReplacePendingName, `{"roots":1}`); err != nil {
+	if _, err := executeGraphTool(t, tools, coordReplacePendingName, `{"roots":[{}]}`); err != nil {
 		t.Fatal(err)
 	}
 	root, ok := graph.Task("task-1")
@@ -63,7 +63,7 @@ func TestGraphToolsReplacePendingRejectsCycle(t *testing.T) {
 		t.Fatal("root missing")
 	}
 	args, err := json.Marshal(PendingSubgraph{
-		Roots:  1,
+		Roots:  []PendingRoot{{}},
 		Spawns: []PendingSpawn{{From: root.Planner.ID, Join: root.Planner.ID}},
 	})
 	if err != nil {

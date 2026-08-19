@@ -74,6 +74,7 @@ type Env struct {
 // SpawnedFrom / Joins / JoinedBy 由图上的 spawn、join 边解析，不单独存一份。
 type Task struct {
 	ID          string
+	Info        string // 任务目标与验收标准
 	Env         Env
 	Planner     Node
 	Executor    Node

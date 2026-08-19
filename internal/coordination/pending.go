@@ -10,16 +10,22 @@ import (
 // ErrInvalidPending 表示提交的期望子图不合法。
 var ErrInvalidPending = errors.New("coordination: invalid pending subgraph")
 
-// PendingSpawn 是一条期望的 spawn/join。
+// PendingSpawn 是一条期望的 spawn/join，info 是子任务目标。
 type PendingSpawn struct {
 	From string `json:"from"`
 	Join string `json:"join"`
+	Info string `json:"info"`
+}
+
+// PendingRoot 是一个期望的根任务。
+type PendingRoot struct {
+	Info string `json:"info"`
 }
 
 // PendingSubgraph 是尚未执行切片的完整期望状态。
-// ponytail: 当前图没有 PhaseEndpoint；用根 task 数量 + spawn/join 对表达期望拓扑。
+// 根按序号对齐：少于现有根数会失败，多出的新建；spawn 仍按 from/join 匹配。
 type PendingSubgraph struct {
-	Roots  int            `json:"roots,omitempty"`
+	Roots  []PendingRoot  `json:"roots,omitempty"`
 	Spawns []PendingSpawn `json:"spawns"`
 }
 
@@ -52,46 +58,53 @@ func (g *Graph) ReplacePending(ctx context.Context, next PendingSubgraph) (Snaps
 }
 
 func (g *Graph) applyPendingLocked(next PendingSubgraph) error {
-	roots := g.rootCountLocked()
-	wantRoots := next.Roots
-	if wantRoots == 0 {
-		wantRoots = roots
-	}
-	if wantRoots < 1 {
+	roots := g.rootTasksLocked()
+	if len(next.Roots) < 1 {
 		return fmt.Errorf("%w: roots required", ErrInvalidPending)
 	}
-	if wantRoots < roots {
+	if len(next.Roots) < len(roots) {
 		return fmt.Errorf("%w: cannot remove root tasks", ErrUnspawnRoot)
 	}
-	for roots < wantRoots {
+	for len(roots) < len(next.Roots) {
 		g.addTaskLocked("")
-		roots++
+		roots = g.rootTasksLocked()
+	}
+	for i, want := range next.Roots {
+		g.setInfoLocked(roots[i].ID, want.Info)
 	}
 
-	desired := make(map[PendingSpawn]struct{}, len(next.Spawns))
+	type spawnKey struct {
+		From string
+		Join string
+	}
+	desired := make(map[spawnKey]PendingSpawn, len(next.Spawns))
 	for _, spawn := range next.Spawns {
 		spawn.From = strings.TrimSpace(spawn.From)
 		spawn.Join = strings.TrimSpace(spawn.Join)
 		if spawn.From == "" || spawn.Join == "" {
 			return fmt.Errorf("%w: spawn from and join are required", ErrInvalidPending)
 		}
-		desired[spawn] = struct{}{}
+		desired[spawnKey{From: spawn.From, Join: spawn.Join}] = spawn
 	}
 
-	have := make(map[PendingSpawn]struct{})
+	have := make(map[spawnKey]string)
 	for _, task := range g.tasks {
 		pair, ok := g.spawnPairLocked(task)
-		if ok {
-			have[pair] = struct{}{}
-		}
-	}
-	for spawn := range desired {
-		if _, ok := have[spawn]; ok {
+		if !ok {
 			continue
 		}
-		if _, err := g.spawnLocked(spawn.From, spawn.Join); err != nil {
+		have[spawnKey{From: pair.From, Join: pair.Join}] = task.ID
+	}
+	for key, spawn := range desired {
+		if id, ok := have[key]; ok {
+			g.setInfoLocked(id, spawn.Info)
+			continue
+		}
+		child, err := g.spawnLocked(spawn.From, spawn.Join)
+		if err != nil {
 			return err
 		}
+		g.setInfoLocked(child.ID, spawn.Info)
 	}
 
 	for {
@@ -101,7 +114,7 @@ func (g *Graph) applyPendingLocked(next PendingSubgraph) error {
 			if !ok {
 				continue
 			}
-			if _, keep := desired[pair]; keep {
+			if _, keep := desired[spawnKey{From: pair.From, Join: pair.Join}]; keep {
 				continue
 			}
 			if _, err := g.unspawnLocked(task.ID); err != nil {
@@ -117,14 +130,23 @@ func (g *Graph) applyPendingLocked(next PendingSubgraph) error {
 	return nil
 }
 
-func (g *Graph) rootCountLocked() int {
-	n := 0
+func (g *Graph) rootTasksLocked() []Task {
+	out := make([]Task, 0)
 	for _, task := range g.tasks {
 		if g.spawnedFromLocked(task) == "" {
-			n++
+			out = append(out, task)
 		}
 	}
-	return n
+	return out
+}
+
+func (g *Graph) setInfoLocked(id, info string) {
+	for i := range g.tasks {
+		if g.tasks[i].ID == id {
+			g.tasks[i].Info = info
+			return
+		}
+	}
 }
 
 func (g *Graph) spawnPairLocked(task Task) (PendingSpawn, bool) {

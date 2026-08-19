@@ -70,8 +70,9 @@ func (g *Graph) Run(
 	out, err := r.runTask(ctx, taskID, input)
 	r.wg.Wait()
 	if r.err != nil {
-		return "", r.err
+		err = r.err
 	}
+	g.recordOutcome(taskID, err)
 	if err != nil {
 		return "", err
 	}
@@ -182,10 +183,11 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 			return "", err
 		}
 		done := r.childCh(childID)
+		childInput := spawnInput(child.Info, output)
 		r.wg.Add(1)
 		go func() {
 			defer r.wg.Done()
-			out, err := r.runTask(ctx, childID, output)
+			out, err := r.runTask(ctx, childID, childInput)
 			done <- taskResult{output: out, err: err}
 			if err != nil {
 				r.fail(err)
@@ -238,6 +240,41 @@ func (r *runner) joinIncoming(ctx context.Context, node Node, task Task, input s
 		input += "\n\n[join] 子任务 " + item.child.ID + " 输出：\n" + item.out
 	}
 	return input, nil
+}
+
+func (g *Graph) recordOutcome(rootID string, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	switch {
+	case err == nil:
+		for id := range g.spawnedSubtreeLocked(rootID) {
+			g.setOutcomeLocked(id, OutcomeDone)
+		}
+	case errors.Is(err, context.Canceled):
+		g.setOutcomeLocked(rootID, OutcomeCanceled)
+	default:
+		g.setOutcomeLocked(rootID, OutcomeFailed)
+	}
+}
+
+func (g *Graph) setOutcomeLocked(id, outcome string) {
+	for i := range g.tasks {
+		if g.tasks[i].ID == id {
+			g.tasks[i].Outcome = outcome
+			return
+		}
+	}
+}
+
+func spawnInput(info, upstream string) string {
+	switch {
+	case info == "":
+		return upstream
+	case upstream == "":
+		return info
+	default:
+		return info + "\n\n" + upstream
+	}
 }
 
 func (r *runner) childCh(id string) chan taskResult {

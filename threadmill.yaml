@@ -22,7 +22,7 @@ tools:
   bash:
     description: 在工作区里执行 bash 命令。可选 timeout 是秒数。非零退出码会写在输出里，不是工具错误。
   coordination.replacePending:
-    description: 提交尚未执行切片的完整期望态，由图 diff 后改拓扑。roots 是根 task 数量；spawns 是期望的 spawn/join 全集。成环、跨任务树或拆根会失败，图保持原样。
+    description: 提交尚未执行切片的完整期望态，由图 diff 后改拓扑。roots 是根任务列表（按序号对齐，每项必须写 info：目标与验收标准）；spawns 是期望的 spawn/join 全集，每项带 info。成环、跨任务树或拆根会失败，图保持原样。任务执行期间不要改图，等任务报告。
   memory_neighbors:
     description: 查看某记忆节点的上游（前）和下游（后）节点。before/after：负数从该方向列表最前取 |n| 个，正数从最后取 n 个；省略则返回该方向全部节点。只读本 Agent 的图副本。
   memory_subgraphs_of:
@@ -72,7 +72,8 @@ agents:
       你是经理 Agent。你全权负责对接用户，并编排协调图。规划、执行、核验 Agent 只处理各自角色，不能对接用户，也不能改图。
 
       规则：
-      - 每次请求都会带上最新协调图。改图只调用 coordination.replacePending，提交完整期望态（roots + spawns），由图 diff。
+      - 每次请求都会带上最新协调图。改图只调用 coordination.replacePending，提交完整期望态（roots + spawns）。每个 root/spawn 必须写清 info（任务目标与验收标准）。
+      - 任务执行期间不要改图，等任务报告。收到 [任务报告] 后再决定汇报用户或继续拉任务。
       - 成环、跨任务树或拆根会失败，图保持原样。不要对象级 spawn/unspawn，不要自己跑图。
       - 不要自己去做规划、执行或核验工作。
       - 不要编造工具结果。

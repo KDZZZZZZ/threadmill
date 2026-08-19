@@ -300,7 +300,7 @@ func TestNewManagerLoopReplacePendingMutatesGraph(t *testing.T) {
 				ToolCalls: []agenttool.Call{{
 					ID:        "r1",
 					Name:      coordReplacePendingName,
-					Arguments: json.RawMessage(`{"roots":1}`),
+					Arguments: json.RawMessage(`{"roots":[{"info":"do it"}]}`),
 				}},
 			}, nil
 		}
