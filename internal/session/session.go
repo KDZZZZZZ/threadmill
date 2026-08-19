@@ -36,6 +36,7 @@ type Session struct {
 	manager   *agent.Loop
 	tokens    *tokenCounter
 	output    func(string)
+	modelName string
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	mu        sync.Mutex
@@ -82,9 +83,10 @@ func Open(parent context.Context, opt Options) (*Session, error) {
 	}
 
 	s := &Session{
-		graph:  coordination.New(),
-		tokens: newTokenCounter(),
-		output: opt.Output,
+		graph:     coordination.New(),
+		tokens:    newTokenCounter(),
+		output:    opt.Output,
+		modelName: file.LLM.Model,
 	}
 	s.idle = sync.NewCond(&s.mu)
 	s.stores = coordination.Stores{
@@ -202,6 +204,11 @@ func (s *Session) Cancel() bool {
 		return true
 	}
 	return s.manager.Preempt()
+}
+
+// ModelName 返回配置里的 LLM 模型名。
+func (s *Session) ModelName() string {
+	return s.modelName
 }
 
 // Busy 表示还有未完成的经理轮或任务。
