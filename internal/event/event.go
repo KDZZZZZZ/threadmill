@@ -4,7 +4,10 @@
 // 实时落库与 WebSocket 不在本包。
 package event
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // Kind 是触发实体的种类，对应 Eino RunInfo.Component 的 ChatModel / Tool。
 type Kind string
@@ -20,6 +23,7 @@ type Phase string
 const (
 	PhaseStart Phase = "start"
 	PhaseEnd   Phase = "end"
+	PhaseDelta Phase = "delta"
 )
 
 // RuntimeEvent 是模型/工具调用的归一化记录。
@@ -37,6 +41,7 @@ type RuntimeEvent struct {
 	Tools     int           `json:"tools,omitempty"`
 	ToolCalls int           `json:"tool_calls,omitempty"`
 	Tokens    int           `json:"tokens,omitempty"`
+	Delta     string        `json:"delta,omitempty"`
 }
 
 // Input 是生产者交给 Normalize 的原始字段。
@@ -124,4 +129,34 @@ func ToolEnd(agentID, name, callID string, started time.Time, isError bool, err 
 		IsError: isError,
 		Err:     err,
 	}, PhaseEnd)
+}
+
+// ModelDelta 归一化一段流式文本增量。
+func ModelDelta(agentID, delta string) RuntimeEvent {
+	return RuntimeEvent{
+		Time:    time.Now(),
+		AgentID: agentID,
+		Kind:    KindModel,
+		Phase:   PhaseDelta,
+		Delta:   delta,
+	}
+}
+
+type deltaKey struct{}
+
+// WithDeltaSink 把文本增量回调挂到 ctx 上，供 Provider 在流式生成时调用。
+func WithDeltaSink(ctx context.Context, sink func(string)) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, deltaKey{}, sink)
+}
+
+// DeltaSink 取出 ctx 上的增量回调；没有时返回 nil。
+func DeltaSink(ctx context.Context) func(string) {
+	if ctx == nil {
+		return nil
+	}
+	sink, _ := ctx.Value(deltaKey{}).(func(string))
+	return sink
 }

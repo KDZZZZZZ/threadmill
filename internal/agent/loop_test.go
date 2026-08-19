@@ -554,6 +554,38 @@ func TestLoopPublishesRuntimeEvents(t *testing.T) {
 	}
 }
 
+func TestLoopPublishesModelDelta(t *testing.T) {
+	bus, got := recordingBus()
+	loop, err := NewLoop(Config{
+		AgentID: "manager",
+		Provider: modelFunc(func(ctx context.Context, _ Request) (AssistantMessage, error) {
+			sink := event.DeltaSink(ctx)
+			if sink == nil {
+				t.Fatal("missing delta sink")
+			}
+			sink("Hel")
+			sink("lo")
+			return AssistantMessage{Content: "Hello", Model: "stub-model"}, nil
+		}),
+		Events: bus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loop.Ask(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+	var deltas []string
+	for _, ev := range *got {
+		if ev.Phase == event.PhaseDelta {
+			deltas = append(deltas, ev.Delta)
+		}
+	}
+	if strings.Join(deltas, "") != "Hello" {
+		t.Fatalf("deltas = %q from %#v", deltas, *got)
+	}
+}
+
 func TestLoopPublishesModelError(t *testing.T) {
 	bus, got := recordingBus()
 	loop, err := NewLoop(Config{

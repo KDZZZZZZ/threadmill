@@ -1,0 +1,169 @@
+package provider
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/KDZZZZZZ/threadmill/internal/agent"
+	"github.com/KDZZZZZZ/threadmill/internal/event"
+)
+
+func TestResponsesGenerateStreamsDeltas(t *testing.T) {
+	t.Setenv("TEST_OPENAI_API_KEY", "test-key")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Accept") != "text/event-stream" {
+			t.Errorf("Accept = %q, want text/event-stream", request.Header.Get("Accept"))
+		}
+		var got map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got["stream"] != true {
+			t.Errorf("stream = %#v, want true", got["stream"])
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected http.Flusher")
+		}
+		writeSSE(w, flusher, "response.output_text.delta", `{"type":"response.output_text.delta","delta":"Hel"}`)
+		writeSSE(w, flusher, "response.output_text.delta", `{"type":"response.output_text.delta","delta":"lo"}`)
+		writeSSE(w, flusher, "response.completed", `{
+  "type":"response.completed",
+  "response":{
+    "status":"completed",
+    "output":[{
+      "type":"message",
+      "content":[{"type":"output_text","text":"Hello"}]
+    }],
+    "usage":{
+      "input_tokens":3,
+      "output_tokens":1,
+      "total_tokens":4
+    }
+  }
+}`)
+	}))
+	defer server.Close()
+
+	model, err := NewResponses(LLMConfig{
+		Provider:  OpenAIResponses,
+		BaseURL:   server.URL + "/v1",
+		APIKeyEnv: "TEST_OPENAI_API_KEY",
+		Model:     "gpt-5",
+	}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var deltas []string
+	ctx := event.WithDeltaSink(context.Background(), func(delta string) {
+		deltas = append(deltas, delta)
+	})
+	got, err := model.Generate(ctx, agent.Request{
+		Messages: []agent.Message{{Role: agent.RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(deltas, "") != "Hello" {
+		t.Fatalf("deltas = %q", deltas)
+	}
+	if got.Content != "Hello" || got.StopReason != agent.StopReasonStop {
+		t.Fatalf("message = %#v", got)
+	}
+	if got.Usage == nil || got.Usage.TotalTokens != 4 {
+		t.Fatalf("usage = %#v", got.Usage)
+	}
+}
+
+func TestResponsesGenerateStreamFailed(t *testing.T) {
+	t.Setenv("TEST_OPENAI_API_KEY", "test-key")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		writeSSE(w, flusher, "response.failed", `{"type":"response.failed"}`)
+	}))
+	defer server.Close()
+
+	model, err := NewResponses(LLMConfig{
+		Provider:  OpenAIResponses,
+		BaseURL:   server.URL + "/v1",
+		APIKeyEnv: "TEST_OPENAI_API_KEY",
+		Model:     "gpt-5",
+	}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := event.WithDeltaSink(context.Background(), func(string) {})
+	_, err = model.Generate(ctx, agent.Request{
+		Messages: []agent.Message{{Role: agent.RoleUser, Content: "hi"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "response.failed") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestReadResponseStreamUsesTypeField(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"response.output_text.delta","delta":"Hi"}`,
+		``,
+		`data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Hi"}]}]}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	var deltas []string
+	got, err := readResponseStream(strings.NewReader(body), func(delta string) {
+		deltas = append(deltas, delta)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(deltas, "") != "Hi" {
+		t.Fatalf("deltas = %q", deltas)
+	}
+	message, err := got.assistantMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.Content != "Hi" {
+		t.Fatalf("content = %q", message.Content)
+	}
+}
+
+func TestReadResponseStreamMissingCompleted(t *testing.T) {
+	_, err := readResponseStream(strings.NewReader("data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n"), nil)
+	if err == nil || !strings.Contains(err.Error(), "without response.completed") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestProviderWithDeltaSink(t *testing.T) {
+	var got string
+	ctx := WithDeltaSink(context.Background(), func(delta string) {
+		got = delta
+	})
+	sink := event.DeltaSink(ctx)
+	if sink == nil {
+		t.Fatal("missing sink")
+	}
+	sink("ok")
+	if got != "ok" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func writeSSE(w io.Writer, flusher http.Flusher, eventName, data string) {
+	data = strings.ReplaceAll(data, "\n", "")
+	_, _ = io.WriteString(w, "event: "+eventName+"\n")
+	_, _ = io.WriteString(w, "data: "+data+"\n\n")
+	flusher.Flush()
+}

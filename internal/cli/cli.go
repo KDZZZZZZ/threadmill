@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 
 	"github.com/KDZZZZZZ/threadmill/internal/event"
 	"github.com/KDZZZZZZ/threadmill/internal/session"
@@ -57,12 +58,12 @@ func Run(args []string, stdio IO) int {
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 
+	printer := &stdoutPrinter{out: out}
 	sess, err := open(ctx, session.Options{
-		Root: opts.dir,
-		Output: func(text string) {
-			fmt.Fprintln(out, text)
-		},
+		Root:   opts.dir,
+		Output: printer.write,
 		OnEvent: func(_ context.Context, ev event.RuntimeEvent) {
+			printer.delta(ev)
 			if line := progressLine(ev); line != "" {
 				fmt.Fprintln(errOut, line)
 			}
@@ -163,4 +164,42 @@ func progressLine(ev event.RuntimeEvent) string {
 		return fmt.Sprintf("[%s] tool %s %s", ev.AgentID, name, ev.Phase)
 	}
 	return fmt.Sprintf("tool %s %s", name, ev.Phase)
+}
+
+// stdoutPrinter 把经理的 SSE 增量打到 stdout；任务报告和未流式的整段回复仍走 write。
+type stdoutPrinter struct {
+	out      io.Writer
+	mu       sync.Mutex
+	streamed bool
+}
+
+func (p *stdoutPrinter) write(text string) {
+	if p == nil || p.out == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if strings.HasPrefix(text, "[任务报告]") {
+		fmt.Fprintln(p.out, text)
+		return
+	}
+	if p.streamed {
+		p.streamed = false
+		fmt.Fprintln(p.out)
+		return
+	}
+	fmt.Fprintln(p.out, text)
+}
+
+func (p *stdoutPrinter) delta(ev event.RuntimeEvent) {
+	if p == nil || p.out == nil {
+		return
+	}
+	if ev.Kind != event.KindModel || ev.Phase != event.PhaseDelta || ev.AgentID != "manager" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.streamed = true
+	fmt.Fprint(p.out, ev.Delta)
 }

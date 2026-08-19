@@ -69,3 +69,46 @@ func TestProgressLine(t *testing.T) {
 		t.Fatal("model events should not print progress")
 	}
 }
+
+func TestStdoutPrinterStreamsManagerThenSkipsFullText(t *testing.T) {
+	t.Parallel()
+
+	var out strings.Builder
+	p := &stdoutPrinter{out: &out}
+	p.delta(event.RuntimeEvent{
+		AgentID: "manager",
+		Kind:    event.KindModel,
+		Phase:   event.PhaseDelta,
+		Delta:   "Hel",
+	})
+	p.delta(event.RuntimeEvent{
+		AgentID: "task-1:executor",
+		Kind:    event.KindModel,
+		Phase:   event.PhaseDelta,
+		Delta:   "nope",
+	})
+	p.delta(event.RuntimeEvent{
+		AgentID: "manager",
+		Kind:    event.KindModel,
+		Phase:   event.PhaseDelta,
+		Delta:   "lo",
+	})
+	p.write("Hello")
+	p.write("[任务报告] task-1 · done · 耗时 1s\n目标: x\nverifier 输出:\nok")
+	got := out.String()
+	want := "Hello\n[任务报告] task-1 · done · 耗时 1s\n目标: x\nverifier 输出:\nok\n"
+	if got != want {
+		t.Fatalf("out = %q, want %q", got, want)
+	}
+}
+
+func TestStdoutPrinterWritesWhenNotStreamed(t *testing.T) {
+	t.Parallel()
+
+	var out strings.Builder
+	p := &stdoutPrinter{out: &out}
+	p.write("plain")
+	if out.String() != "plain\n" {
+		t.Fatalf("out = %q", out.String())
+	}
+}
