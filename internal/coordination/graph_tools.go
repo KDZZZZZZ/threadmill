@@ -8,7 +8,7 @@ import (
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
-const coordReplacePendingName = "coordination.replacePending"
+const coordReplacePendingName = "coordination_replacePending"
 
 type graphTool struct {
 	name  string

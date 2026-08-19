@@ -108,6 +108,20 @@ func TestReportAndToolActivity(t *testing.T) {
 	}
 }
 
+func TestChromeShowsTitleAndKeyHints(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{Root: "/tmp/proj", Model: "deepseek"}))
+	view := m.View()
+	if !strings.Contains(view, "threadmill") {
+		t.Fatalf("missing title: %q", view)
+	}
+	if !strings.Contains(view, "enter send") {
+		t.Fatalf("missing key hints: %q", view)
+	}
+	if !strings.Contains(view, "deepseek") {
+		t.Fatalf("missing model: %q", view)
+	}
+}
+
 func TestStatusBarTokensAndTasks(t *testing.T) {
 	m := sized(newModel(&fakeChat{}, Info{Root: "/tmp/proj", Model: "deepseek"}))
 	m = apply(t, m, event.RuntimeEvent{
@@ -141,6 +155,58 @@ func TestStatusBarTokensAndTasks(t *testing.T) {
 	got = m.statusLine()
 	if !strings.Contains(got, "tasks 1") {
 		t.Fatalf("running: %q", got)
+	}
+}
+
+func TestThinkingThenModelError(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{Root: "/ws", Model: "stub"}))
+	m = apply(t, m, event.RuntimeEvent{
+		AgentID: "manager",
+		Kind:    event.KindModel,
+		Phase:   event.PhaseStart,
+	})
+	if !strings.Contains(m.viewport.View(), "思考中") {
+		t.Fatalf("missing thinking: %q", m.viewport.View())
+	}
+	if !strings.Contains(m.statusLine(), "思考") {
+		t.Fatalf("status missing thinking: %q", m.statusLine())
+	}
+
+	m = apply(t, m, event.RuntimeEvent{
+		AgentID: "manager",
+		Kind:    event.KindModel,
+		Phase:   event.PhaseEnd,
+		Err:     "provider API 401: invalid key",
+		IsError: true,
+	})
+	view := m.viewport.View()
+	if strings.Contains(view, "思考中") {
+		t.Fatalf("thinking stayed after error: %q", view)
+	}
+	if !strings.Contains(view, "provider API 401: invalid key") {
+		t.Fatalf("missing error: %q", view)
+	}
+}
+
+func TestDeltaClearsThinking(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{Root: "/ws"}))
+	m = apply(t, m, event.RuntimeEvent{
+		AgentID: "manager",
+		Kind:    event.KindModel,
+		Phase:   event.PhaseStart,
+	})
+	m = apply(t, m, event.RuntimeEvent{
+		AgentID: "manager",
+		Kind:    event.KindModel,
+		Phase:   event.PhaseDelta,
+		Delta:   "Hi",
+	})
+	view := m.viewport.View()
+	if strings.Contains(view, "思考中") {
+		t.Fatalf("thinking stayed after delta: %q", view)
+	}
+	if !strings.Contains(view, "Hi") {
+		t.Fatalf("missing delta: %q", view)
 	}
 }
 

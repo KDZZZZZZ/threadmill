@@ -11,6 +11,9 @@ func Monitor(logger *slog.Logger) Handler {
 		logger = slog.Default()
 	}
 	return func(ctx context.Context, ev RuntimeEvent) {
+		if ev.Phase == PhaseDelta {
+			return
+		}
 		level := slog.LevelInfo
 		if ev.Err != "" {
 			level = slog.LevelError

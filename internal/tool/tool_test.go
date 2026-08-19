@@ -37,6 +37,15 @@ func TestDefinitionValidate(t *testing.T) {
 			},
 			expected: ErrInvalidDefinition,
 		},
+		{
+			name: "name contains a dot",
+			definition: Definition{
+				Name:        "coordination.replacePending",
+				Description: "replace pending",
+				InputSchema: json.RawMessage(`{"type":"object"}`),
+			},
+			expected: ErrInvalidDefinition,
+		},
 	}
 
 	for _, tt := range tests {

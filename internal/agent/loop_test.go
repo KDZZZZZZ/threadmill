@@ -586,6 +586,79 @@ func TestLoopPublishesModelDelta(t *testing.T) {
 	}
 }
 
+func TestMemoryCompactDoesNotPublishModelEvents(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resetDefaultStore(t)
+
+	bus, got := recordingBus()
+	compactCalls := 0
+	compactHadSink := false
+	model := modelFunc(func(ctx context.Context, request Request) (AssistantMessage, error) {
+		if isCompactRequest(request) {
+			compactCalls++
+			if event.DeltaSink(ctx) != nil {
+				compactHadSink = true
+			}
+			return AssistantMessage{Content: `{"nodes":[]}`}, nil
+		}
+		if sink := event.DeltaSink(ctx); sink != nil {
+			sink("hello")
+		}
+		return AssistantMessage{Content: "hello", Model: "chat"}, nil
+	})
+
+	loop, err := NewLoop(Config{
+		AgentID:  "manager",
+		Provider: model,
+		Events:   bus,
+		Hooks: Hooks{AfterTurn: []AfterTurnHook{
+			func(context.Context, UserMessage, TurnResult) error {
+				cancel()
+				return nil
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAddMemoryHooks(t, loop)
+	store := ctxgraph.NewStore()
+	bindEnvGraph(t, loop, store, "env-1", ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask}},
+	})
+	loop.SetSubscribedSubgraphs([]string{"sg-a"})
+	loop.Enqueue(UserMessage{Content: "hi"})
+
+	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if compactCalls != 1 {
+		t.Fatalf("compact calls = %d, want 1", compactCalls)
+	}
+	if compactHadSink {
+		t.Fatal("compact generate received a delta sink")
+	}
+
+	var phases []event.Phase
+	var deltas []string
+	for _, ev := range *got {
+		if ev.Kind != event.KindModel {
+			continue
+		}
+		phases = append(phases, ev.Phase)
+		if ev.Phase == event.PhaseDelta {
+			deltas = append(deltas, ev.Delta)
+		}
+	}
+	if strings.Join(deltas, "") != "hello" {
+		t.Fatalf("deltas = %q from %#v", deltas, *got)
+	}
+	if len(phases) != 3 {
+		t.Fatalf("model events = %#v, want one chat generate", *got)
+	}
+}
+
 func TestLoopPublishesModelError(t *testing.T) {
 	bus, got := recordingBus()
 	loop, err := NewLoop(Config{

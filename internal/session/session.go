@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,6 +18,7 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/coordination"
 	"github.com/KDZZZZZZ/threadmill/internal/event"
 	tmexec "github.com/KDZZZZZZ/threadmill/internal/exec"
+	"github.com/KDZZZZZZ/threadmill/internal/logging"
 	"github.com/KDZZZZZZ/threadmill/internal/provider"
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
@@ -26,6 +30,7 @@ type Options struct {
 	Provider agent.Provider
 	Output   func(string)
 	OnEvent  event.Handler
+	Logger   *slog.Logger
 }
 
 // Session 是长命经理加串行任务调度。
@@ -44,6 +49,7 @@ type Session struct {
 	idle      *sync.Cond
 	err       error
 	cancelRun context.CancelFunc
+	logFile   io.Closer
 }
 
 // Open 接线存储、装配经理并启动常驻 Run。
@@ -100,7 +106,17 @@ func Open(parent context.Context, opt Options) (*Session, error) {
 	}
 	s.graph.SetProgressStore(progress)
 
-	bus := event.NewBus(s.onEvent, opt.OnEvent)
+	logger := opt.Logger
+	if logger == nil {
+		logPath := filepath.Join(opt.Root, ".threadmill", "threadmill.log")
+		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		logger = logging.New(logging.Config{Output: f})
+		s.logFile = f
+	}
+	bus := event.NewBus(s.onEvent, event.Monitor(logger), opt.OnEvent)
 	overlay := agent.FileOverlay{
 		Tools:   file.Tools,
 		Prompts: file.Prompts,
@@ -224,6 +240,9 @@ func (s *Session) Close() {
 		s.cancel()
 	}
 	s.wg.Wait()
+	if s.logFile != nil {
+		_ = s.logFile.Close()
+	}
 }
 
 func (s *Session) hooks() agent.Hooks {

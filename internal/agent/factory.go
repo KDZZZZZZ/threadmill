@@ -33,7 +33,7 @@ const (
 	fileFindToolName  = "find"
 	bashToolName      = "bash"
 
-	coordReplacePendingToolName = "coordination.replacePending"
+	coordReplacePendingToolName = "coordination_replacePending"
 
 	hookInjectSubscribedMemory      = "inject_subscribed_memory"
 	hookCompactOnOverflow           = "compact_on_overflow"

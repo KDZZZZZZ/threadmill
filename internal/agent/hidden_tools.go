@@ -186,13 +186,20 @@ func keepRecentArgs(keep int) json.RawMessage {
 	return raw
 }
 
+func unwrapEventProvider(p Provider) Provider {
+	if wrapped, ok := p.(eventProvider); ok {
+		return wrapped.inner
+	}
+	return p
+}
+
 func (l *Loop) snapshotTranscript() Transcript {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return Transcript{
 		Messages:            cloneMessages(l.messages),
 		Subscribed:          append([]string(nil), l.subscribedSubgraphs...),
-		Provider:            l.provider,
+		Provider:            unwrapEventProvider(l.provider),
 		ContextWindow:       l.contextWindow,
 		AgentID:             l.agentID,
 		CompactPrompt:       l.compactPrompt,

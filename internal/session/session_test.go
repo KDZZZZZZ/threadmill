@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 	"github.com/KDZZZZZZ/threadmill/internal/coordination"
+	"github.com/KDZZZZZZ/threadmill/internal/logging"
 	"github.com/KDZZZZZZ/threadmill/internal/provider"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
@@ -52,7 +54,7 @@ func TestSessionRunsRootTaskAndWakesManagerWithReport(t *testing.T) {
 				}
 				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 					ID:        "r1",
-					Name:      "coordination.replacePending",
+					Name:      "coordination_replacePending",
 					Arguments: args,
 				}}}, nil
 			}
@@ -139,6 +141,36 @@ func TestSessionIdleWhenManagerOnlyTalks(t *testing.T) {
 	}
 	if n := len(sess.Snapshot().Tasks); n != 0 {
 		t.Fatalf("tasks = %d, want 0", n)
+	}
+}
+
+func TestSessionLogsRuntimeEvents(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var logs bytes.Buffer
+	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
+		if strings.Contains(request.SystemPrompt, "记忆整理器") {
+			return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
+		}
+		return agent.AssistantMessage{Content: "hello"}, nil
+	})
+	sess, err := Open(ctx, Options{
+		Root:     t.TempDir(),
+		File:     loadRepoConfig(t),
+		Provider: provider,
+		Logger:   logging.New(logging.Config{Output: &logs, JSON: true}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	sess.Send("hi")
+	if err := sess.WaitIdle(ctx); err != nil {
+		t.Fatalf("WaitIdle() error = %v", err)
+	}
+	if !strings.Contains(logs.String(), `"msg":"runtime event"`) {
+		t.Fatalf("logs = %s, want runtime event", logs.String())
 	}
 }
 

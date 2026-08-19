@@ -712,7 +712,7 @@ func TestNewManagerInstallsGraphTools(t *testing.T) {
 		t.Fatalf("system prompt = %q, want yaml manager", request.SystemPrompt)
 	}
 	if !hasRequestTool(request.Tools, coordReplacePendingToolName) {
-		t.Fatal("manager missing coordination.replacePending")
+		t.Fatal("manager missing coordination_replacePending")
 	}
 	if !hasRequestTool(request.Tools, organizeSubgraphToolName) {
 		t.Fatal("manager missing organize_subgraph")
@@ -752,7 +752,7 @@ func TestNewTeamDoesNotInstallGraphTools(t *testing.T) {
 		t.Fatalf("Ask() error = %v", err)
 	}
 	if hasRequestTool(request.Tools, coordReplacePendingToolName) {
-		t.Fatal("planner gained coordination.replacePending")
+		t.Fatal("planner gained coordination_replacePending")
 	}
 }
 
@@ -769,8 +769,8 @@ func TestNewManagerRequiresNamedGraphTools(t *testing.T) {
 		},
 		nil,
 	)
-	if err == nil || !strings.Contains(err.Error(), `unknown tool "coordination.replacePending"`) {
-		t.Fatalf("NewManager() error = %v, want unknown coordination.replacePending", err)
+	if err == nil || !strings.Contains(err.Error(), `unknown tool "coordination_replacePending"`) {
+		t.Fatalf("NewManager() error = %v, want unknown coordination_replacePending", err)
 	}
 }
 
