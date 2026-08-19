@@ -10,20 +10,12 @@ type Usage struct {
 	TotalTokens      int
 }
 
-// ContextTokens 返回本次请求占用的上下文 Token 数。
-func (u Usage) ContextTokens() int {
-	if u.TotalTokens > 0 {
-		return u.TotalTokens
-	}
-	return u.InputTokens + u.CachedTokens + u.CacheWriteTokens + u.OutputTokens + u.ReasoningTokens
-}
-
 // ShouldCompact 在已配置窗口且用量超过窗口时触发压缩。
 func ShouldCompact(usage *Usage, contextWindow int) bool {
 	if usage == nil || contextWindow <= 0 {
 		return false
 	}
-	return usage.ContextTokens() > contextWindow
+	return usage.TotalTokens > contextWindow
 }
 
 // cloneUsage 复制可选用量，避免 Hook 或调用方修改内部历史。

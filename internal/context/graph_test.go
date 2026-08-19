@@ -302,8 +302,9 @@ func TestGraphWithMemoryAppendsNodesAndEdges(t *testing.T) {
 	t.Parallel()
 
 	original := Graph{
-		Revision: 3,
-		Nodes:    []Node{{ID: "old", Statement: "prior", SubgraphIDs: []string{"sg-a"}}},
+		Revision:  3,
+		Subgraphs: []Subgraph{{ID: "sg-a"}},
+		Nodes:     []Node{{ID: "old", Statement: "prior", SubgraphIDs: []string{"sg-a"}}},
 	}
 	got := original.WithMemory(
 		[]Node{{ID: "new", Statement: "added", SubgraphIDs: []string{"sg-a"}}},
@@ -323,6 +324,40 @@ func TestGraphWithMemoryAppendsNodesAndEdges(t *testing.T) {
 	upstream := got.UpstreamNodes("new")
 	if len(upstream) != 1 || upstream[0].ID != "old" {
 		t.Fatalf("upstream = %#v", upstream)
+	}
+}
+
+func TestGraphWithMemorySkipsDuplicatesAndDanglingMembership(t *testing.T) {
+	t.Parallel()
+
+	original := Graph{
+		Revision:  3,
+		Subgraphs: []Subgraph{{ID: "sg-a"}},
+		Nodes:     []Node{{ID: "old", Statement: "prior", SubgraphIDs: []string{"sg-a"}}},
+	}
+
+	got := original.WithMemory([]Node{
+		{ID: "old", Statement: "duplicate id", SubgraphIDs: []string{"sg-a"}},
+		{ID: "n1", Statement: "kept", SubgraphIDs: []string{"sg-a", "sg-missing", "sg-a", ""}},
+		{ID: "n1", Statement: "batch duplicate", SubgraphIDs: []string{"sg-a"}},
+		{ID: "", Statement: "empty id", SubgraphIDs: []string{"sg-a"}},
+	}, nil)
+	if got.Revision != 4 {
+		t.Fatalf("revision = %d, want 4", got.Revision)
+	}
+	if len(got.Nodes) != 2 || got.Nodes[1].ID != "n1" || got.Nodes[1].Statement != "kept" {
+		t.Fatalf("nodes = %#v", got.Nodes)
+	}
+	if !reflect.DeepEqual(got.Nodes[1].SubgraphIDs, []string{"sg-a"}) {
+		t.Fatalf("n1 subgraphs = %v, want [sg-a]", got.Nodes[1].SubgraphIDs)
+	}
+
+	unchanged := original.WithMemory([]Node{
+		{ID: "old", Statement: "still duplicate"},
+		{ID: "", Statement: "empty"},
+	}, nil)
+	if unchanged.Revision != 3 || len(unchanged.Nodes) != 1 {
+		t.Fatalf("duplicate-only = revision %d nodes %#v", unchanged.Revision, unchanged.Nodes)
 	}
 }
 
@@ -363,6 +398,17 @@ func TestGraphWithNodesInSubgraph(t *testing.T) {
 	if unchanged.Revision != 2 {
 		t.Fatalf("unchanged revision = %d, want 2", unchanged.Revision)
 	}
+
+	created := original.WithNodesInSubgraph("sg-missing", []string{"n0"})
+	if created.Revision != 3 {
+		t.Fatalf("new subgraph revision = %d, want 3", created.Revision)
+	}
+	if !containsID(created.Nodes[0].SubgraphIDs, "sg-missing") {
+		t.Fatalf("n0 subgraphs = %v, want sg-missing", created.Nodes[0].SubgraphIDs)
+	}
+	if !hasSubgraphID(created, "sg-missing") {
+		t.Fatal("sg-missing metadata missing after add")
+	}
 }
 
 func TestGraphWithSubgraph(t *testing.T) {
@@ -391,5 +437,19 @@ func TestGraphWithSubgraph(t *testing.T) {
 	replaced := got.WithSubgraph(Subgraph{ID: "sg-a", Name: "new", Revision: 3})
 	if replaced.Subgraphs[0].Name != "new" || replaced.Revision != 3 {
 		t.Fatalf("replace = %#v", replaced.Subgraphs)
+	}
+	if replaced.Subgraphs[0].Revision != 3 {
+		t.Fatalf("subgraph revision = %d, want 3", replaced.Subgraphs[0].Revision)
+	}
+
+	regressed := replaced.WithSubgraph(Subgraph{ID: "sg-a", Name: "older", Revision: 1})
+	if regressed.Subgraphs[0].Name != "older" {
+		t.Fatalf("name = %q, want older", regressed.Subgraphs[0].Name)
+	}
+	if regressed.Subgraphs[0].Revision != 4 {
+		t.Fatalf("subgraph revision = %d, want 4", regressed.Subgraphs[0].Revision)
+	}
+	if regressed.Revision != 4 {
+		t.Fatalf("graph revision = %d, want 4", regressed.Revision)
 	}
 }

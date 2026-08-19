@@ -2,43 +2,6 @@ package agent
 
 import "testing"
 
-func TestUsageContextTokens(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		usage    Usage
-		expected int
-	}{
-		{
-			name:     "prefers total tokens",
-			usage:    Usage{InputTokens: 1, OutputTokens: 2, TotalTokens: 9},
-			expected: 9,
-		},
-		{
-			name: "sums components when total is missing",
-			usage: Usage{
-				InputTokens:      3,
-				CachedTokens:     4,
-				CacheWriteTokens: 5,
-				OutputTokens:     6,
-				ReasoningTokens:  7,
-			},
-			expected: 25,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			if got := tt.usage.ContextTokens(); got != tt.expected {
-				t.Fatalf("ContextTokens() = %d, want %d", got, tt.expected)
-			}
-		})
-	}
-}
-
 func TestShouldCompact(t *testing.T) {
 	t.Parallel()
 
@@ -78,10 +41,10 @@ func TestShouldCompact(t *testing.T) {
 			expected:      true,
 		},
 		{
-			name:          "component sum over window",
-			usage:         &Usage{InputTokens: 80, OutputTokens: 30},
+			name:          "missing total does not compact",
+			usage:         &Usage{InputTokens: 80, CachedTokens: 40, OutputTokens: 30, ReasoningTokens: 10},
 			contextWindow: 100,
-			expected:      true,
+			expected:      false,
 		},
 	}
 

@@ -4,7 +4,86 @@ llm:
   api_key_env: OPENCODE_API_KEY
   model: deepseek-v4-flash
   context_window: 128000
+tools:
+  organize_subgraph:
+    description: 根据查询整理出一张对应的记忆子图并返回该子图。发起请求的 Agent 会自动订阅这张新子图。
+  read:
+    description: 读取工作区文本文件。offset 是从 1 起的行号，limit 是最大行数。约 2000 行或 50KB 截断；截断时给出下一个 offset。
+  write:
+    description: 写入文件：不存在则创建，存在则覆盖。父目录只是路径前缀，直接写出文件键。
+  edit:
+    description: 按精确文本替换编辑一个文件。每条 edits[].oldText 必须在原文件中唯一且互不重叠。也接受顶层 oldText/newText 作为单条编辑。
+  ls:
+    description: 列出目录。目录名带 / 后缀。包含点文件。默认最多 500 条。
+  grep:
+    description: 在工作区文件中搜索模式。进程内走 FileView 的 List/Read，不调用 rg。
+  find:
+    description: 按 glob 查找文件。进程内走 FileView，不调用 fd。匹配相对搜索根的路径。
+  bash:
+    description: 在工作区里执行 bash 命令。可选 timeout 是秒数。非零退出码会写在输出里，不是工具错误。
+  coordination.replacePending:
+    description: 提交尚未执行切片的完整期望态，由图 diff 后改拓扑。roots 是根任务列表（按序号对齐，每项必须写 info：目标与验收标准）；spawns 是期望的 spawn/join 全集，每项带 info。成环、跨任务树或拆根会失败，图保持原样。任务执行期间不要改图，等任务报告。
+  memory_neighbors:
+    description: 查看某记忆节点的上游（前）和下游（后）节点。before/after：负数从该方向列表最前取 |n| 个，正数从最后取 n 个；省略则返回该方向全部节点。只读本 Agent 的图副本。
+  memory_subgraphs_of:
+    description: 查看某记忆节点正式所属的子图 ID。只读本 Agent 的图副本。
+  memory_sources_of:
+    description: 查看某记忆节点由哪些子图产生（来源子图）。只读本 Agent 的图副本。
+  memory_nodes_in:
+    description: 按子图查看记忆节点，返回至少属于其中一个子图的节点并集。只读本 Agent 的图副本。
+  memory_add_to_subgraph:
+    description: 把指定记忆节点加入某个子图。只改本 Agent 的图副本。
+  memory_drop_from_context:
+    description: 从本轮对话上下文中去掉指定记忆节点的详细内容，减轻窗口压力。不删除记忆图上的节点；之后仍可用工具再查到它们。
+  compact_memory:
+    description: 把旧对话整理进记忆图，只留下尾部消息。keep_recent_tokens 为 0 时不保留前缀。
+  inject_subscribed_memory:
+    description: 把当前订阅子图里的节点格式化成系统提示片段。
+prompts:
+  default: |-
+    你是 Threadmill，一个通过 ReAct 循环完成任务的 AI Agent。
+
+    根据用户请求决定下一步行动。需要读取信息或执行操作时，调用可用工具；不要编造工具结果。收到工具结果后继续处理，直到可以直接回答用户。
+  compact: |-
+    你是记忆整理器。把一段对话整理成记忆图节点。不要继续对话，不要回答用户。
+
+    规则：
+    - 只提取之后还用得上的知识：目标、约束、已确认事实、未决假设、关键决策、文件/符号/错误信息。
+    - 不要一对一地为每条消息建节点。能合并的合并；寒暄、重复、中间推理、无结果的工具过程丢掉。
+    - 一条陈述只写一件事，短句，保留确切路径、名称和错误原文。
+    - kind 只能是 directive（约束/偏好）、fact（已成立）、hypothesis（待验证）。
+    - status 只能是 accepted、disputed、superseded、outdated。
+    - subgraph_ids 从用户消息「可选归属子图」里选已有子图 ID；按内容判断这条知识属于哪些子图。也可以不标（空数组或不写）。
+    - 不要因为不知道归属就把节点写进当前订阅。
+    - 不要填写来源子图；来源由当前订阅列表决定。
+    - 不要重复「已有记忆」里已经有的陈述。
+    - 只输出 JSON，不要 markdown，不要其它文字。
+
+    格式：
+    {"nodes":[{"kind":"fact","statement":"...","status":"accepted","subgraph_ids":["sg-a"]}]}
+  compact_json_reminder: |-
+    上次输出不是完整 JSON。只输出一个 JSON 对象，不要 markdown，不要其它文字。格式：{"nodes":[{"kind":"fact","statement":"...","status":"accepted","subgraph_ids":["sg-a"]}]}
+  drop_context_pressure: 上下文已接近窗口上限。请调用 memory_drop_from_context 丢掉暂时用不到的节点详情；这不会修改记忆图。
+  organize_query: 请把相关节点加入这个子图，不要更换 ID。查询字符串不是节点 ID。
 agents:
+  manager:
+    id: manager
+    system_prompt: |-
+      你是经理 Agent。你全权负责对接用户，并编排协调图。规划、执行、核验 Agent 只处理各自角色，不能对接用户，也不能改图。
+
+      规则：
+      - 每次请求都会带上最新协调图。改图只调用 coordination.replacePending，提交完整期望态（roots + spawns）。每个 root/spawn 必须写清 info（任务目标与验收标准）。
+      - 任务执行期间不要改图，等任务报告。收到 [任务报告] 后再决定汇报用户或继续拉任务。
+      - 成环、跨任务树或拆根会失败，图保持原样。不要对象级 spawn/unspawn，不要自己跑图。
+      - 不要自己去做规划、执行或核验工作。
+      - 不要编造工具结果。
+    tools:
+      - coordination.replacePending
+      - organize_subgraph
+    hooks:
+      - inject_subscribed_memory
+      - compact_on_overflow
+      - commit_tail_on_turn_end
   planner:
     id: planner
     system_prompt: |-
@@ -15,15 +94,15 @@ agents:
       - 每一步具体、可独立执行，按合理顺序排列。
       - 不要编造工具结果；需要读信息时才调用可用工具。
     tools:
-      - organize_subgraph          # 按查询整理一张记忆子图
-      - read                       # 读工作区文本文件
-      - ls                         # 列出目录
-      - grep                       # 搜索文件内容
-      - find                       # 按 glob 找文件
+      - organize_subgraph
+      - read
+      - ls
+      - grep
+      - find
     hooks:
-      - inject_subscribed_memory   # 把订阅子图拼进系统提示
-      - compact_on_overflow        # 超窗口时把旧消息整理进记忆
-      - commit_tail_on_turn_end    # 回合结束时把剩余消息写入记忆图
+      - inject_subscribed_memory
+      - compact_on_overflow
+      - commit_tail_on_turn_end
   executor:
     id: executor
     system_prompt: |-
@@ -34,15 +113,15 @@ agents:
       - 需要操作时调用可用工具；不要编造工具结果。
       - 完成后用简短文字报告这一步的结果。
     tools:
-      - organize_subgraph          # 按查询整理一张记忆子图
-      - read                       # 读工作区文本文件
-      - write                      # 写入或覆盖文件
-      - edit                       # 按 oldText 精确替换
-      - bash                       # 在隔离工作区执行命令
+      - organize_subgraph
+      - read
+      - write
+      - edit
+      - bash
     hooks:
-      - inject_subscribed_memory   # 把订阅子图拼进系统提示
-      - compact_on_overflow        # 超窗口时把旧消息整理进记忆
-      - commit_tail_on_turn_end    # 回合结束时把剩余消息写入记忆图
+      - inject_subscribed_memory
+      - compact_on_overflow
+      - commit_tail_on_turn_end
   verifier:
     id: verifier
     system_prompt: |-
@@ -53,15 +132,15 @@ agents:
       - 明确给出通过或不通过，并列出依据。
       - 不要编造未出现在记忆或对话里的事实。
     tools:
-      - organize_subgraph          # 按查询整理一张记忆子图
-      - read                       # 读工作区文本文件
-      - ls                         # 列出目录
-      - grep                       # 搜索文件内容
-      - find                       # 按 glob 找文件
+      - organize_subgraph
+      - read
+      - ls
+      - grep
+      - find
     hooks:
-      - inject_subscribed_memory   # 把订阅子图拼进系统提示
-      - compact_on_overflow        # 超窗口时把旧消息整理进记忆
-      - commit_tail_on_turn_end    # 回合结束时把剩余消息写入记忆图
+      - inject_subscribed_memory
+      - compact_on_overflow
+      - commit_tail_on_turn_end
   subgraph_organizer:
     id: subgraph-organizer
     system_prompt: |-
@@ -72,11 +151,11 @@ agents:
       - 用 memory_add_to_subgraph 把选中节点加入目标子图 ID，不要更换 ID。
       - 完成后用简短文字确认即可。
     tools:
-      - memory_neighbors           # 查看某节点的上下游
-      - memory_subgraphs_of        # 查看节点所属子图
-      - memory_sources_of          # 查看节点来源子图
-      - memory_nodes_in            # 按子图列出节点
-      - memory_add_to_subgraph     # 把节点加入目标子图
-      - memory_drop_from_context   # 从对话上下文丢掉节点详情，不改记忆图
+      - memory_neighbors
+      - memory_subgraphs_of
+      - memory_sources_of
+      - memory_nodes_in
+      - memory_add_to_subgraph
+      - memory_drop_from_context
     hooks:
-      - remind_drop_context_on_pressure  # 接近窗口时提醒调用上述工具
+      - remind_drop_context_on_pressure

@@ -29,6 +29,13 @@ func (s *stubProvider) Generate(_ context.Context, request Request) (AssistantMe
 	return AssistantMessage{Content: s.response}, nil
 }
 
+func compactPromptCtx(prompt, reminder string) context.Context {
+	return WithTranscript(context.Background(), Transcript{
+		CompactPrompt:       prompt,
+		CompactJSONReminder: reminder,
+	})
+}
+
 func TestCompactHistoryUsesOneModelRequestAndKeepsTail(t *testing.T) {
 	t.Parallel()
 
@@ -58,7 +65,7 @@ func TestCompactHistoryUsesOneModelRequestAndKeepsTail(t *testing.T) {
 	}
 
 	gotGraph, tail, err := CompactHistory(
-		context.Background(),
+		compactPromptCtx("yaml compact", "json only"),
 		provider,
 		graph,
 		messages,
@@ -72,8 +79,8 @@ func TestCompactHistoryUsesOneModelRequestAndKeepsTail(t *testing.T) {
 	if provider.calls != 1 {
 		t.Fatalf("model calls = %d, want 1", provider.calls)
 	}
-	if provider.last.SystemPrompt != OrganizePrompt {
-		t.Fatalf("system prompt = %q, want OrganizePrompt", provider.last.SystemPrompt)
+	if provider.last.SystemPrompt != "yaml compact" {
+		t.Fatalf("system prompt = %q, want yaml compact", provider.last.SystemPrompt)
 	}
 	if len(provider.last.Tools) != 0 {
 		t.Fatalf("tools = %#v, want none", provider.last.Tools)
@@ -109,6 +116,30 @@ func TestCompactHistoryUsesOneModelRequestAndKeepsTail(t *testing.T) {
 	upstream := gotGraph.UpstreamNodes(nodes[1].ID)
 	if len(upstream) != 1 || upstream[0].ID != "old" {
 		t.Fatalf("previous node = %#v, want old", upstream)
+	}
+}
+
+func TestCompactHistoryDoesNotInjectBuiltInPrompt(t *testing.T) {
+	t.Parallel()
+
+	provider := &stubProvider{response: `{"nodes":[]}`}
+	_, _, err := CompactHistory(
+		context.Background(),
+		provider,
+		ctxgraph.Graph{},
+		[]Message{
+			{Role: RoleUser, Content: "old work"},
+			{Role: RoleAssistant, Content: "noted"},
+		},
+		nil,
+		0,
+		"agent-a",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.last.SystemPrompt != "" {
+		t.Fatalf("system prompt = %q, want empty without yaml transcript", provider.last.SystemPrompt)
 	}
 }
 
@@ -437,7 +468,7 @@ func TestCompactHistoryRetriesInvalidJSONWithReminder(t *testing.T) {
 	})
 
 	gotGraph, _, err := CompactHistory(
-		context.Background(),
+		compactPromptCtx("yaml compact", "json only"),
 		provider,
 		ctxgraph.Graph{
 			Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask}},
@@ -457,8 +488,8 @@ func TestCompactHistoryRetriesInvalidJSONWithReminder(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("model calls = %d, want 2", calls)
 	}
-	if second.SystemPrompt != OrganizePrompt {
-		t.Fatalf("retry system prompt = %q, want OrganizePrompt", second.SystemPrompt)
+	if second.SystemPrompt != "yaml compact" {
+		t.Fatalf("retry system prompt = %q, want yaml compact", second.SystemPrompt)
 	}
 	if len(second.Messages) != 3 {
 		t.Fatalf("retry messages = %#v, want original user, bad assistant, reminder", second.Messages)
@@ -466,8 +497,8 @@ func TestCompactHistoryRetriesInvalidJSONWithReminder(t *testing.T) {
 	if second.Messages[1].Role != RoleAssistant || second.Messages[1].Content != `{"nodes":[{"kind":"fact"}` {
 		t.Fatalf("retry assistant = %#v, want the invalid json", second.Messages[1])
 	}
-	if second.Messages[2].Role != RoleUser || !strings.Contains(second.Messages[2].Content, "完整 JSON") {
-		t.Fatalf("retry reminder = %q, want a json format reminder", second.Messages[2].Content)
+	if second.Messages[2].Role != RoleUser || !strings.Contains(second.Messages[2].Content, "json only") {
+		t.Fatalf("retry reminder = %q, want yaml json reminder", second.Messages[2].Content)
 	}
 
 	nodes := gotGraph.NodesInSubgraphs([]string{"sg-a"})

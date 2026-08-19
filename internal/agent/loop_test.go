@@ -19,9 +19,18 @@ func (f modelFunc) Generate(ctx context.Context, request Request) (AssistantMess
 	return f(ctx, request)
 }
 
+func isCompactRequest(request Request) bool {
+	for _, message := range request.Messages {
+		if strings.Contains(message.Content, "待整理对话：") {
+			return true
+		}
+	}
+	return false
+}
+
 func ignoreOrganize(next modelFunc) modelFunc {
 	return func(ctx context.Context, request Request) (AssistantMessage, error) {
-		if request.SystemPrompt == OrganizePrompt {
+		if isCompactRequest(request) {
 			return AssistantMessage{Content: `{"nodes":[]}`}, nil
 		}
 		return next(ctx, request)
@@ -30,7 +39,7 @@ func ignoreOrganize(next modelFunc) modelFunc {
 
 func withOrganizeJSON(next modelFunc) modelFunc {
 	return func(ctx context.Context, request Request) (AssistantMessage, error) {
-		if request.SystemPrompt == OrganizePrompt {
+		if isCompactRequest(request) {
 			full := ""
 			if len(request.Messages) > 0 {
 				full = request.Messages[0].Content

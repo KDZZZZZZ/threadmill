@@ -258,13 +258,33 @@ func SubgraphRef(id string) string {
 }
 
 // WithMemory 追加记忆节点和边，并增加图版本。
+// 空 ID 或已存在的节点 ID 跳过；归属只保留图中已有子图；没有任何新增则只克隆。
 func (g Graph) WithMemory(nodes []Node, edges []Edge) Graph {
-	if len(nodes) == 0 && len(edges) == 0 {
-		return g.Clone()
-	}
 	cloned := g.Clone()
+	known := subgraphIDs(cloned)
+	seen := make(map[string]struct{}, len(cloned.Nodes)+len(nodes))
+	for _, node := range cloned.Nodes {
+		if node.ID != "" {
+			seen[node.ID] = struct{}{}
+		}
+	}
+
+	added := false
 	for _, node := range nodes {
-		cloned.Nodes = append(cloned.Nodes, cloneNode(node))
+		if node.ID == "" {
+			continue
+		}
+		if _, dup := seen[node.ID]; dup {
+			continue
+		}
+		clonedNode := cloneNode(node)
+		clonedNode.SubgraphIDs = keepKnownIDs(clonedNode.SubgraphIDs, known)
+		cloned.Nodes = append(cloned.Nodes, clonedNode)
+		seen[node.ID] = struct{}{}
+		added = true
+	}
+	if !added && len(edges) == 0 {
+		return cloned
 	}
 	cloned.Edges = append(cloned.Edges, edges...)
 	cloned.Revision++
@@ -272,7 +292,7 @@ func (g Graph) WithMemory(nodes []Node, edges []Edge) Graph {
 }
 
 // WithNodesInSubgraph 把指定节点加入子图（写入 Node.SubgraphIDs）。
-// 未知节点跳过；已属于该子图的节点不变；有变更时图版本加一。
+// 未知节点跳过；子图不存在则先写入元数据，避免悬空归属；已属于该子图的节点不变；有变更时图版本加一。
 func (g Graph) WithNodesInSubgraph(subgraphID string, nodeIDs []string) Graph {
 	if subgraphID == "" || len(nodeIDs) == 0 {
 		return g.Clone()
@@ -312,6 +332,9 @@ func (g Graph) WithNodesInSubgraph(subgraphID string, nodeIDs []string) Graph {
 	if !changed {
 		return cloned
 	}
+	if !hasSubgraphID(cloned, subgraphID) {
+		cloned.Subgraphs = append(cloned.Subgraphs, Subgraph{ID: subgraphID})
+	}
 
 	cloned.Revision++
 	for i, subgraph := range cloned.Subgraphs {
@@ -323,6 +346,7 @@ func (g Graph) WithNodesInSubgraph(subgraphID string, nodeIDs []string) Graph {
 }
 
 // WithSubgraph 写入或替换子图元数据；ID 为空则只克隆。
+// 替换时子图 revision 不得倒退：传入值不大于现有值则在现有值上加一。
 func (g Graph) WithSubgraph(subgraph Subgraph) Graph {
 	if subgraph.ID == "" {
 		return g.Clone()
@@ -330,6 +354,9 @@ func (g Graph) WithSubgraph(subgraph Subgraph) Graph {
 	cloned := g.Clone()
 	for i, existing := range cloned.Subgraphs {
 		if existing.ID == subgraph.ID {
+			if subgraph.Revision <= existing.Revision {
+				subgraph.Revision = existing.Revision + 1
+			}
 			cloned.Subgraphs[i] = subgraph
 			cloned.Revision++
 			return cloned
@@ -338,6 +365,35 @@ func (g Graph) WithSubgraph(subgraph Subgraph) Graph {
 	cloned.Subgraphs = append(cloned.Subgraphs, subgraph)
 	cloned.Revision++
 	return cloned
+}
+
+func subgraphIDs(g Graph) map[string]struct{} {
+	ids := make(map[string]struct{}, len(g.Subgraphs))
+	for _, subgraph := range g.Subgraphs {
+		if subgraph.ID != "" {
+			ids[subgraph.ID] = struct{}{}
+		}
+	}
+	return ids
+}
+
+func keepKnownIDs(ids []string, known map[string]struct{}) []string {
+	out := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := known[id]; !ok {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 func containsID(ids []string, want string) bool {

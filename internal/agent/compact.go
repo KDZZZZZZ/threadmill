@@ -12,26 +12,6 @@ import (
 const defaultKeepRecentTokens = 20000
 const maxOrganizeFormatAttempts = 3
 
-const organizeJSONReminder = `上次输出不是完整 JSON。只输出一个 JSON 对象，不要 markdown，不要其它文字。格式：{"nodes":[{"kind":"fact","statement":"...","status":"accepted","subgraph_ids":["sg-a"]}]}`
-
-// OrganizePrompt 是把对话整理成记忆节点的系统提示词（初稿）。
-const OrganizePrompt = `你是记忆整理器。把一段对话整理成记忆图节点。不要继续对话，不要回答用户。
-
-规则：
-- 只提取之后还用得上的知识：目标、约束、已确认事实、未决假设、关键决策、文件/符号/错误信息。
-- 不要一对一地为每条消息建节点。能合并的合并；寒暄、重复、中间推理、无结果的工具过程丢掉。
-- 一条陈述只写一件事，短句，保留确切路径、名称和错误原文。
-- kind 只能是 directive（约束/偏好）、fact（已成立）、hypothesis（待验证）。
-- status 只能是 accepted、disputed、superseded、outdated。
-- subgraph_ids 从用户消息「可选归属子图」里选已有子图 ID；按内容判断这条知识属于哪些子图。也可以不标（空数组或不写）。
-- 不要因为不知道归属就把节点写进当前订阅。
-- 不要填写来源子图；来源由当前订阅列表决定。
-- 不要重复「已有记忆」里已经有的陈述。
-- 只输出 JSON，不要 markdown，不要其它文字。
-
-格式：
-{"nodes":[{"kind":"fact","statement":"...","status":"accepted","subgraph_ids":["sg-a"]}]}`
-
 type organizeOutput struct {
 	Nodes []organizeNode `json:"nodes"`
 }
@@ -112,7 +92,7 @@ func organizeWithModel(
 			return nil, fmt.Errorf("organizing memory: %w", err)
 		}
 		response, err := provider.Generate(ctx, Request{
-			SystemPrompt: OrganizePrompt,
+			SystemPrompt: compactSystemPrompt(ctx),
 			Messages:     requestMessages,
 		})
 		if err != nil {
@@ -125,10 +105,26 @@ func organizeWithModel(
 		lastParse = err
 		requestMessages = append(requestMessages,
 			Message{Role: RoleAssistant, Content: response.Content},
-			Message{Role: RoleUser, Content: organizeJSONReminder + "\n解析错误：" + err.Error()},
+			Message{Role: RoleUser, Content: compactJSONReminder(ctx) + "\n解析错误：" + err.Error()},
 		)
 	}
 	return nil, fmt.Errorf("organizing memory: %w", lastParse)
+}
+
+func compactSystemPrompt(ctx context.Context) string {
+	transcript, ok := TranscriptFromContext(ctx)
+	if !ok {
+		return ""
+	}
+	return transcript.CompactPrompt
+}
+
+func compactJSONReminder(ctx context.Context) string {
+	transcript, ok := TranscriptFromContext(ctx)
+	if !ok {
+		return ""
+	}
+	return transcript.CompactJSONReminder
 }
 
 func buildOrganizeUserPrompt(graph ctxgraph.Graph, subgraphIDs []string, messages []Message) string {

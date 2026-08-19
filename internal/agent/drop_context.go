@@ -91,19 +91,27 @@ func RemindDropContextOnPressure(loop *Loop) AssembleRequestHook {
 		if loop == nil || loop.contextWindow <= 0 {
 			return request, nil
 		}
-		if strings.Contains(request.SystemPrompt, dropContextPressureReminder) {
+		reminder := loop.dropContextReminderText()
+		if strings.Contains(request.SystemPrompt, reminder) {
 			return request, nil
 		}
 		if estimateRequestTokens(request) < softContextThreshold(loop.contextWindow) {
 			return request, nil
 		}
 		if request.SystemPrompt == "" {
-			request.SystemPrompt = dropContextPressureReminder
+			request.SystemPrompt = reminder
 			return request, nil
 		}
-		request.SystemPrompt = request.SystemPrompt + "\n\n" + dropContextPressureReminder
+		request.SystemPrompt = request.SystemPrompt + "\n\n" + reminder
 		return request, nil
 	}
+}
+
+func (l *Loop) dropContextReminderText() string {
+	if l != nil && l.dropContextReminder != "" {
+		return l.dropContextReminder
+	}
+	return dropContextPressureReminder
 }
 
 func softContextThreshold(contextWindow int) int {

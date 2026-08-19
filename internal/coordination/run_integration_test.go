@@ -83,6 +83,7 @@ func TestLiveGraphRunMemoryOpsAndEnvVersions(t *testing.T) {
 			nil,
 			cfg.LLM.ContextWindow,
 			react,
+			agent.FileOverlay{Tools: cfg.Tools, Prompts: cfg.Prompts},
 		),
 	)
 	if err != nil {
