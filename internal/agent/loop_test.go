@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	"github.com/KDZZZZZZ/threadmill/internal/event"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -463,6 +464,128 @@ func TestLoopRunsModelAndToolHooks(t *testing.T) {
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("hook order = %v, want %v", events, want)
 	}
+}
+
+func TestLoopPublishesRuntimeEvents(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var got []event.RuntimeEvent
+	bus := event.NewBus(func(_ context.Context, ev event.RuntimeEvent) {
+		got = append(got, ev)
+	})
+	modelCalls := 0
+	model := modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+		modelCalls++
+		if modelCalls == 1 {
+			return AssistantMessage{
+				Model: "stub-model",
+				Usage: &Usage{TotalTokens: 9},
+				ToolCalls: []agenttool.Call{{
+					ID:        "call-1",
+					Name:      "echo",
+					Arguments: json.RawMessage(`{}`),
+				}},
+			}, nil
+		}
+		return AssistantMessage{Content: "done", Model: "stub-model"}, nil
+	})
+	echo := &testTool{
+		definition: agenttool.Definition{
+			Name:        "echo",
+			Description: "Echo text",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		execute: func(context.Context, agenttool.Call) (agenttool.Output, error) {
+			return agenttool.Output{Content: "ok"}, nil
+		},
+	}
+
+	loop, err := NewLoop(Config{
+		AgentID:  "planner",
+		Provider: model,
+		Tools:    []agenttool.Tool{echo},
+		Events:   bus,
+		Hooks: Hooks{
+			AfterTurn: []AfterTurnHook{
+				func(context.Context, UserMessage, TurnResult) error {
+					cancel()
+					return nil
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop.Enqueue(UserMessage{Content: "start"})
+	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+
+	want := []struct {
+		kind  event.Kind
+		phase event.Phase
+		name  string
+	}{
+		{event.KindModel, event.PhaseStart, ""},
+		{event.KindModel, event.PhaseEnd, "stub-model"},
+		{event.KindTool, event.PhaseStart, "echo"},
+		{event.KindTool, event.PhaseEnd, "echo"},
+		{event.KindModel, event.PhaseStart, ""},
+		{event.KindModel, event.PhaseEnd, "stub-model"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("events = %#v, want %d", got, len(want))
+	}
+	for i, step := range want {
+		if got[i].Kind != step.kind || got[i].Phase != step.phase || got[i].Name != step.name {
+			t.Fatalf("event[%d] = kind=%s phase=%s name=%q, want %+v", i, got[i].Kind, got[i].Phase, got[i].Name, step)
+		}
+		if got[i].AgentID != "planner" {
+			t.Fatalf("event[%d].AgentID = %q, want planner", i, got[i].AgentID)
+		}
+	}
+	if got[1].ToolCalls != 1 || got[1].Tokens != 9 {
+		t.Fatalf("first model end = %#v", got[1])
+	}
+	if got[2].CallID != "call-1" || got[3].CallID != "call-1" {
+		t.Fatalf("tool call id = %q / %q", got[2].CallID, got[3].CallID)
+	}
+}
+
+func TestLoopPublishesModelError(t *testing.T) {
+	bus, got := recordingBus()
+	loop, err := NewLoop(Config{
+		AgentID: "planner",
+		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+			return AssistantMessage{}, errors.New("provider down")
+		}),
+		Events: bus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loop.Ask(context.Background(), "start"); err == nil {
+		t.Fatal("Ask() error = nil, want provider down")
+	}
+	if len(*got) != 2 {
+		t.Fatalf("events = %#v, want start and end", *got)
+	}
+	if (*got)[0].Phase != event.PhaseStart || (*got)[1].Phase != event.PhaseEnd {
+		t.Fatalf("phases = %s %s", (*got)[0].Phase, (*got)[1].Phase)
+	}
+	if (*got)[1].Err != "provider down" || !(*got)[1].IsError {
+		t.Fatalf("end = %#v", (*got)[1])
+	}
+}
+
+func recordingBus() (*event.Bus, *[]event.RuntimeEvent) {
+	got := []event.RuntimeEvent{}
+	bus := event.NewBus(func(_ context.Context, ev event.RuntimeEvent) {
+		got = append(got, ev)
+	})
+	return bus, &got
 }
 
 func TestLoopBeforeToolHookCanBlockExecution(t *testing.T) {

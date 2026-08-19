@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/KDZZZZZZ/threadmill/internal/event"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -108,26 +110,33 @@ func (l *Loop) executeToolCalls(ctx context.Context, calls []agenttool.Call) err
 
 // executeToolCall 校验并执行一个工具调用，然后触发对应的前后钩子。
 func (l *Loop) executeToolCall(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+	started := time.Now()
+	l.publish(ctx, event.ToolStart(l.agentID, call.Name, call.ID))
 	result := agenttool.Result{CallID: call.ID, Name: call.Name}
 	registered, exists := l.tools[call.Name]
 	validationErr := call.Validate()
+	var runErr error
 
 	switch {
 	case validationErr != nil:
 		result.Content = validationErr.Error()
 		result.IsError = true
+		runErr = validationErr
 	case !exists:
-		result.Content = fmt.Sprintf("tool %q not found", call.Name)
+		runErr = fmt.Errorf("tool %q not found", call.Name)
+		result.Content = runErr.Error()
 		result.IsError = true
 	default:
 		if err := l.hooks.beforeTool(ctx, call); err != nil {
 			result.Content = err.Error()
 			result.IsError = true
+			l.publish(ctx, event.ToolEnd(l.agentID, call.Name, call.ID, started, true, err))
 			return result, l.hooks.afterTool(ctx, call, result)
 		}
 		if err := ctx.Err(); err != nil {
 			result.Content = err.Error()
 			result.IsError = true
+			l.publish(ctx, event.ToolEnd(l.agentID, call.Name, call.ID, started, true, err))
 			return result, l.hooks.afterTool(ctx, call, result)
 		}
 
@@ -139,12 +148,14 @@ func (l *Loop) executeToolCall(ctx context.Context, call agenttool.Call) (agentt
 		if err != nil {
 			result.Content = err.Error()
 			result.IsError = true
+			runErr = err
 		} else {
 			result.Content = output.Content
 			result.Details = bytes.Clone(output.Details)
 		}
 	}
 
+	l.publish(ctx, event.ToolEnd(l.agentID, call.Name, call.ID, started, result.IsError, runErr))
 	return result, l.hooks.afterTool(ctx, call, result)
 }
 
@@ -162,6 +173,8 @@ func (l *Loop) appendCanceledResults(ctx context.Context, calls []agenttool.Call
 			Content: "tool call canceled before execution",
 			IsError: true,
 		}
+		l.publish(ctx, event.ToolStart(l.agentID, call.Name, call.ID))
+		l.publish(ctx, event.ToolEnd(l.agentID, call.Name, call.ID, time.Time{}, true, context.Canceled))
 		if err := l.appendToolResult(result); err != nil {
 			return err
 		}
