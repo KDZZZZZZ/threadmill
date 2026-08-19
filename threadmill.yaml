@@ -1,0 +1,82 @@
+llm:
+  provider: openai-responses
+  base_url: https://opencode.ai/zen/go/v1
+  api_key_env: OPENCODE_API_KEY
+  model: deepseek-v4-flash
+  context_window: 128000
+agents:
+  planner:
+    id: planner
+    system_prompt: |-
+      你是规划 Agent。根据用户目标和订阅记忆，产出可执行的分步计划。
+
+      规则：
+      - 只规划，不要执行计划中的操作。
+      - 每一步具体、可独立执行，按合理顺序排列。
+      - 不要编造工具结果；需要读信息时才调用可用工具。
+    tools:
+      - organize_subgraph          # 按查询整理一张记忆子图
+      - read                       # 读工作区文本文件
+      - ls                         # 列出目录
+      - grep                       # 搜索文件内容
+      - find                       # 按 glob 找文件
+    hooks:
+      - inject_subscribed_memory   # 把订阅子图拼进系统提示
+      - compact_on_overflow        # 超窗口时把旧消息整理进记忆
+      - commit_tail_on_turn_end    # 回合结束时把剩余消息写入记忆图
+  executor:
+    id: executor
+    system_prompt: |-
+      你是执行 Agent。按给定计划逐步完成当前任务。
+
+      规则：
+      - 严格按计划执行，不要擅自改写目标。
+      - 需要操作时调用可用工具；不要编造工具结果。
+      - 完成后用简短文字报告这一步的结果。
+    tools:
+      - organize_subgraph          # 按查询整理一张记忆子图
+      - read                       # 读工作区文本文件
+      - write                      # 写入或覆盖文件
+      - edit                       # 按 oldText 精确替换
+      - bash                       # 在隔离工作区执行命令
+    hooks:
+      - inject_subscribed_memory   # 把订阅子图拼进系统提示
+      - compact_on_overflow        # 超窗口时把旧消息整理进记忆
+      - commit_tail_on_turn_end    # 回合结束时把剩余消息写入记忆图
+  verifier:
+    id: verifier
+    system_prompt: |-
+      你是核验 Agent。根据目标、计划和执行结果，判断任务是否完成。
+
+      规则：
+      - 只核验，不要继续执行计划，不要改写计划。
+      - 明确给出通过或不通过，并列出依据。
+      - 不要编造未出现在记忆或对话里的事实。
+    tools:
+      - organize_subgraph          # 按查询整理一张记忆子图
+      - read                       # 读工作区文本文件
+      - ls                         # 列出目录
+      - grep                       # 搜索文件内容
+      - find                       # 按 glob 找文件
+    hooks:
+      - inject_subscribed_memory   # 把订阅子图拼进系统提示
+      - compact_on_overflow        # 超窗口时把旧消息整理进记忆
+      - commit_tail_on_turn_end    # 回合结束时把剩余消息写入记忆图
+  subgraph_organizer:
+    id: subgraph-organizer
+    system_prompt: |-
+      你是记忆子图整理 Agent。根据用户查询，使用记忆图工具找出相关节点，并把它们加入用户消息指定的目标子图。
+
+      规则：
+      - 只使用工具返回的节点 ID，不要编造。
+      - 用 memory_add_to_subgraph 把选中节点加入目标子图 ID，不要更换 ID。
+      - 完成后用简短文字确认即可。
+    tools:
+      - memory_neighbors           # 查看某节点的上下游
+      - memory_subgraphs_of        # 查看节点所属子图
+      - memory_sources_of          # 查看节点来源子图
+      - memory_nodes_in            # 按子图列出节点
+      - memory_add_to_subgraph     # 把节点加入目标子图
+      - memory_drop_from_context   # 从对话上下文丢掉节点详情，不改记忆图
+    hooks:
+      - remind_drop_context_on_pressure  # 接近窗口时提醒调用上述工具
