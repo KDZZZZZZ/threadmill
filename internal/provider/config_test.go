@@ -43,6 +43,59 @@ func TestLoadConfigReadsRootYAML(t *testing.T) {
 	}
 }
 
+func TestLoadConfigReadsAPIKey(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  api_key: sk-test-literal
+  model: gpt-5
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LLM.APIKey != "sk-test-literal" {
+		t.Fatalf("APIKey = %q, want sk-test-literal", got.LLM.APIKey)
+	}
+}
+
+func TestLoadConfigRejectsMissingAPIKey(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  model: gpt-5
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadConfig(root)
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig() error = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestNewTransportUsesYAMLAPIKeyWithoutEnv(t *testing.T) {
+	got, err := newTransport(LLMConfig{
+		Provider: OpenAIResponses,
+		BaseURL:  "https://api.openai.com/v1",
+		APIKey:   "sk-from-yaml",
+		Model:    "gpt-5",
+	}, OpenAIResponses, "/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.apiKey != "sk-from-yaml" {
+		t.Fatalf("apiKey = %q", got.apiKey)
+	}
+}
+
 func TestLoadConfigReadsAgents(t *testing.T) {
 	root := t.TempDir()
 	content := []byte(`llm:
@@ -58,7 +111,7 @@ agents:
     system_prompt: |-
       manager prompt
     tools:
-      - coordination.replacePending
+      - coordination_replacePending
     hooks:
       - inject_subscribed_memory
   planner:
@@ -130,7 +183,7 @@ agents:
 				ID:           "manager",
 				MaxSteps:     48,
 				SystemPrompt: "manager prompt",
-				Tools:        []string{"coordination.replacePending"},
+				Tools:        []string{"coordination_replacePending"},
 				Hooks:        []string{"inject_subscribed_memory"},
 			},
 			Planner: agent.FileAgent{
@@ -368,7 +421,7 @@ func TestLoadConfigRejectsPlannerGraphTool(t *testing.T) {
 agents:
   planner:
     tools:
-      - coordination.replacePending
+      - coordination_replacePending
 `)
 	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
 		t.Fatal(err)
@@ -608,11 +661,11 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 	if got.Agents.Manager.SystemPrompt == "" {
 		t.Fatal("workspace manager system_prompt is empty")
 	}
-	if got.Tools["coordination.replacePending"].Description == "" {
-		t.Fatal("workspace tools.coordination.replacePending.description is empty")
+	if got.Tools["coordination_replacePending"].Description == "" {
+		t.Fatal("workspace tools.coordination_replacePending.description is empty")
 	}
 	for _, name := range got.Agents.Planner.Tools {
-		if name == "coordination.replacePending" {
+		if name == "coordination_replacePending" {
 			t.Fatalf("planner tools include manager-only %q", name)
 		}
 	}

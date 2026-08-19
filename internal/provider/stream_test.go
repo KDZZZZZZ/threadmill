@@ -139,6 +139,46 @@ func TestReadResponseStreamUsesTypeField(t *testing.T) {
 	}
 }
 
+func TestReadResponseStreamCompletedOmitsStatus(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"response.output_text.delta","delta":"你好"}`,
+		``,
+		`data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"你好"}]}]}}`,
+		``,
+	}, "\n")
+	got, err := readResponseStream(strings.NewReader(body), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := got.assistantMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.Content != "你好" {
+		t.Fatalf("content = %q", message.Content)
+	}
+}
+
+func TestReadResponseStreamCompletedEmptySnapshotUsesDeltas(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"response.output_text.delta","delta":"你好"}`,
+		``,
+		`data: {"type":"response.completed","response":{}}`,
+		``,
+	}, "\n")
+	got, err := readResponseStream(strings.NewReader(body), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := got.assistantMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.Content != "你好" {
+		t.Fatalf("content = %q", message.Content)
+	}
+}
+
 func TestReadResponseStreamMissingCompleted(t *testing.T) {
 	_, err := readResponseStream(strings.NewReader("data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n"), nil)
 	if err == nil || !strings.Contains(err.Error(), "without response.completed") {

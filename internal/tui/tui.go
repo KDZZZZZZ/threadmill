@@ -1,8 +1,8 @@
-// Package tui 是 threadmill 的默认交互界面：消息区、输入框、状态栏。
+// Package tui 是 threadmill 的默认交互界面：顶栏、消息区、输入框、状态栏。
 //
 // 布局参考 Pi 的「滚动 transcript + 底部编辑器 + footer」。
-// 组件用法来自 Bubble Tea 官方 chat 示例：
-// https://github.com/charmbracelet/bubbletea/blob/v1.3.10/examples/chat/main.go
+// 观感走工业粗线：反相顶栏/底栏、ThickBorder 输入框、消息不加圆角框。
+// Lip Gloss：https://pkg.go.dev/github.com/charmbracelet/lipgloss@v1.1.0
 package tui
 
 import (
@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -42,6 +43,8 @@ const (
 	itemAssistant
 	itemReport
 	itemActivity
+	itemThinking
+	itemError
 )
 
 type item struct {
@@ -58,22 +61,34 @@ type model struct {
 	streamed bool
 	tokens   int
 	inflight map[string]int
+	spin     spinner.Model
 	width    int
 	height   int
 }
 
 func newModel(chat Chat, info Info) model {
 	input := textarea.New()
-	input.Placeholder = "发给 manager…"
+	input.Placeholder = "发给 manager"
 	input.Focus()
-	input.Prompt = "┃ "
+	input.Prompt = "> "
 	input.ShowLineNumbers = false
 	input.SetHeight(3)
 	input.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	input.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(colorDim)
+	input.FocusedStyle.Prompt = lipgloss.NewStyle().Bold(true)
+	input.BlurredStyle.Prompt = lipgloss.NewStyle().Foreground(colorDim)
+	// Border 写在 Base 上：https://pkg.go.dev/github.com/charmbracelet/bubbles@v1.0.0/textarea
+	input.FocusedStyle.Base = lipgloss.NewStyle().
+		Border(lipgloss.ThickBorder()).
+		BorderForeground(colorInk)
+	input.BlurredStyle.Base = lipgloss.NewStyle().
+		Border(lipgloss.ThickBorder()).
+		BorderForeground(colorDim)
 	input.KeyMap.InsertNewline.SetEnabled(false)
 
 	vp := viewport.New(80, 20)
-	vp.SetContent("threadmill")
+
+	spin := spinner.New(spinner.WithSpinner(spinner.Line))
 
 	return model{
 		chat:     chat,
@@ -81,6 +96,7 @@ func newModel(chat Chat, info Info) model {
 		viewport: vp,
 		input:    input,
 		inflight: map[string]int{},
+		spin:     spin,
 	}
 }
 
@@ -94,7 +110,7 @@ func NewProgram(ctx context.Context, chat Chat, info Info) *tea.Program {
 }
 
 func (m model) Init() tea.Cmd {
-	return textarea.Blink
+	return tea.Batch(textarea.Blink, m.spin.Tick)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -104,6 +120,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.layout()
 		return m, nil
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spin, cmd = m.spin.Update(msg)
+		if !m.busy() {
+			return m, nil
+		}
+		m.refresh()
+		return m, cmd
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC:
@@ -117,8 +141,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.submit()
 		}
 	case event.RuntimeEvent:
+		wasBusy := m.busy()
 		m.applyEvent(msg)
 		m.refresh()
+		if m.busy() && !wasBusy {
+			return m, m.spin.Tick
+		}
 		return m, nil
 	case OutputMsg:
 		m.applyOutput(msg.Text)
@@ -150,15 +178,32 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 
 func (m *model) applyEvent(ev event.RuntimeEvent) {
 	switch {
+	case ev.Kind == event.KindModel && ev.Phase == event.PhaseStart && ev.AgentID == "manager":
+		m.items = append(m.items, item{kind: itemThinking, text: "[manager] 思考中"})
 	case ev.Kind == event.KindModel && ev.Phase == event.PhaseDelta && ev.AgentID == "manager":
+		m.dropThinking()
 		m.appendAssistant(ev.Delta)
 		m.streamed = true
+	case ev.Kind == event.KindModel && ev.Phase == event.PhaseEnd && ev.Err != "":
+		who := ev.AgentID
+		if who == "" {
+			who = "model"
+		}
+		m.dropThinking()
+		m.items = append(m.items, item{kind: itemError, text: fmt.Sprintf("[%s] %s", who, ev.Err)})
+	case ev.Kind == event.KindModel && ev.Phase == event.PhaseEnd && ev.AgentID == "manager":
+		m.dropThinking()
 	case ev.Kind == event.KindTool:
 		line := ev.Name + " " + string(ev.Phase)
 		if ev.AgentID != "" {
 			line = fmt.Sprintf("[%s] tool %s %s", ev.AgentID, ev.Name, ev.Phase)
 		} else {
 			line = fmt.Sprintf("tool %s", line)
+		}
+		if ev.Err != "" {
+			line += ": " + ev.Err
+			m.items = append(m.items, item{kind: itemError, text: line})
+			break
 		}
 		m.items = append(m.items, item{kind: itemActivity, text: line})
 	}
@@ -203,11 +248,31 @@ func (m *model) applyOutput(text string) {
 	m.appendAssistant(text)
 }
 
+func (m *model) dropThinking() {
+	keep := make([]item, 0, len(m.items))
+	for _, it := range m.items {
+		if it.kind != itemThinking {
+			keep = append(keep, it)
+		}
+	}
+	m.items = keep
+}
+
+func (m model) busy() bool {
+	for _, n := range m.inflight {
+		if n > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *model) layout() {
 	m.input.SetWidth(m.width)
+	headerH := lipgloss.Height(m.headerLine())
 	statusH := lipgloss.Height(m.statusLine())
-	gap := 1
-	h := m.height - m.input.Height() - statusH - gap
+	inputH := lipgloss.Height(m.input.View())
+	h := m.height - headerH - inputH - statusH
 	if h < 1 {
 		h = 1
 	}
@@ -221,10 +286,16 @@ func (m *model) refresh() {
 	if width <= 0 {
 		width = 80
 	}
-	wrap := lipgloss.NewStyle().Width(width)
+	if len(m.items) == 0 {
+		hint := lipgloss.NewStyle().Foreground(colorDim).Width(width).Render(
+			"空。Enter 发送  Esc 取消  Ctrl+C 退出",
+		)
+		m.viewport.SetContent(hint)
+		return
+	}
 	parts := make([]string, 0, len(m.items))
 	for _, it := range m.items {
-		parts = append(parts, wrap.Render(renderItem(it)))
+		parts = append(parts, renderItem(it, width))
 	}
 	m.viewport.SetContent(strings.Join(parts, "\n"))
 	m.viewport.GotoBottom()
@@ -233,10 +304,20 @@ func (m *model) refresh() {
 func (m model) View() string {
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
+		m.headerLine(),
 		m.viewport.View(),
 		m.input.View(),
 		m.statusLine(),
 	)
+}
+
+func (m model) headerLine() string {
+	modelName := m.info.Model
+	if modelName == "" {
+		modelName = "-"
+	}
+	text := "threadmill  " + modelName + "  " + shortenPath(m.info.Root, 40)
+	return chromeBar(m.width).Bold(true).Render(text)
 }
 
 func (m model) statusLine() string {
@@ -244,18 +325,28 @@ func (m model) statusLine() string {
 	if modelName == "" {
 		modelName = "-"
 	}
-	line := fmt.Sprintf(
+	left := fmt.Sprintf(
 		" %s  %s  token %d  tasks %d ",
 		m.info.Root,
 		modelName,
 		m.tokens,
 		m.runningTasks(),
 	)
-	style := lipgloss.NewStyle().Reverse(true)
-	if m.width > 0 {
-		style = style.Width(m.width)
+	if m.busy() {
+		left = fmt.Sprintf(" %s 思考  %s", m.spin.View(), left)
 	}
-	return style.Render(line)
+	right := " enter send | esc cancel | ctrl+c quit "
+	line := left
+	if m.width > 0 {
+		pad := m.width - lipgloss.Width(left) - lipgloss.Width(right)
+		if pad < 1 {
+			pad = 1
+		}
+		line = left + strings.Repeat(" ", pad) + right
+	} else {
+		line = left + right
+	}
+	return chromeBar(m.width).Render(line)
 }
 
 func (m model) runningTasks() int {
@@ -281,19 +372,47 @@ func taskKey(agentID string) string {
 	return agentID[:i]
 }
 
-func renderItem(it item) string {
+var (
+	colorInk   = lipgloss.Color("7")
+	colorDim   = lipgloss.Color("8")
+	colorError = lipgloss.Color("1")
+	colorWarn  = lipgloss.Color("3")
+)
+
+func chromeBar(width int) lipgloss.Style {
+	style := lipgloss.NewStyle().Reverse(true).Padding(0, 1)
+	if width > 0 {
+		style = style.Width(width)
+	}
+	return style
+}
+
+func renderItem(it item, width int) string {
 	switch it.kind {
 	case itemUser:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Render("you: ") + it.text
+		return lipgloss.NewStyle().Bold(true).Width(width).Render("> " + it.text)
+	case itemAssistant:
+		return lipgloss.NewStyle().Width(width).Render(it.text)
 	case itemReport:
-		return lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("3")).
-			Padding(0, 1).
-			Render(it.text)
+		return lipgloss.NewStyle().Foreground(colorWarn).Width(width).Render("==\n" + it.text)
 	case itemActivity:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(it.text)
+		return lipgloss.NewStyle().Foreground(colorDim).Width(width).Render("* " + it.text)
+	case itemThinking:
+		return lipgloss.NewStyle().Foreground(colorDim).Width(width).Render(it.text)
+	case itemError:
+		return lipgloss.NewStyle().Foreground(colorError).Bold(true).Width(width).Render("! " + it.text)
 	default:
-		return it.text
+		return lipgloss.NewStyle().Width(width).Render(it.text)
 	}
+}
+
+func shortenPath(p string, max int) string {
+	if max <= 1 || p == "" {
+		return p
+	}
+	runes := []rune(p)
+	if len(runes) <= max {
+		return p
+	}
+	return "…" + string(runes[len(runes)-(max-1):])
 }

@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 )
@@ -45,13 +44,9 @@ func newTransport(
 		)
 	}
 
-	apiKey, exists := os.LookupEnv(config.APIKeyEnv)
-	if !exists || strings.TrimSpace(apiKey) == "" {
-		return transport{}, fmt.Errorf(
-			"%w: environment variable %q is empty",
-			ErrInvalidConfig,
-			config.APIKeyEnv,
-		)
+	apiKey, err := config.resolveAPIKey()
+	if err != nil {
+		return transport{}, err
 	}
 	if client == nil {
 		client = &http.Client{Timeout: defaultRequestTimeout}

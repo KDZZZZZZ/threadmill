@@ -46,6 +46,7 @@ type ExecConfig struct {
 type LLMConfig struct {
 	Provider      string `yaml:"provider"`
 	BaseURL       string `yaml:"base_url"`
+	APIKey        string `yaml:"api_key"`
 	APIKeyEnv     string `yaml:"api_key_env"`
 	Model         string `yaml:"model"`
 	ContextWindow int    `yaml:"context_window"`
@@ -107,6 +108,7 @@ func (c *ExecConfig) validate() error {
 func (config LLMConfig) validate() error {
 	if strings.TrimSpace(config.Provider) != config.Provider ||
 		strings.TrimSpace(config.BaseURL) != config.BaseURL ||
+		strings.TrimSpace(config.APIKey) != config.APIKey ||
 		strings.TrimSpace(config.APIKeyEnv) != config.APIKeyEnv ||
 		strings.TrimSpace(config.Model) != config.Model {
 		return fmt.Errorf("%w: llm fields must not have surrounding whitespace", ErrInvalidConfig)
@@ -114,8 +116,8 @@ func (config LLMConfig) validate() error {
 	if config.Provider != OpenAIResponses {
 		return fmt.Errorf("%w: llm.provider must be %q", ErrInvalidConfig, OpenAIResponses)
 	}
-	if strings.TrimSpace(config.APIKeyEnv) == "" {
-		return fmt.Errorf("%w: llm.api_key_env is required", ErrInvalidConfig)
+	if config.APIKey == "" && config.APIKeyEnv == "" {
+		return fmt.Errorf("%w: llm.api_key or llm.api_key_env is required", ErrInvalidConfig)
 	}
 	if strings.TrimSpace(config.Model) == "" {
 		return fmt.Errorf("%w: llm.model is required", ErrInvalidConfig)
@@ -135,6 +137,21 @@ func (config LLMConfig) validate() error {
 		return fmt.Errorf("%w: llm.base_url must use https outside loopback", ErrInvalidConfig)
 	}
 	return nil
+}
+
+func (config LLMConfig) resolveAPIKey() (string, error) {
+	if config.APIKey != "" {
+		return config.APIKey, nil
+	}
+	apiKey, exists := os.LookupEnv(config.APIKeyEnv)
+	if !exists || strings.TrimSpace(apiKey) == "" {
+		return "", fmt.Errorf(
+			"%w: environment variable %q is empty",
+			ErrInvalidConfig,
+			config.APIKeyEnv,
+		)
+	}
+	return strings.TrimSpace(apiKey), nil
 }
 
 // isLoopbackHost 只为本地 OpenAI-compatible 开发服务放行明文 HTTP。

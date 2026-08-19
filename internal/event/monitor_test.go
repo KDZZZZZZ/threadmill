@@ -54,6 +54,15 @@ func TestMonitorLogsErrorLevel(t *testing.T) {
 	}
 }
 
+func TestMonitorSkipsDelta(t *testing.T) {
+	var output bytes.Buffer
+	logger := logging.New(logging.Config{Output: &output, JSON: true})
+	Monitor(logger)(context.Background(), ModelDelta("manager", "tok"))
+	if output.Len() != 0 {
+		t.Fatalf("delta logged: %s", output.String())
+	}
+}
+
 func TestMonitorNilLoggerUsesDefault(t *testing.T) {
 	if Monitor(nil) == nil {
 		t.Fatal("Monitor(nil) returned nil handler")

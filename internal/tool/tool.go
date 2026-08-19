@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -15,6 +16,10 @@ var (
 	// ErrInvalidCall 表示模型生成了无法调度的工具调用。
 	ErrInvalidCall = errors.New("tool: invalid call")
 )
+
+// OpenAI function name：a-z A-Z 0-9 _ -，最长 64。
+// 来源：https://developers.openai.com/api/docs/guides/function-calling
+var functionName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
 // Definition 是提供给模型的工具元信息，InputSchema 必须是 JSON Schema 对象。
 type Definition struct {
@@ -27,6 +32,9 @@ type Definition struct {
 func (d Definition) Validate() error {
 	if strings.TrimSpace(d.Name) == "" {
 		return fmt.Errorf("%w: missing name", ErrInvalidDefinition)
+	}
+	if !functionName.MatchString(d.Name) {
+		return fmt.Errorf("%w: name %q must match %s", ErrInvalidDefinition, d.Name, functionName.String())
 	}
 	if strings.TrimSpace(d.Description) == "" {
 		return fmt.Errorf("%w: missing description", ErrInvalidDefinition)

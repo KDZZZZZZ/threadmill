@@ -32,13 +32,19 @@ func TestResponsesGenerateCallsResponsesAPI(t *testing.T) {
 			"instructions": "system prompt",
 			"store":        false,
 			"include":      []any{"reasoning.encrypted_content"},
-			"input": []any{map[string]any{
-				"role": "user",
-				"content": []any{map[string]any{
-					"type": "input_text",
-					"text": "weather",
-				}},
-			}},
+			"input": []any{
+				map[string]any{
+					"role":    "system",
+					"content": "system prompt",
+				},
+				map[string]any{
+					"role": "user",
+					"content": []any{map[string]any{
+						"type": "input_text",
+						"text": "weather",
+					}},
+				},
+			},
 			"tools": []any{map[string]any{
 				"type":        "function",
 				"name":        "weather",

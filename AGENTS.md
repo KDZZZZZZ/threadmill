@@ -97,5 +97,7 @@ Use only the portions relevant to the requested subsystem. Compare their behavio
 - `addyosmani/agent-skills@source-driven-development`
 - `mattpocock/skills@tdd`
 - `dietrichgebert/ponytail`
+- `brojonat/llmsrules@bubbletea` — Bubble Tea v1 TUI
+- `trentkm/go-tui-design` — Charm TUI 视觉与布局
 
-Skill files live in `.agents/skills/`. Restore with `npx skills experimental_install`.
+Skill files live in `.agents/skills/` (gitignored). Restore with `npx skills experimental_install`.

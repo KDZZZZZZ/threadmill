@@ -56,6 +56,7 @@ func readResponseStream(r io.Reader, sink func(string)) (createResponseResponse,
 
 	var eventName, data string
 	var completed *createResponseResponse
+	var streamed strings.Builder
 	total := 0
 	dispatch := func() error {
 		if data == "" {
@@ -70,6 +71,7 @@ func readResponseStream(r io.Reader, sink func(string)) (createResponseResponse,
 			Type     string                  `json:"type"`
 			Delta    string                  `json:"delta"`
 			Response *createResponseResponse `json:"response"`
+			createResponseResponse
 		}
 		if err := json.Unmarshal([]byte(data), &payload); err != nil {
 			eventName = ""
@@ -82,10 +84,26 @@ func readResponseStream(r io.Reader, sink func(string)) (createResponseResponse,
 		}
 		switch typ {
 		case "response.output_text.delta":
-			if payload.Delta != "" && sink != nil {
-				sink(payload.Delta)
+			if payload.Delta != "" {
+				streamed.WriteString(payload.Delta)
+				if sink != nil {
+					sink(payload.Delta)
+				}
 			}
-		case "response.completed", "response.incomplete":
+		case "response.completed", "response.done":
+			resp := payload.Response
+			if resp == nil {
+				copied := payload.createResponseResponse
+				resp = &copied
+			}
+			if resp.Status == "" {
+				resp.Status = "completed"
+			}
+			if err := fillOutputFromDeltas(resp, streamed.String()); err != nil {
+				return err
+			}
+			completed = resp
+		case "response.incomplete":
 			if payload.Response != nil {
 				completed = payload.Response
 			}
@@ -127,6 +145,24 @@ func readResponseStream(r io.Reader, sink func(string)) (createResponseResponse,
 		return createResponseResponse{}, errors.New("responses stream ended without response.completed")
 	}
 	return *completed, nil
+}
+
+func fillOutputFromDeltas(resp *createResponseResponse, deltas string) error {
+	if resp == nil || len(resp.Output) > 0 || deltas == "" {
+		return nil
+	}
+	item, err := json.Marshal(responseOutput{
+		Type: "message",
+		Content: []responseContent{{
+			Type: "output_text",
+			Text: deltas,
+		}},
+	})
+	if err != nil {
+		return fmt.Errorf("encode streamed responses output: %w", err)
+	}
+	resp.Output = []json.RawMessage{item}
+	return nil
 }
 
 // WithDeltaSink 把流式文本回调挂到 ctx 上。

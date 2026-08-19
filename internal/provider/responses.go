@@ -60,7 +60,7 @@ func (provider *Responses) Generate(ctx context.Context, request agent.Request) 
 
 // buildRequest 将 Agent 的对话和工具定义转换为 Responses API 输入。
 func (provider *Responses) buildRequest(request agent.Request) (createResponseRequest, error) {
-	input := make([]json.RawMessage, 0, len(request.Messages))
+	input := make([]json.RawMessage, 0, len(request.Messages)+1)
 	appendInput := func(value responseInput) error {
 		encoded, err := json.Marshal(value)
 		if err != nil {
@@ -68,6 +68,19 @@ func (provider *Responses) buildRequest(request agent.Request) (createResponseRe
 		}
 		input = append(input, encoded)
 		return nil
+	}
+
+	// OpenAI Responses 的 instructions 等价于一条 system/developer 消息，但兼容网关
+	// 常只转发 input。Pi 也把 systemPrompt 放进 input 第一条。
+	// 协议：https://developers.openai.com/api/reference/resources/responses/methods/create/
+	// 参考：badlogic/pi-mono packages/ai/src/providers/openai-responses-shared.ts
+	if request.SystemPrompt != "" {
+		if err := appendInput(responseInput{
+			Role:    "system",
+			Content: request.SystemPrompt,
+		}); err != nil {
+			return createResponseRequest{}, fmt.Errorf("encode system prompt: %w", err)
+		}
 	}
 
 	for _, message := range request.Messages {

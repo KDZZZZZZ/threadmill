@@ -1,6 +1,18 @@
 {
   "version": 1,
   "skills": {
+    "bubbletea": {
+      "source": "brojonat/llmsrules",
+      "sourceType": "github",
+      "skillPath": "skills/bubbletea/SKILL.md",
+      "computedHash": "19e5d4bb033fe65f3c1fcb57ba0e7ed7368b928c6abe5080daebb29155a4b7ce"
+    },
+    "go-tui-design": {
+      "source": "trentkm/go-tui-design",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "c32c496cfe0aac924877ed49a4e8135dc16b757bbe8f179269d8d205fb4b7236"
+    },
     "golang-benchmark": {
       "source": "samber/cc-skills-golang",
       "sourceType": "github",
