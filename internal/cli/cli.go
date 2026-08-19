@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -11,8 +10,11 @@ import (
 	"strings"
 	"sync"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/KDZZZZZZ/threadmill/internal/event"
 	"github.com/KDZZZZZZ/threadmill/internal/session"
+	"github.com/KDZZZZZZ/threadmill/internal/tui"
 )
 
 // IO 是 CLI 的输入输出和可选的会话工厂。
@@ -28,7 +30,7 @@ type options struct {
 	message string
 }
 
-// Run 解析参数，打开会话，然后 REPL 或单发。
+// Run 解析参数：-p 单发纯文本，默认进入 TUI。
 func Run(args []string, stdio IO) int {
 	opts, err := parse(args, stdio.Err)
 	if err != nil {
@@ -42,10 +44,6 @@ func Run(args []string, stdio IO) int {
 	if open == nil {
 		open = session.Open
 	}
-	in := stdio.In
-	if in == nil {
-		in = os.Stdin
-	}
 	out := stdio.Out
 	if out == nil {
 		out = os.Stdout
@@ -58,6 +56,13 @@ func Run(args []string, stdio IO) int {
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 
+	if opts.message != "" {
+		return runPrint(ctx, stop, opts, open, out, errOut)
+	}
+	return runTUI(ctx, opts, open, errOut)
+}
+
+func runPrint(ctx context.Context, stop context.CancelFunc, opts options, open func(context.Context, session.Options) (*session.Session, error), out, errOut io.Writer) int {
 	printer := &stdoutPrinter{out: out}
 	sess, err := open(ctx, session.Options{
 		Root:   opts.dir,
@@ -92,15 +97,41 @@ func Run(args []string, stdio IO) int {
 		}
 	}()
 
-	if opts.message != "" {
-		sess.Send(opts.message)
-		if err := sess.WaitIdle(ctx); err != nil {
-			fmt.Fprintln(errOut, err)
-			return 1
-		}
-		return 0
+	sess.Send(opts.message)
+	if err := sess.WaitIdle(ctx); err != nil {
+		fmt.Fprintln(errOut, err)
+		return 1
 	}
-	return repl(ctx, sess, in, out, errOut)
+	return 0
+}
+
+func runTUI(ctx context.Context, opts options, open func(context.Context, session.Options) (*session.Session, error), errOut io.Writer) int {
+	var p *tea.Program
+	sess, err := open(ctx, session.Options{
+		Root: opts.dir,
+		Output: func(text string) {
+			if p != nil {
+				p.Send(tui.OutputMsg{Text: text})
+			}
+		},
+		OnEvent: func(_ context.Context, ev event.RuntimeEvent) {
+			if p != nil {
+				p.Send(ev)
+			}
+		},
+	})
+	if err != nil {
+		fmt.Fprintln(errOut, err)
+		return 1
+	}
+	defer sess.Close()
+
+	p = tui.NewProgram(ctx, sess, tui.Info{Root: opts.dir, Model: sess.ModelName()})
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintln(errOut, err)
+		return 1
+	}
+	return 0
 }
 
 func parse(args []string, errOut io.Writer) (options, error) {
@@ -120,39 +151,6 @@ func parse(args []string, errOut io.Writer) (options, error) {
 		opts.dir = wd
 	}
 	return opts, nil
-}
-
-func repl(ctx context.Context, sess *session.Session, in io.Reader, out, errOut io.Writer) int {
-	scanner := bufio.NewScanner(in)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for {
-		if err := ctx.Err(); err != nil {
-			return 0
-		}
-		fmt.Fprint(out, "> ")
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				fmt.Fprintln(errOut, err)
-				return 1
-			}
-			return 0
-		}
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		if line == "/quit" {
-			return 0
-		}
-		sess.Send(line)
-		if err := sess.WaitIdle(ctx); err != nil {
-			fmt.Fprintln(errOut, err)
-			if ctx.Err() != nil {
-				return 0
-			}
-			return 1
-		}
-	}
 }
 
 func progressLine(ev event.RuntimeEvent) string {

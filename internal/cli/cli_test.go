@@ -53,6 +53,24 @@ func TestRunPrintOpensWorkspace(t *testing.T) {
 	}
 }
 
+func TestRunInteractiveOpensWorkspace(t *testing.T) {
+	var root string
+	code := Run([]string{"-C", "/tmp/tui"}, IO{
+		Out: io.Discard,
+		Err: io.Discard,
+		Open: func(_ context.Context, opt session.Options) (*session.Session, error) {
+			root = opt.Root
+			return nil, errSkipOpen
+		},
+	})
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if root != "/tmp/tui" {
+		t.Fatalf("root = %q, want /tmp/tui", root)
+	}
+}
+
 func TestProgressLine(t *testing.T) {
 	t.Parallel()
 
