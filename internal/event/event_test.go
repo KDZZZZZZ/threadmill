@@ -1,7 +1,9 @@
 package event
 
 import (
+	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -55,5 +57,31 @@ func TestNormalizeToolPair(t *testing.T) {
 	}
 	if !got.IsError || got.Err != "exit 1" || got.Duration <= 0 {
 		t.Fatalf("end = %#v", got)
+	}
+}
+
+func TestModelDelta(t *testing.T) {
+	got := ModelDelta("manager", "Hel")
+	if got.Kind != KindModel || got.Phase != PhaseDelta || got.AgentID != "manager" || got.Delta != "Hel" {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestDeltaSinkRoundTrip(t *testing.T) {
+	var got []string
+	ctx := WithDeltaSink(context.Background(), func(delta string) {
+		got = append(got, delta)
+	})
+	sink := DeltaSink(ctx)
+	if sink == nil {
+		t.Fatal("missing sink")
+	}
+	sink("a")
+	sink("b")
+	if strings.Join(got, "") != "ab" {
+		t.Fatalf("got %q", got)
+	}
+	if DeltaSink(context.Background()) != nil {
+		t.Fatal("empty context should have no sink")
 	}
 }

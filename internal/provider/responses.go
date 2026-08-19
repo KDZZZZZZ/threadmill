@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
+	"github.com/KDZZZZZZ/threadmill/internal/event"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -28,15 +29,23 @@ func NewResponses(config LLMConfig, client *http.Client) (*Responses, error) {
 	return &Responses{transport: transport}, nil
 }
 
-// Generate 调用非流式 Responses API，并转换文本及函数调用。
+// Generate 调用 Responses API，并转换文本及函数调用。
+// ctx 上挂了 DeltaSink 时走 SSE（stream=true），否则走一次性 JSON。
 // 协议来源：https://platform.openai.com/docs/api-reference/responses/create
 func (provider *Responses) Generate(ctx context.Context, request agent.Request) (agent.AssistantMessage, error) {
 	payload, err := provider.buildRequest(request)
 	if err != nil {
 		return agent.AssistantMessage{}, err
 	}
+	sink := event.DeltaSink(ctx)
 	var response createResponseResponse
-	if err := provider.post(ctx, payload, &response); err != nil {
+	if sink != nil {
+		payload.Stream = true
+		response, err = provider.postStream(ctx, payload, sink)
+	} else {
+		err = provider.post(ctx, payload, &response)
+	}
+	if err != nil {
 		return agent.AssistantMessage{}, err
 	}
 	message, err := response.assistantMessage()
@@ -154,6 +163,7 @@ type createResponseRequest struct {
 	Tools        []responseTool    `json:"tools,omitempty"`
 	Store        bool              `json:"store"`
 	Include      []string          `json:"include"`
+	Stream       bool              `json:"stream,omitempty"`
 }
 
 // responseInput 覆盖当前 Agent 用到的文本消息、函数调用和函数结果三种输入项。

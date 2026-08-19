@@ -454,6 +454,9 @@ type eventProvider struct {
 }
 
 func (p eventProvider) Generate(ctx context.Context, request Request) (AssistantMessage, error) {
+	ctx = event.WithDeltaSink(ctx, func(delta string) {
+		p.loop.publish(ctx, event.ModelDelta(p.loop.agentID, delta))
+	})
 	p.loop.publish(ctx, event.ModelStart(p.loop.agentID, len(request.Messages), len(request.Tools)))
 	started := time.Now()
 	message, err := p.inner.Generate(ctx, request)
