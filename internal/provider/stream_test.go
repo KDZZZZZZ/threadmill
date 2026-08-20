@@ -7,15 +7,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 	"github.com/KDZZZZZZ/threadmill/internal/event"
 )
 
 func TestResponsesGenerateStreamsDeltas(t *testing.T) {
-	t.Setenv("TEST_OPENAI_API_KEY", "test-key")
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Accept") != "text/event-stream" {
 			t.Errorf("Accept = %q, want text/event-stream", request.Header.Get("Accept"))
@@ -52,12 +52,7 @@ func TestResponsesGenerateStreamsDeltas(t *testing.T) {
 	}))
 	defer server.Close()
 
-	model, err := NewResponses(LLMConfig{
-		Provider:  OpenAIResponses,
-		BaseURL:   server.URL + "/v1",
-		APIKeyEnv: "TEST_OPENAI_API_KEY",
-		Model:     "gpt-5",
-	}, server.Client())
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,8 +79,6 @@ func TestResponsesGenerateStreamsDeltas(t *testing.T) {
 }
 
 func TestResponsesGenerateStreamFailed(t *testing.T) {
-	t.Setenv("TEST_OPENAI_API_KEY", "test-key")
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher := w.(http.Flusher)
@@ -93,12 +86,7 @@ func TestResponsesGenerateStreamFailed(t *testing.T) {
 	}))
 	defer server.Close()
 
-	model, err := NewResponses(LLMConfig{
-		Provider:  OpenAIResponses,
-		BaseURL:   server.URL + "/v1",
-		APIKeyEnv: "TEST_OPENAI_API_KEY",
-		Model:     "gpt-5",
-	}, server.Client())
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,6 +96,43 @@ func TestResponsesGenerateStreamFailed(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "response.failed") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResponsesGenerateStreamRetriesBeforeSSEStarts(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"try again"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		writeSSE(w, flusher, "response.completed", `{
+  "type":"response.completed",
+  "response":{
+    "status":"completed",
+    "output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+  }
+}`)
+	}))
+	defer server.Close()
+
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.retryInterval = time.Millisecond
+	ctx := event.WithDeltaSink(context.Background(), func(string) {})
+	got, err := model.Generate(ctx, agent.Request{
+		Messages: []agent.Message{{Role: agent.RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Content != "ok" || requests.Load() != 2 {
+		t.Fatalf("Generate() = %#v, requests = %d", got, requests.Load())
 	}
 }
 
@@ -176,6 +201,34 @@ func TestReadResponseStreamCompletedEmptySnapshotUsesDeltas(t *testing.T) {
 	}
 	if message.Content != "你好" {
 		t.Fatalf("content = %q", message.Content)
+	}
+}
+
+func TestReadResponseStreamKeepsCompletedOutputItemArguments(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","encrypted_content":"opaque","summary":[]}}`,
+		``,
+		`data: {"type":"response.function_call_arguments.done","output_index":1,"item_id":"fc_1","name":"ping","arguments":"{}"}`,
+		``,
+		`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"ping","arguments":"{}","status":"completed"}}`,
+		``,
+		`data: {"type":"response.completed","response":{"status":"completed","output":[{"id":"rs_1","type":"reasoning","summary":[]},{"id":"fc_1","type":"function_call","call_id":"call_1","name":"ping","arguments":null,"status":"completed"}]}}`,
+		``,
+	}, "\n")
+
+	got, err := readResponseStream(strings.NewReader(body), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := got.assistantMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(message.ToolCalls) != 1 || string(message.ToolCalls[0].Arguments) != `{}` {
+		t.Fatalf("tool calls = %#v, want one call with complete arguments", message.ToolCalls)
+	}
+	if _, err := json.Marshal(message); err != nil {
+		t.Fatalf("assistant message cannot be persisted: %v", err)
 	}
 }
 

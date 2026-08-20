@@ -618,7 +618,7 @@ func TestNewManagerLoopBindsOwnMemoryEnv(t *testing.T) {
 	ctxgraph.Update(ctxgraph.Copy{})
 
 	store := ctxgraph.NewStore()
-	store.Save(managerEnvID, ctxgraph.Graph{
+	store.Save(ManagerEnvID, ctxgraph.Graph{
 		Subgraphs: []ctxgraph.Subgraph{{ID: "bound"}},
 		Nodes: []ctxgraph.Node{{
 			ID:          "n1",
@@ -670,7 +670,7 @@ func TestNewManagerLoopBindsOwnMemoryEnv(t *testing.T) {
 	if _, err := loop.Ask(context.Background(), "start"); err != nil {
 		t.Fatalf("Ask() error = %v", err)
 	}
-	if nodes := store.Load(managerEnvID).NodesInSubgraphs([]string{"bound"}); len(nodes) != 1 || nodes[0].ID != "n1" {
+	if nodes := store.Load(ManagerEnvID).NodesInSubgraphs([]string{"bound"}); len(nodes) != 1 || nodes[0].ID != "n1" {
 		t.Fatal("write did not stay in manager env")
 	}
 	if nodes := store.Load("env-1").NodesInSubgraphs([]string{"bound"}); len(nodes) != 0 {

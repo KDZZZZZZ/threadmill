@@ -617,6 +617,51 @@ func TestStorePrepareMergeRebuildsCorruptEvidenceWithoutReplayingChanges(t *test
 	}
 }
 
+func TestPersistentStorePrepareMergeDoesNotReplayChangesAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	state := t.TempDir()
+	first, err := NewPersistentStore(base, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, first, "", "target")
+	mustFork(t, first, "target", "child")
+	if err := first.View("child").Write("optional.txt", []byte("from child")); err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, first, "target", "join")
+	if _, err := first.PrepareMerge("join", []MergeSource{{Name: "child-task", EnvID: "child"}}); err != nil {
+		t.Fatal(err)
+	}
+	joined := first.View("join")
+	if err := joined.Delete("optional.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := joined.Write(MergeRuntimeDir+"/manifest.json", []byte("{")); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := NewPersistentStore(base, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, second, "", "target")
+	mustFork(t, second, "target", "child")
+	mustFork(t, second, "target", "join")
+	manifest, err := second.PrepareMerge("join", []MergeSource{{Name: "child-task", EnvID: "child"}})
+	if err != nil {
+		t.Fatalf("PrepareMerge after restart: %v", err)
+	}
+	if _, err := second.View("join").Read("optional.txt"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("restart replayed an excluded file: %v", err)
+	}
+	if len(manifest.Changes) != 1 || manifest.Changes[0].Path != "optional.txt" {
+		t.Fatalf("rebuilt manifest = %#v, want optional.txt evidence", manifest.Changes)
+	}
+}
+
 func TestStoreMergeConflictsWhenGrandparentChangedAfterNestedFork(t *testing.T) {
 	t.Parallel()
 
@@ -1060,6 +1105,28 @@ func TestStoreMergeEmptyIntoIsNoop(t *testing.T) {
 	}
 	if _, err := store.View("parent").Read("from-child.txt"); err == nil {
 		t.Fatal("empty into applied onto parent")
+	}
+}
+
+func TestStoreStatsExposeBoundedResourceInventory(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	mustFork(t, store, "parent", "child")
+	if err := store.View("child").Write("created.txt", []byte("abc")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.View("child").Delete("hello.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Materialize("parent"); err != nil {
+		t.Fatal(err)
+	}
+	defer store.Release("parent")
+
+	got := store.Stats()
+	if got.Environments != 2 || got.LiveDirs != 1 || got.OverlayFiles != 1 || got.Tombstones != 1 || got.OverlayBytes != 3 {
+		t.Fatalf("stats = %#v", got)
 	}
 }
 

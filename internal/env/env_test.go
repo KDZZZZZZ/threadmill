@@ -70,7 +70,7 @@ type stubMemory struct{}
 
 func (stubMemory) Snapshot() ctxgraph.Graph { return ctxgraph.Graph{} }
 
-func (stubMemory) Commit(ctxgraph.Graph) {}
+func (stubMemory) Commit(ctxgraph.Graph) error { return nil }
 
 type stubFiles struct{}
 

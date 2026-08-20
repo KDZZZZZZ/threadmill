@@ -5,6 +5,7 @@ package vfs
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,11 +83,21 @@ type layer struct {
 
 // Store 按环境保存 overlay。Fork 拍父 overlay 快照作基线，不复制 host 树。
 type Store struct {
-	mu      sync.Mutex // ponytail: one store mutex, per-env locks if throughput matters
-	baseDir string
-	envs    map[string]*layer
-	lives   map[string]string
-	merges  map[string]MergeManifest
+	mu       sync.Mutex // ponytail: one store mutex, per-env locks if throughput matters
+	baseDir  string
+	liveRoot string
+	envs     map[string]*layer
+	lives    map[string]string
+	merges   map[string]MergeManifest
+}
+
+// Stats 是 VFS 当前持有的有界资源清单。
+type Stats struct {
+	Environments int   `json:"environments"`
+	LiveDirs     int   `json:"live_dirs"`
+	OverlayFiles int   `json:"overlay_files"`
+	Tombstones   int   `json:"tombstones"`
+	OverlayBytes int64 `json:"overlay_bytes"`
 }
 
 // NewStore 以只读 host 树为 base。写入不会改 baseDir。
@@ -97,6 +108,54 @@ func NewStore(baseDir string) *Store {
 		lives:   make(map[string]string),
 		merges:  make(map[string]MergeManifest),
 	}
+}
+
+// NewPersistentStore keeps materialized environments under liveRoot so another
+// Store instance can resume them after an ungraceful process exit.
+func NewPersistentStore(baseDir, liveRoot string) (*Store, error) {
+	if liveRoot == "" {
+		return nil, fmt.Errorf("vfs: persistent live root is required")
+	}
+	if err := os.MkdirAll(liveRoot, 0o700); err != nil {
+		return nil, fmt.Errorf("vfs: create persistent live root: %w", err)
+	}
+	root, err := confinedRoot(liveRoot)
+	if err != nil {
+		return nil, fmt.Errorf("vfs: open persistent live root: %w", err)
+	}
+	store := NewStore(baseDir)
+	store.liveRoot = root
+	return store, nil
+}
+
+// Stats 返回 overlay 和 live 目录的并发一致快照，不扫描宿主工作区。
+func (s *Store) Stats() Stats {
+	if s == nil {
+		return Stats{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stats := Stats{
+		Environments: len(s.envs),
+		LiveDirs:     len(s.lives),
+	}
+	for _, layer := range s.envs {
+		for _, item := range layer.files {
+			if item.tombstone {
+				stats.Tombstones++
+				continue
+			}
+			stats.OverlayFiles++
+			stats.OverlayBytes += int64(len(item.data))
+		}
+	}
+	for id := range s.lives {
+		if _, exists := s.envs[id]; !exists {
+			stats.Environments++
+		}
+	}
+	return stats
 }
 
 // Fork 先把 parent 的 live 收进 overlay，再给 child 挂上当时从父到根的 overlay 快照作基线。
@@ -114,15 +173,114 @@ func (s *Store) Fork(parentID, childID string) error {
 	if err := s.Absorb(parentID); err != nil {
 		return err
 	}
+	if live, ok, err := s.persistedLive(childID); err != nil {
+		return err
+	} else if ok {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if _, exists := s.envs[childID]; exists {
+			return nil
+		}
+		s.envs[childID] = &layer{
+			parentID: parentID,
+			files:    make(map[string]blob),
+			baseline: s.snapshotOverlays(parentID),
+		}
+		s.lives[childID] = live
+		return nil
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, exists := s.envs[childID]; exists {
+		s.mu.Unlock()
 		return nil
 	}
 	s.envs[childID] = &layer{
 		parentID: parentID,
 		files:    make(map[string]blob),
 		baseline: s.snapshotOverlays(parentID),
+	}
+	persistent := s.liveRoot != ""
+	s.mu.Unlock()
+	if persistent {
+		_, err := s.Materialize(childID)
+		return err
+	}
+	return nil
+}
+
+func (s *Store) persistedLive(envID string) (string, bool, error) {
+	if s.liveRoot == "" || envID == "" {
+		return "", false, nil
+	}
+	path := s.persistentLivePath(envID)
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return path, false, nil
+		}
+		return "", false, fmt.Errorf("vfs: inspect persistent environment: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", false, fmt.Errorf("vfs: persistent environment is not a directory: %s", path)
+	}
+	return path, true, nil
+}
+
+func (s *Store) persistentLivePath(envID string) string {
+	digest := sha256.Sum256([]byte(envID))
+	return filepath.Join(s.liveRoot, fmt.Sprintf("%x", digest[:]))
+}
+
+func (s *Store) persistentMergePath(envID string) string {
+	digest := sha256.Sum256([]byte(envID))
+	return filepath.Join(s.liveRoot, fmt.Sprintf("%x.merge.json", digest[:]))
+}
+
+func (s *Store) persistedMerge(envID string) (MergeManifest, bool, error) {
+	if s.liveRoot == "" || envID == "" {
+		return MergeManifest{}, false, nil
+	}
+	data, err := os.ReadFile(s.persistentMergePath(envID))
+	if os.IsNotExist(err) {
+		return MergeManifest{}, false, nil
+	}
+	if err != nil {
+		return MergeManifest{}, false, fmt.Errorf("vfs: read persistent merge: %w", err)
+	}
+	var manifest MergeManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return MergeManifest{}, false, fmt.Errorf("vfs: decode persistent merge: %w", err)
+	}
+	return manifest, true, nil
+}
+
+func (s *Store) persistMerge(envID string, data []byte) error {
+	if s.liveRoot == "" || envID == "" {
+		return nil
+	}
+	tmp, err := os.CreateTemp(s.liveRoot, ".merge-")
+	if err != nil {
+		return fmt.Errorf("vfs: create persistent merge: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("vfs: protect persistent merge: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("vfs: write persistent merge: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("vfs: sync persistent merge: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("vfs: close persistent merge: %w", err)
+	}
+	if err := os.Rename(tmpName, s.persistentMergePath(envID)); err != nil {
+		return fmt.Errorf("vfs: commit persistent merge: %w", err)
 	}
 	return nil
 }
@@ -279,6 +437,19 @@ func (s *Store) PrepareMerge(workspaceID string, sources []MergeSource) (MergeMa
 	manifest, prepared := s.merges[workspaceID]
 	manifest = cloneMergeManifest(manifest)
 	s.mu.Unlock()
+	if !prepared {
+		persisted, ok, err := s.persistedMerge(workspaceID)
+		if err != nil {
+			return MergeManifest{}, err
+		}
+		if ok {
+			manifest = cloneMergeManifest(persisted)
+			prepared = true
+			s.mu.Lock()
+			s.merges[workspaceID] = cloneMergeManifest(manifest)
+			s.mu.Unlock()
+		}
+	}
 
 	live, err := s.Materialize(workspaceID)
 	if err != nil {
@@ -367,6 +538,11 @@ func (s *Store) PrepareMerge(workspaceID string, sources []MergeSource) (MergeMa
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return MergeManifest{}, fmt.Errorf("vfs: prepare merge: encode manifest: %w", err)
+	}
+	if !prepared {
+		if err := s.persistMerge(workspaceID, data); err != nil {
+			return MergeManifest{}, err
+		}
 	}
 	if err := writeLive(live, MergeRuntimeDir+"/manifest.json", data); err != nil {
 		return MergeManifest{}, fmt.Errorf("vfs: prepare merge: write manifest: %w", err)

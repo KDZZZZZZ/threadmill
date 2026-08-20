@@ -127,10 +127,11 @@ func (provider *Responses) buildRequest(request agent.Request) (createResponseRe
 			if message.ToolResult == nil {
 				return createResponseRequest{}, errors.New("encode responses request: tool message has no result")
 			}
+			output := message.ToolResult.Content
 			if err := appendInput(responseInput{
 				Type:   "function_call_output",
 				CallID: message.ToolResult.CallID,
-				Output: message.ToolResult.Content,
+				Output: &output,
 			}); err != nil {
 				return createResponseRequest{}, fmt.Errorf("encode function output: %w", err)
 			}
@@ -182,13 +183,13 @@ type createResponseRequest struct {
 // responseInput 覆盖当前 Agent 用到的文本消息、函数调用和函数结果三种输入项。
 // 协议来源：https://platform.openai.com/docs/guides/function-calling
 type responseInput struct {
-	Type      string `json:"type,omitempty"`
-	Role      string `json:"role,omitempty"`
-	Content   any    `json:"content,omitempty"`
-	CallID    string `json:"call_id,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
-	Output    string `json:"output,omitempty"`
+	Type      string  `json:"type,omitempty"`
+	Role      string  `json:"role,omitempty"`
+	Content   any     `json:"content,omitempty"`
+	CallID    string  `json:"call_id,omitempty"`
+	Name      string  `json:"name,omitempty"`
+	Arguments string  `json:"arguments,omitempty"`
+	Output    *string `json:"output,omitempty"`
 }
 
 type responseContent struct {

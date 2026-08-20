@@ -26,7 +26,20 @@ func (s *Store) Materialize(envID string) (string, error) {
 	blobs := s.overlayBlobs(envID)
 	s.mu.Unlock()
 
-	live, err := os.MkdirTemp("", "threadmill-live-")
+	var live string
+	if s.liveRoot == "" {
+		live, err = os.MkdirTemp("", "threadmill-live-")
+	} else {
+		if restored, ok, restoreErr := s.persistedLive(envID); restoreErr != nil {
+			return "", restoreErr
+		} else if ok {
+			s.mu.Lock()
+			s.lives[envID] = restored
+			s.mu.Unlock()
+			return restored, nil
+		}
+		live, err = os.MkdirTemp(s.liveRoot, ".tmp-")
+	}
 	if err != nil {
 		return "", fmt.Errorf("vfs: materialize: %w", err)
 	}
@@ -38,6 +51,20 @@ func (s *Store) Materialize(envID string) (string, error) {
 		if err := applyLive(live, item.path, item.b); err != nil {
 			os.RemoveAll(live)
 			return "", err
+		}
+	}
+	if s.liveRoot != "" {
+		dest := s.persistentLivePath(envID)
+		if err := os.Rename(live, dest); err != nil {
+			if restored, ok, restoreErr := s.persistedLive(envID); restoreErr == nil && ok {
+				_ = os.RemoveAll(live)
+				live = restored
+			} else {
+				_ = os.RemoveAll(live)
+				return "", fmt.Errorf("vfs: commit persistent environment: %w", err)
+			}
+		} else {
+			live = dest
 		}
 	}
 
@@ -96,6 +123,9 @@ func (s *Store) Absorb(envID string) error {
 // Release 先把 live 收进 overlay，再删掉 live 目录。未物化则是空操作。
 func (s *Store) Release(envID string) error {
 	aerr := s.Absorb(envID)
+	if s.liveRoot != "" {
+		return aerr
+	}
 	s.mu.Lock()
 	live, ok := s.lives[envID]
 	if ok {
@@ -119,9 +149,17 @@ func (s *Store) Discard(envID string) error {
 	s.mu.Lock()
 	live := s.lives[envID]
 	s.mu.Unlock()
+	if live == "" && s.liveRoot != "" {
+		live = s.persistentLivePath(envID)
+	}
 	if live != "" {
 		if err := os.RemoveAll(live); err != nil {
 			return fmt.Errorf("vfs: discard: %w", err)
+		}
+	}
+	if s.liveRoot != "" {
+		if err := os.RemoveAll(s.persistentMergePath(envID)); err != nil {
+			return fmt.Errorf("vfs: discard merge state: %w", err)
 		}
 	}
 	s.mu.Lock()

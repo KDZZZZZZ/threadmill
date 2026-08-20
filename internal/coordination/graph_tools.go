@@ -34,13 +34,9 @@ func GraphToolMap(graph *Graph) map[string]agenttool.Tool {
 
 func (t graphTool) Definition() agenttool.Definition {
 	return agenttool.Definition{
-		Name: coordReplacePendingName,
-		Description: "提交尚未执行切片的完整期望态，由图 diff 后改拓扑。" +
-			"roots 是按顺序执行的根任务列表（按序号对齐，每项必须写 info），" +
-			"新增 root 从前一个 root 的 task 持久环境（记忆和文件）fork；" +
-			"spawns 是期望的 spawn/join 全集，每项带 info。" +
-			"成环、跨任务树或拆根会失败，图保持原样。任务执行期间不要改图。",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"roots":{"type":"array","items":{"type":"object","properties":{"info":{"type":"string"}},"additionalProperties":false}},"spawns":{"type":"array","items":{"type":"object","properties":{"from":{"type":"string"},"join":{"type":"string"},"info":{"type":"string"}},"required":["from","join"],"additionalProperties":false}}},"additionalProperties":false}`),
+		Name:        coordReplacePendingName,
+		Description: "提交协调图尚未开始部分的完整期望态。图执行中可以追加后续 root，或新增、删除、调整尚未开始节点上的辅助分支；已经开始的 task info 和节点关联边会被拒绝。roots 按序号对齐且只可追加；新增 root 从前一个 root 的 task 持久环境（记忆和文件）fork；辅助任务只能写 spawns，不能写成额外 root。from/join 必须是当前图或上次工具结果中的完整节点 ID（如 task-1:planner），禁止占位符。新 root 需要 spawn 时分两次：先只提交 roots 取得真实 ID，再原样保留 roots 并提交完整 spawns。失败时图不变。",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"roots":{"type":"array","minItems":1,"description":"全部根任务，必须保留现有顺序且只可追加；执行中的现有 root info 不可改。辅助分支不要放这里。","items":{"type":"object","properties":{"info":{"type":"string"}},"required":["info"],"additionalProperties":false}},"spawns":{"type":"array","description":"完整 spawn/join 期望集；执行中仅可改变尚未开始节点上的分支。新根先单独创建并从工具结果取得真实节点 ID。","items":{"type":"object","properties":{"from":{"type":"string","description":"尚未开始的真实来源节点 ID，例如 task-1:executor。"},"join":{"type":"string","description":"同一任务树中尚未开始的真实汇合节点 ID，例如 task-1:verifier。"},"info":{"type":"string"}},"required":["from","join","info"],"additionalProperties":false}}},"required":["roots"],"additionalProperties":false}`),
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	osexec "os/exec"
+	"path/filepath"
 
 	"github.com/KDZZZZZZ/threadmill/internal/env"
 )
@@ -17,21 +18,25 @@ func probeBwrap() bool {
 		return false
 	}
 	defer os.RemoveAll(dir)
-	lower := dir + "/lower"
-	upper := dir + "/upper"
-	work := dir + "/work"
-	for _, p := range []string{lower, upper, work} {
-		if err := os.Mkdir(p, 0o750); err != nil {
-			return false
-		}
+	if err := os.Mkdir(filepath.Join(dir, "tmp"), 0o750); err != nil {
+		return false
 	}
 	cmd := osexec.Command(
 		"bwrap",
 		"--unshare-user",
+		"--unshare-pid",
 		"--unshare-net",
-		"--overlay-src", lower,
-		"--overlay", upper, work, "/dest",
-		"true",
+		"--die-with-parent",
+		"--bind", dir, "/",
+		"--ro-bind-try", "/usr", "/usr",
+		"--ro-bind-try", "/bin", "/bin",
+		"--ro-bind-try", "/lib", "/lib",
+		"--ro-bind-try", "/lib64", "/lib64",
+		"--dev", "/dev",
+		"--proc", "/proc",
+		"--chdir", "/",
+		"--",
+		"bash", "-c", "true",
 	)
 	return cmd.Run() == nil
 }

@@ -458,6 +458,55 @@ func TestStoreDiscardKeepsTrackingWhenRemovalFails(t *testing.T) {
 	}
 }
 
+func TestPersistentStoreRestoresReleasedEnvironment(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	mustWriteFile(t, filepath.Join(base, "hello.txt"), "host")
+	state := t.TempDir()
+
+	first, err := NewPersistentStore(base, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, first, "", "env-a")
+	if err := first.View("env-a").Write("hello.txt", []byte("task")); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Release("env-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := NewPersistentStore(base, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, second, "", "env-a")
+	got, err := second.View("env-a").Read("hello.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "task" {
+		t.Fatalf("restored hello.txt = %q, want task", got)
+	}
+
+	if err := second.Discard("env-a"); err != nil {
+		t.Fatal(err)
+	}
+	third, err := NewPersistentStore(base, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, third, "", "env-a")
+	got, err = third.View("env-a").Read("hello.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "host" {
+		t.Fatalf("discarded hello.txt = %q, want host", got)
+	}
+}
+
 func TestAbsorbRejectsSpecialFiles(t *testing.T) {
 	t.Parallel()
 

@@ -78,6 +78,7 @@ type Loop struct {
 	messages                 []Message
 	usedToolCallIDs          map[string]struct{}
 	subscribedSubgraphs      []string
+	fixedSubscribedSubgraphs []string
 	agentID                  string
 	running                  bool
 	compactPrompt            string
@@ -120,18 +121,19 @@ func NewLoop(config Config) (*Loop, error) {
 	}
 
 	loop := &Loop{
-		agentConfig:         cfg,
-		hooks:               cloneHooks(config.Hooks),
-		maxSteps:            maxSteps,
-		contextWindow:       config.ContextWindow,
-		wake:                make(chan struct{}, 1),
-		checkpoints:         config.CheckpointStore,
-		events:              config.Events,
-		queue:               []UserMessage{},
-		messages:            []Message{},
-		usedToolCallIDs:     make(map[string]struct{}),
-		subscribedSubgraphs: []string{},
-		agentID:             agentID,
+		agentConfig:              cfg,
+		hooks:                    cloneHooks(config.Hooks),
+		maxSteps:                 maxSteps,
+		contextWindow:            config.ContextWindow,
+		wake:                     make(chan struct{}, 1),
+		checkpoints:              config.CheckpointStore,
+		events:                   config.Events,
+		queue:                    []UserMessage{},
+		messages:                 []Message{},
+		usedToolCallIDs:          make(map[string]struct{}),
+		subscribedSubgraphs:      []string{},
+		fixedSubscribedSubgraphs: []string{},
+		agentID:                  agentID,
 	}
 	loop.provider = eventProvider{inner: config.Provider, loop: loop}
 
@@ -220,6 +222,15 @@ func (l *Loop) Run(ctx context.Context) (runErr error) {
 
 	if err := l.hooks.beforeRun(ctx); err != nil {
 		return err
+	}
+	restored, err := l.restoreCheckpoint()
+	if err != nil {
+		return err
+	}
+	if restored {
+		if _, err := l.continueTurn(ctx); err != nil {
+			return err
+		}
 	}
 
 	for {

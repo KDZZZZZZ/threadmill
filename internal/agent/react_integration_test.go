@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -58,10 +57,6 @@ func (tool *echoUserInputTool) Execute(_ context.Context, call agenttool.Call) (
 }
 
 func TestLiveReActWithUserInputAndTool(t *testing.T) {
-	if os.Getenv("OPENCODE_API_KEY") == "" {
-		t.Skip("OPENCODE_API_KEY is required for the live integration test")
-	}
-
 	_, filename, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("locate integration test")
