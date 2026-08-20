@@ -220,9 +220,10 @@ func TestRegularJoinLeavesConfiguredHelpForRequestTool(t *testing.T) {
 	run.nodeOutput[root.Planner.ID] = "root plan"
 	run.childCh(child.task.ID) <- taskResult{output: "evidence"}
 
-	got, err := run.joinIncoming(
-		context.Background(), root.Executor, root, "root input", map[string]string{}, map[string]bool{},
-	)
+	got, _, err := run.joinIncoming(context.Background(), joinRequest{
+		node: root.Executor, task: root, input: "root input",
+		outputs: map[string]string{}, merged: map[string]bool{},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

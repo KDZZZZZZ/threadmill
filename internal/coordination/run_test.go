@@ -193,7 +193,7 @@ func TestGraphRunVerifierReadsExecutorLiveWrite(t *testing.T) {
 	}
 }
 
-func TestGraphRunJoinMergesChildLiveWrites(t *testing.T) {
+func TestGraphRunJoinToVerifierMergesChildLiveWrites(t *testing.T) {
 	t.Parallel()
 
 	graph := newGraph()
@@ -222,7 +222,7 @@ func TestGraphRunJoinMergesChildLiveWrites(t *testing.T) {
 				}
 				got, err := files.View(root.Env.ID).Read("from-child-live.txt")
 				if err != nil {
-					return "", fmt.Errorf("verifier ask missed child live write: %w", err)
+					return "", fmt.Errorf("verifier missed child code: %w", err)
 				}
 				if string(got) != "from-live" {
 					return "", fmt.Errorf("from-child-live.txt = %q, want from-live", got)
@@ -234,6 +234,9 @@ func TestGraphRunJoinMergesChildLiveWrites(t *testing.T) {
 	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
+	if _, err := files.View(child.Env.ID).Read("from-child-live.txt"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("joined child workspace was retained: %v", err)
+	}
 }
 
 func TestGraphRunJoinMergesChildFiles(t *testing.T) {
@@ -241,18 +244,18 @@ func TestGraphRunJoinMergesChildFiles(t *testing.T) {
 
 	graph := newGraph()
 	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
+	child := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
 	files := vfs.NewStore(t.TempDir())
 
 	assemble := func(task Task) (Roles, error) {
 		roleAsker := func(role string) Asker {
 			return askerFunc(func(_ context.Context, query string) (string, error) {
-				if task.ID == child.ID && role == RoleVerifier {
+				if task.ID == child.ID && role == RoleExecutor {
 					if err := files.View(task.Env.ID).Write("from-child.txt", []byte("from-child")); err != nil {
 						return "", err
 					}
 				}
-				if task.ID == root.ID && role == RoleVerifier {
+				if task.ID == root.ID && role == RoleExecutor {
 					got, err := files.View(root.Env.ID).Read("from-child.txt")
 					if err != nil {
 						return "", fmt.Errorf("verifier ask missed child file: %w", err)
@@ -281,6 +284,182 @@ func TestGraphRunJoinMergesChildFiles(t *testing.T) {
 	if string(got) != "from-child" {
 		t.Fatalf("merged from-child.txt = %q, want from-child", got)
 	}
+	if _, err := files.View(child.Env.ID).Read("from-child.txt"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("joined child workspace was retained: %v", err)
+	}
+}
+
+func TestGraphRunJoinTargetResolvesConflictInPreparedWorkspace(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	first := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
+	second := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
+	files := vfs.NewStore(t.TempDir())
+	if err := files.View(root.Env.ID).Write("shared.txt", []byte("base")); err != nil {
+		t.Fatal(err)
+	}
+
+	var workspaces sync.Map
+	assemble := func(task Task) (Roles, error) {
+		roleAsker := func(role string) Asker {
+			return askerFunc(func(_ context.Context, query string) (string, error) {
+				if (task.ID == first.ID || task.ID == second.ID) && role == RoleExecutor {
+					if err := files.View(task.Env.ID).Write("shared.txt", []byte(task.ID)); err != nil {
+						return "", err
+					}
+				}
+				if task.ID == root.ID && role == RoleExecutor {
+					workspace, ok := workspaces.Load(task.ID + ":" + role)
+					if !ok {
+						return "", errors.New("executor workspace was not bound")
+					}
+					view := files.View(workspace.(string))
+					manifest, err := view.Read(vfs.MergeRuntimeDir + "/manifest.json")
+					if err != nil || !strings.Contains(string(manifest), `"status": "conflict"`) {
+						return "", fmt.Errorf("executor missed conflict manifest: %q, %v", manifest, err)
+					}
+					theirs, err := view.Read(vfs.MergeRuntimeDir + "/sources/source-2/shared.txt")
+					if err != nil || string(theirs) != second.ID {
+						return "", fmt.Errorf("executor missed second source side: %q, %v", theirs, err)
+					}
+					if err := view.Write("shared.txt", []byte("resolved")); err != nil {
+						return "", err
+					}
+					if !strings.Contains(query, vfs.MergeRuntimeDir) {
+						return "", errors.New("join instructions did not explain the prepared workspace")
+					}
+				}
+				return query + "/" + role, nil
+			})
+		}
+		return Roles{
+			Planner:  roleAsker(RolePlanner),
+			Executor: roleAsker(RoleExecutor),
+			Verifier: roleAsker(RoleVerifier),
+			scope: func(role string) (roleScope, error) {
+				return roleScope{
+					workspaceID: task.Env.ID,
+					bind: func(workspaceID string) error {
+						if workspaceID != task.Env.ID {
+							if err := files.Fork(task.Env.ID, workspaceID); err != nil {
+								return err
+							}
+						}
+						workspaces.Store(task.ID+":"+role, workspaceID)
+						return nil
+					},
+					cleanup: func(workspaceID string, completed bool) error {
+						if completed && workspaceID != task.Env.ID {
+							return files.Discard(workspaceID)
+						}
+						return nil
+					},
+				}, nil
+			},
+		}, nil
+	}
+
+	if _, err := graph.Run(
+		context.Background(),
+		root.ID,
+		"in",
+		Stores{Memory: ctxgraph.NewStore(), Files: files},
+		assemble,
+	); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	got, err := files.View(root.Env.ID).Read("shared.txt")
+	if err != nil || string(got) != "resolved" {
+		t.Fatalf("shared.txt = %q, %v; want resolved", got, err)
+	}
+}
+
+func TestGraphRunResumesPreparedJoinWorkspaceAfterTargetFailure(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	root := graph.AddTask()
+	child := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
+	progress, err := NewDirProgressStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph.SetProgressStore(progress)
+	files := vfs.NewStore(t.TempDir())
+	crashed := errors.New("target crashed")
+	rootExecutorCalls := 0
+
+	assemble := func(task Task) (Roles, error) {
+		roleAsker := func(role string) Asker {
+			return askerFunc(func(_ context.Context, query string) (string, error) {
+				if task.ID == child.ID && role == RoleExecutor {
+					if err := files.View(task.Env.ID).Write("joined.txt", []byte("from child")); err != nil {
+						return "", err
+					}
+				}
+				if task.ID == root.ID && role == RoleExecutor {
+					rootExecutorCalls++
+					workspaceID := task.Env.ID + ":join"
+					view := files.View(workspaceID)
+					switch rootExecutorCalls {
+					case 1:
+						if err := view.Write("joined.txt", []byte("draft decision")); err != nil {
+							return "", err
+						}
+						return "", crashed
+					case 2:
+						got, err := view.Read("joined.txt")
+						if err != nil || string(got) != "draft decision" {
+							return "", fmt.Errorf("prepared workspace was not recovered: %q, %v", got, err)
+						}
+						if _, err := view.Read(vfs.MergeRuntimeDir + "/manifest.json"); err != nil {
+							return "", fmt.Errorf("merge evidence was not recovered: %w", err)
+						}
+						if err := view.Write("joined.txt", []byte("final decision")); err != nil {
+							return "", err
+						}
+					}
+				}
+				return query + "/" + role, nil
+			})
+		}
+		return Roles{
+			Planner:  roleAsker(RolePlanner),
+			Executor: roleAsker(RoleExecutor),
+			Verifier: roleAsker(RoleVerifier),
+			scope: func(string) (roleScope, error) {
+				return roleScope{
+					workspaceID: task.Env.ID,
+					bind: func(workspaceID string) error {
+						if workspaceID == task.Env.ID {
+							return nil
+						}
+						return files.Fork(task.Env.ID, workspaceID)
+					},
+					cleanup: func(workspaceID string, completed bool) error {
+						if completed && workspaceID != task.Env.ID {
+							return files.Discard(workspaceID)
+						}
+						return nil
+					},
+				}, nil
+			},
+		}, nil
+	}
+	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
+
+	if _, err := graph.Run(context.Background(), root.ID, "in", stores, assemble); !errors.Is(err, crashed) {
+		t.Fatalf("first Run() error = %v, want %v", err, crashed)
+	}
+	if _, err := graph.Run(context.Background(), root.ID, "in", stores, assemble); err != nil {
+		t.Fatalf("resume Run() error = %v", err)
+	}
+	got, err := files.View(root.Env.ID).Read("joined.txt")
+	if err != nil || string(got) != "final decision" {
+		t.Fatalf("joined.txt = %q, %v; want final decision", got, err)
+	}
 }
 
 func TestGraphRunJoinConflictsWhenParentAndChildWroteSameLiveFile(t *testing.T) {
@@ -288,35 +467,25 @@ func TestGraphRunJoinConflictsWhenParentAndChildWroteSameLiveFile(t *testing.T) 
 
 	graph := newGraph()
 	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
+	first := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
+	second := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
 	files := vfs.NewStore(t.TempDir())
 	_, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, func(task Task) (Roles, error) {
 		return Roles{
 			Planner: instantAsker(),
 			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
-				if task.ID == root.ID {
+				if task.ID == first.ID || task.ID == second.ID {
 					dir, err := files.Materialize(task.Env.ID)
 					if err != nil {
 						return "", err
 					}
-					if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("parent"), 0o640); err != nil {
+					if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte(task.ID), 0o640); err != nil {
 						return "", err
 					}
 				}
 				return query + "/executor", nil
 			}),
-			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
-				if task.ID == child.ID {
-					dir, err := files.Materialize(task.Env.ID)
-					if err != nil {
-						return "", err
-					}
-					if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("child"), 0o640); err != nil {
-						return "", err
-					}
-				}
-				return query + "/verifier", nil
-			}),
+			Verifier: instantAsker(),
 		}, nil
 	})
 	if err == nil {
@@ -332,28 +501,22 @@ func TestGraphRunJoinConflictsWhenParentAndChildWroteSameFile(t *testing.T) {
 
 	graph := newGraph()
 	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
+	first := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
+	second := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
 	files := vfs.NewStore(t.TempDir())
 
 	_, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, func(task Task) (Roles, error) {
 		return Roles{
 			Planner: instantAsker(),
 			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
-				if task.ID == root.ID {
-					if err := files.View(task.Env.ID).Write("shared.txt", []byte("parent")); err != nil {
+				if task.ID == first.ID || task.ID == second.ID {
+					if err := files.View(task.Env.ID).Write("shared.txt", []byte(task.ID)); err != nil {
 						return "", err
 					}
 				}
 				return query + "/executor", nil
 			}),
-			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
-				if task.ID == child.ID {
-					if err := files.View(task.Env.ID).Write("shared.txt", []byte("child")); err != nil {
-						return "", err
-					}
-				}
-				return query + "/verifier", nil
-			}),
+			Verifier: instantAsker(),
 		}, nil
 	})
 	if err == nil {

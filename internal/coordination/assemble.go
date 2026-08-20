@@ -2,6 +2,8 @@ package coordination
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
@@ -45,13 +47,21 @@ type Roles struct {
 	Planner  Asker
 	Executor Asker
 	Verifier Asker
+	scope    func(string) (roleScope, error)
 	Prepare  func(context.Context) error
 }
 
-// AssembleFunc 按 task 组装三个角色；工具必须绑到 task.Env。
+type roleScope struct {
+	workspaceID string
+	bind        func(string) error
+	cleanup     func(string, bool) error
+}
+
+// AssembleFunc 按 task 组装三个角色。
 type AssembleFunc func(Task) (Roles, error)
 
-// Assemble 按 yaml 装配 prompt、tool、hook，再把记忆图绑到 task.Env。
+// Assemble 按 yaml 装配 prompt、tool、hook。executor 使用 task.Env；planner/verifier
+// 使用一次性文件与执行分支，三者仍共享 task 记忆。
 // contextWindow 来自 llm.context_window。checkpoints 保存进行中的 ReAct，可为空。
 func Assemble(
 	stores Stores,
@@ -91,13 +101,84 @@ func Assemble(
 		if err := team.Bind(e); err != nil {
 			return Roles{}, err
 		}
+		var prepare func(context.Context) error
+		organizer := agents.SubgraphOrganizer
+		if organizer.ID != "" || organizer.SystemPrompt != "" || len(organizer.Tools) > 0 || len(organizer.Hooks) > 0 {
+			prepare = func(ctx context.Context) error {
+				return team.PrepareTaskContext(ctx, e.Memory, task.Info, pack.ID)
+			}
+		}
 		return Roles{
 			Planner:  team.Planner,
 			Executor: team.Executor,
 			Verifier: team.Verifier,
-			Prepare: func(ctx context.Context) error {
-				return team.PrepareTaskContext(ctx, e.Memory, task.Info, pack.ID)
+			scope: func(role string) (roleScope, error) {
+				workspaceID := task.Env.ID
+				disposable := false
+				if stores.Files != nil {
+					switch role {
+					case RolePlanner, RoleVerifier:
+						workspaceID = task.Env.ID + ":" + role
+						disposable = true
+					case RoleExecutor:
+					default:
+						return roleScope{}, fmt.Errorf("%w: %s", ErrNilAsker, role)
+					}
+				}
+				return roleScope{
+					workspaceID: workspaceID,
+					bind: func(activeID string) error {
+						if disposable {
+							if err := stores.Files.Fork(task.Env.ID, workspaceID); err != nil {
+								return err
+							}
+						}
+						if activeID != workspaceID {
+							if err := stores.Files.Fork(workspaceID, activeID); err != nil {
+								return err
+							}
+						}
+						e, err := openRoleEnv(stores, task.Env.ID, activeID)
+						if err != nil {
+							return err
+						}
+						loop := roleLoop(team, role)
+						if loop == nil {
+							return fmt.Errorf("%w: %s", ErrNilAsker, role)
+						}
+						if err := loop.Bind(e); err != nil {
+							if activeID != workspaceID {
+								err = errors.Join(err, stores.DiscardFiles(activeID))
+							}
+							if disposable {
+								err = errors.Join(err, stores.DiscardFiles(workspaceID))
+							}
+							return err
+						}
+						return nil
+					},
+					cleanup: func(activeID string, completed bool) error {
+						if !completed {
+							if stores.Exec != nil {
+								stores.Exec.Reap(activeID)
+							}
+							if activeID != workspaceID || !disposable {
+								return nil
+							}
+							return stores.Files.Release(workspaceID)
+						}
+						var err error
+						if activeID != workspaceID {
+							err = stores.DiscardFiles(activeID)
+						}
+						if disposable {
+							err = errors.Join(err, stores.DiscardFiles(workspaceID))
+						}
+						return err
+					},
+				}, nil
 			},
+			Prepare: prepare,
 		}, nil
 	}
 }
@@ -144,17 +225,34 @@ func NewManagerLoop(
 }
 
 func openEnv(stores Stores, envID string) (env.Env, error) {
+	return openRoleEnv(stores, envID, envID)
+}
+
+func openRoleEnv(stores Stores, memoryID, workspaceID string) (env.Env, error) {
 	if stores.Memory == nil {
 		return env.Env{}, ErrNilStore
 	}
-	e := env.Open(envID, stores.Memory.View(envID))
+	e := env.Open(workspaceID, stores.Memory.View(memoryID))
 	if stores.Files != nil {
-		e = e.WithFiles(filesView{view: stores.Files.View(envID)})
+		e = e.WithFiles(filesView{view: stores.Files.View(workspaceID)})
 	}
 	if stores.Exec != nil && stores.Files != nil {
-		e = e.WithExec(stores.Exec.View(envID, stores.Files))
+		e = e.WithExec(stores.Exec.View(workspaceID, stores.Files))
 	}
 	return e, nil
+}
+
+func roleLoop(team *agent.Team, role string) *agent.Loop {
+	switch role {
+	case RolePlanner:
+		return team.Planner
+	case RoleExecutor:
+		return team.Executor
+	case RoleVerifier:
+		return team.Verifier
+	default:
+		return nil
+	}
 }
 
 func (r Roles) asker(role string) Asker {

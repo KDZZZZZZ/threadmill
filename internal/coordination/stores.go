@@ -103,15 +103,31 @@ func (s Stores) Fork(parentID, childID string) error {
 
 // Merge 把 from 环境合入 into。
 func (s Stores) Merge(from, into string) error {
+	return s.MergeInto(from, into, into)
+}
+
+// MergeInto 把文件和记忆增量分别合入各自的目标环境。
+func (s Stores) MergeInto(from, memoryInto, filesInto string) error {
 	if s.Files != nil {
-		if err := s.Files.Merge(from, into); err != nil {
+		if err := s.Files.Merge(from, filesInto); err != nil {
 			return err
 		}
 	}
 	if s.Memory != nil {
-		if err := s.Memory.Merge(from, into); err != nil {
+		if err := s.Memory.Merge(from, memoryInto); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// DiscardFiles 删除一次性文件环境及其仍在运行的命令。
+func (s Stores) DiscardFiles(envID string) error {
+	if s.Exec != nil {
+		s.Exec.Reap(envID)
+	}
+	if s.Files == nil {
+		return nil
+	}
+	return s.Files.Discard(envID)
 }

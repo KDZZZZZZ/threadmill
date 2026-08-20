@@ -141,20 +141,32 @@ func (s *Store) Release(envID string) error {
 	return aerr
 }
 
-// Discard removes a durable environment after its task tree completed.
-// In-memory stores keep their existing inspection behavior.
+// Discard 删除 env 的 live 目录和 overlay，不吸收尚未收回的写入。
 func (s *Store) Discard(envID string) error {
-	if s.liveRoot == "" || envID == "" {
+	if envID == "" {
 		return nil
+	}
+	s.mu.Lock()
+	live := s.lives[envID]
+	s.mu.Unlock()
+	if live == "" && s.liveRoot != "" {
+		live = s.persistentLivePath(envID)
+	}
+	if live != "" {
+		if err := os.RemoveAll(live); err != nil {
+			return fmt.Errorf("vfs: discard: %w", err)
+		}
+	}
+	if s.liveRoot != "" {
+		if err := os.RemoveAll(s.persistentMergePath(envID)); err != nil {
+			return fmt.Errorf("vfs: discard merge state: %w", err)
+		}
 	}
 	s.mu.Lock()
 	delete(s.lives, envID)
 	delete(s.envs, envID)
+	delete(s.merges, envID)
 	s.mu.Unlock()
-	path := s.persistentLivePath(envID)
-	if err := os.RemoveAll(path); err != nil {
-		return fmt.Errorf("vfs: discard persistent environment: %w", err)
-	}
 	return nil
 }
 
@@ -200,6 +212,13 @@ func walkRegularFiles(root string) (map[string][]byte, error) {
 			return err
 		}
 		if rel == "." {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if isMergeRuntimePath(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if filepath.IsAbs(rel) || !filepath.IsLocal(rel) || escapesRoot(root, path) {
@@ -256,6 +275,13 @@ func (s *Store) visibleRegularFiles(envID string) (map[string][]byte, error) {
 		if rel == "." {
 			return nil
 		}
+		rel = filepath.ToSlash(rel)
+		if isMergeRuntimePath(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if filepath.IsAbs(rel) || !filepath.IsLocal(rel) || escapesRoot(base, path) {
 			return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
 		}
@@ -274,6 +300,9 @@ func (s *Store) visibleRegularFiles(envID string) (map[string][]byte, error) {
 	}
 	for _, files := range s.overlayMaps(envID) {
 		for path := range files {
+			if isMergeRuntimePath(path) {
+				continue
+			}
 			candidates[path] = struct{}{}
 		}
 	}

@@ -23,7 +23,8 @@ type PendingRoot struct {
 }
 
 // PendingSubgraph 是尚未执行切片的完整期望状态；Run 中也可改尚未开始的节点。
-// 根按序号对齐：少于现有根数会失败，多出的新建；spawn 仍按 from/join 匹配。
+// 根按序号对齐：少于现有根数会失败，多出的从前一个根的 task 环境 fork；
+// spawn 仍按 from/join 匹配。
 type PendingSubgraph struct {
 	Roots  []PendingRoot  `json:"roots,omitempty"`
 	Spawns []PendingSpawn `json:"spawns"`
@@ -196,7 +197,7 @@ func (g *Graph) applyPendingLocked(next PendingSubgraph) error {
 		return fmt.Errorf("%w: cannot remove root tasks", ErrUnspawnRoot)
 	}
 	for len(roots) < len(next.Roots) {
-		g.addTaskLocked("")
+		g.addRootLocked()
 		roots = g.rootTasksLocked()
 	}
 	for i, want := range next.Roots {

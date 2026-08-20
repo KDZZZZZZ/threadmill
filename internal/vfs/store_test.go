@@ -1,6 +1,9 @@
 package vfs
 
 import (
+	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -463,6 +466,199 @@ func TestStoreMergeReplayDoesNotError(t *testing.T) {
 	}
 	if string(got) != "only-child" {
 		t.Fatalf("parent from-child.txt = %q, want only-child", got)
+	}
+}
+
+func TestStorePrepareMergeLetsTargetFilterAndResolveFiles(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	target := store.View("target")
+	if err := target.Write("shared.txt", []byte("base")); err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, store, "target", "child")
+	if err := target.Write("shared.txt", []byte("ours")); err != nil {
+		t.Fatal(err)
+	}
+	child := store.View("child")
+	if err := child.Write("shared.txt", []byte("theirs")); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Write("optional.txt", []byte("optional")); err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, store, "target", "join")
+
+	manifest, err := store.PrepareMerge("join", []MergeSource{{Name: "child-task", EnvID: "child"}})
+	if err != nil {
+		t.Fatalf("PrepareMerge: %v", err)
+	}
+	if len(manifest.Changes) != 2 {
+		t.Fatalf("changes = %#v, want shared and optional", manifest.Changes)
+	}
+	joined := store.View("join")
+	got, err := joined.Read("optional.txt")
+	if err != nil || string(got) != "optional" {
+		t.Fatalf("auto-merged optional.txt = %q, %v", got, err)
+	}
+	got, err = joined.Read("shared.txt")
+	if err != nil || string(got) != "ours" {
+		t.Fatalf("conflicted shared.txt = %q, %v; want ours", got, err)
+	}
+	got, err = joined.Read(MergeRuntimeDir + "/sources/source-1/shared.txt")
+	if err != nil || string(got) != "theirs" {
+		t.Fatalf("source shared.txt = %q, %v; want theirs", got, err)
+	}
+	got, err = joined.Read(MergeRuntimeDir + "/ours/source-1/shared.txt")
+	if err != nil || string(got) != "ours" {
+		t.Fatalf("ours shared.txt = %q, %v; want ours", got, err)
+	}
+	data, err := joined.Read(MergeRuntimeDir + "/manifest.json")
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var persisted MergeManifest
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if len(persisted.Changes) != len(manifest.Changes) {
+		t.Fatalf("persisted changes = %#v, want %#v", persisted.Changes, manifest.Changes)
+	}
+
+	if err := joined.Delete("optional.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := joined.Write("shared.txt", []byte("resolved")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitMerge("join", "target"); err != nil {
+		t.Fatalf("CommitMerge: %v", err)
+	}
+	got, err = target.Read("shared.txt")
+	if err != nil || string(got) != "resolved" {
+		t.Fatalf("target shared.txt = %q, %v; want resolved", got, err)
+	}
+	if _, err := target.Read("optional.txt"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("excluded optional.txt survived: %v", err)
+	}
+	if _, err := target.Stat(MergeRuntimeDir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("merge runtime leaked into target: %v", err)
+	}
+}
+
+func TestStorePrepareMergeHandlesFileDirectoryConflict(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	if err := store.View("target").Write("dir", []byte("ours")); err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, store, "target", "child")
+	if err := store.View("child").Write("dir/file.txt", []byte("theirs")); err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, store, "target", "join")
+
+	manifest, err := store.PrepareMerge("join", []MergeSource{{Name: "child-task", EnvID: "child"}})
+	if err != nil {
+		t.Fatalf("PrepareMerge: %v", err)
+	}
+	if len(manifest.Changes) != 1 || manifest.Changes[0].Status != "conflict" {
+		t.Fatalf("changes = %#v, want file/directory conflict", manifest.Changes)
+	}
+	got, err := store.View("join").Read(MergeRuntimeDir + "/sources/source-1/dir/file.txt")
+	if err != nil || string(got) != "theirs" {
+		t.Fatalf("source dir/file.txt = %q, %v; want theirs", got, err)
+	}
+	got, err = store.View("join").Read(MergeRuntimeDir + "/ours/source-1/dir")
+	if err != nil || string(got) != "ours" {
+		t.Fatalf("ours blocking dir = %q, %v; want ours", got, err)
+	}
+	got, err = store.View("join").Read("dir")
+	if err != nil || string(got) != "ours" {
+		t.Fatalf("joined dir = %q, %v; want current file", got, err)
+	}
+}
+
+func TestStorePrepareMergeRebuildsCorruptEvidenceWithoutReplayingChanges(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	mustFork(t, store, "target", "child")
+	if err := store.View("child").Write("optional.txt", []byte("from child")); err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, store, "target", "join")
+	if _, err := store.PrepareMerge("join", []MergeSource{{Name: "child-task", EnvID: "child"}}); err != nil {
+		t.Fatal(err)
+	}
+	joined := store.View("join")
+	if err := joined.Delete("optional.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := joined.Write(MergeRuntimeDir+"/manifest.json", []byte("{")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.PrepareMerge("join", []MergeSource{{Name: "child-task", EnvID: "child"}}); err != nil {
+		t.Fatalf("PrepareMerge after corrupt manifest: %v", err)
+	}
+	if _, err := joined.Read("optional.txt"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("recovery replayed an excluded file: %v", err)
+	}
+	data, err := joined.Read(MergeRuntimeDir + "/manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest MergeManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("rebuilt manifest is invalid: %v", err)
+	}
+}
+
+func TestPersistentStorePrepareMergeDoesNotReplayChangesAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	state := t.TempDir()
+	first, err := NewPersistentStore(base, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, first, "", "target")
+	mustFork(t, first, "target", "child")
+	if err := first.View("child").Write("optional.txt", []byte("from child")); err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, first, "target", "join")
+	if _, err := first.PrepareMerge("join", []MergeSource{{Name: "child-task", EnvID: "child"}}); err != nil {
+		t.Fatal(err)
+	}
+	joined := first.View("join")
+	if err := joined.Delete("optional.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := joined.Write(MergeRuntimeDir+"/manifest.json", []byte("{")); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := NewPersistentStore(base, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, second, "", "target")
+	mustFork(t, second, "target", "child")
+	mustFork(t, second, "target", "join")
+	manifest, err := second.PrepareMerge("join", []MergeSource{{Name: "child-task", EnvID: "child"}})
+	if err != nil {
+		t.Fatalf("PrepareMerge after restart: %v", err)
+	}
+	if _, err := second.View("join").Read("optional.txt"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("restart replayed an excluded file: %v", err)
+	}
+	if len(manifest.Changes) != 1 || manifest.Changes[0].Path != "optional.txt" {
+		t.Fatalf("rebuilt manifest = %#v, want optional.txt evidence", manifest.Changes)
 	}
 }
 

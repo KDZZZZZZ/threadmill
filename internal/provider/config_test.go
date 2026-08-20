@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -777,11 +778,42 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 	if got.Agents.Planner.SystemPrompt == "" {
 		t.Fatal("workspace planner system_prompt is empty")
 	}
+	for _, role := range []struct {
+		name  string
+		tools []string
+	}{
+		{"planner", got.Agents.Planner.Tools},
+		{"verifier", got.Agents.Verifier.Tools},
+	} {
+		for _, name := range []string{"write", "edit", "bash"} {
+			if !slices.Contains(role.tools, name) {
+				t.Errorf("workspace %s tools = %v, want %q", role.name, role.tools, name)
+			}
+		}
+	}
 	if got.Prompts.Default == "" {
 		t.Fatal("workspace prompts.default is empty")
 	}
 	if got.Agents.Manager.SystemPrompt == "" {
 		t.Fatal("workspace manager system_prompt is empty")
+	}
+	for _, want := range []string{
+		"每个角色先 fork 自己的工作区，再处理 join，最后 Ask",
+		"join 时子 task 记忆合入 task 共享记忆",
+		".threadmill/runtime/joins/manifest.json",
+		"目标角色才用已有的文件和命令工具筛选改动、解决冲突",
+		"join 到 planner：子 task 文件只进入一次性规划工作区",
+		"join 到 executor：子 task 文件进入 task 持久文件环境",
+		"join 到 verifier：子 task 文件只进入一次性核验工作区",
+		"新 root 会从前一个 root 的 task 持久环境（记忆和文件）fork",
+		"不要回退或覆盖已完成 task 的实现",
+	} {
+		if !strings.Contains(got.Agents.Manager.SystemPrompt, want) {
+			t.Errorf("workspace manager system_prompt missing %q", want)
+		}
+	}
+	if !strings.Contains(got.Agents.Verifier.SystemPrompt, "发现实现缺陷只写入核验报告") {
+		t.Fatal("workspace verifier system_prompt missing report-only defect guidance")
 	}
 	if got.Tools["coordination_replacePending"].Description == "" {
 		t.Fatal("workspace tools.coordination_replacePending.description is empty")

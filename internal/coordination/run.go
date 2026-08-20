@@ -2,10 +2,13 @@ package coordination
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
 var (
@@ -22,9 +25,12 @@ var (
 
 // Run 由图调度一次从 taskID 出发的执行，返回该 task 的 verifier 输出。
 //
-// 每个角色节点顺序是 join → Ask → spawn：
-//   - join：Ask 前等 IncomingJoins 的子 task 结束，Merge 子环境，把子输出拼进本节点输入。
-//   - Ask：跑这个角色的 ReAct；ProgressStore 已有输出则跳过。
+// 每个角色节点顺序是 fork → join → Ask → spawn：
+//   - fork：目标角色先准备自己的文件与执行环境。
+//   - join：Ask 前等 IncomingJoins 的子 task 结束，把子输出拼进本节点输入；
+//     记忆合入 task 环境，文件放进目标角色的临时合入环境。
+//   - Ask：目标角色在临时环境筛选文件、解决冲突并跑 ReAct；成功后提交选择。
+//     ProgressStore 已有输出则跳过。
 //   - spawn：Ask 之后 Fork 子环境，用本角色输出当子输入，拉起即走，不等待。
 //
 // 同一 task 的 planner → executor → verifier 由 runTask 的 for 循环保证。
@@ -263,13 +269,13 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (output stri
 func (r *runner) drainJoins(ctx context.Context, task Task, nodes []Node, outputs map[string]string, merged map[string]bool) error {
 	var joinedErr error
 	for _, node := range nodes {
-		_, err := r.joinIncoming(ctx, node, task, "", outputs, merged)
+		err := r.drainIncoming(ctx, node, task, outputs, merged)
 		joinedErr = errors.Join(joinedErr, err)
 	}
 	return joinedErr
 }
 
-// runRole 执行图上的一个角色节点：join → Ask → spawn。
+// runRole 执行图上的一个角色节点：fork → join → Ask → spawn。
 func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input string, outputs map[string]string, merged map[string]bool) (string, error) {
 	r.markNodeStarted(node.ID)
 	asker := roles.asker(node.Role)
@@ -281,19 +287,74 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 		return "", fmt.Errorf("%w: %q", ErrUnknownTask, node.TaskID)
 	}
 
-	input, err := r.joinIncoming(ctx, node, task, input, outputs, merged)
-	if err != nil {
-		return "", err
-	}
-
-	output, ok := outputs[node.ID]
-	if !ok {
-		output, err = asker.Ask(ctx, input)
+	output, completed := outputs[node.ID]
+	scope := roleScope{workspaceID: task.Env.ID}
+	var err error
+	if roles.scope != nil {
+		scope, err = roles.scope(node.Role)
 		if err != nil {
 			return "", err
 		}
+	}
+	preparedJoin := roles.scope != nil && r.stores.Files != nil && len(r.incomingChildren(node)) > 0
+	activeID := scope.workspaceID
+	if preparedJoin {
+		activeID += ":join"
+	}
+
+	if !completed && scope.bind != nil {
+		if err := scope.bind(activeID); err != nil {
+			return "", err
+		}
+	}
+
+	input, joined, err := r.joinIncoming(ctx, joinRequest{
+		node:     node,
+		task:     task,
+		activeID: activeID,
+		prepared: preparedJoin,
+		input:    input,
+		outputs:  outputs,
+		merged:   merged,
+	})
+	if err != nil {
+		if scope.cleanup != nil {
+			err = errors.Join(err, scope.cleanup(activeID, false))
+		}
+		return "", err
+	}
+
+	if !completed {
+		output, err = asker.Ask(ctx, input)
+		if err != nil {
+			if scope.cleanup != nil {
+				err = errors.Join(err, scope.cleanup(activeID, false))
+			}
+			return "", err
+		}
+		if joined.prepared {
+			if err := r.stores.Files.CommitMerge(activeID, scope.workspaceID); err != nil {
+				err = fmt.Errorf("committing joined files: %w", err)
+				if scope.cleanup != nil {
+					err = errors.Join(err, scope.cleanup(activeID, false))
+				}
+				return "", err
+			}
+			merged[node.ID] = true
+		}
 		outputs[node.ID] = output
 		if err := r.saveProgress(node.TaskID, outputs, merged, true); err != nil {
+			if scope.cleanup != nil {
+				err = errors.Join(err, scope.cleanup(activeID, false))
+			}
+			return "", err
+		}
+	}
+	if err := r.cleanupJoined(joined); err != nil {
+		return "", err
+	}
+	if scope.cleanup != nil {
+		if err := scope.cleanup(activeID, true); err != nil {
 			return "", err
 		}
 	}
@@ -307,6 +368,21 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 		}
 	}
 	return output, nil
+}
+
+type joinedFiles struct {
+	items    []joinedTask
+	prepared bool
+}
+
+type joinRequest struct {
+	node     Node
+	task     Task
+	activeID string
+	prepared bool
+	input    string
+	outputs  map[string]string
+	merged   map[string]bool
 }
 
 func (r *runner) markNodeStarted(nodeID string) {
@@ -475,36 +551,149 @@ func (r *runner) waitNodeOutput(ctx context.Context, nodeID string) (string, err
 	}
 }
 
-func (r *runner) joinIncoming(ctx context.Context, node Node, task Task, input string, outputs map[string]string, merged map[string]bool) (string, error) {
-	preds := r.graph.IncomingJoins(node.ID)
-	if len(preds) == 0 {
-		return input, nil
+func (r *runner) joinIncoming(ctx context.Context, req joinRequest) (string, joinedFiles, error) {
+	children := r.incomingChildren(req.node)
+	if len(children) == 0 {
+		return req.input, joinedFiles{}, nil
 	}
+
+	already := req.merged[req.node.ID]
+	var (
+		items []joinedTask
+		err   error
+	)
+	if req.prepared {
+		items, err = r.joinTaskReports(ctx, req.task, children, already)
+	} else {
+		items, err = r.joinTasks(ctx, req.task, children, already)
+	}
+	joined := joinedFiles{items: items, prepared: req.prepared}
+	if err != nil {
+		return "", joined, err
+	}
+
+	if !already {
+		if req.prepared {
+			sources := make([]vfs.MergeSource, 0, len(items))
+			for _, item := range items {
+				sources = append(sources, vfs.MergeSource{Name: item.task.ID, EnvID: item.task.Env.ID})
+			}
+			manifest, err := r.stores.Files.PrepareMerge(req.activeID, sources)
+			if err != nil {
+				return "", joined, fmt.Errorf("preparing joined files: %w", err)
+			}
+			review, err := mergeReviewInput(manifest)
+			if err != nil {
+				return "", joined, err
+			}
+			req.input += review
+		} else {
+			if err := r.discardJoinedFiles(items); err != nil {
+				return "", joined, err
+			}
+			req.merged[req.node.ID] = true
+			if err := r.saveProgress(req.node.TaskID, req.outputs, req.merged, true); err != nil {
+				return "", joined, err
+			}
+		}
+	}
+	if output := joinedTaskOutput(items); output != "" {
+		req.input += "\n\n" + output
+	}
+	return req.input, joined, nil
+}
+
+func (r *runner) incomingChildren(node Node) []Task {
+	preds := r.graph.IncomingJoins(node.ID)
 	children := make([]Task, 0, len(preds))
 	for _, pred := range preds {
 		if r.graph.isHelpChildJoin(node.ID, pred.TaskID) {
 			continue
 		}
-		child, ok := r.graph.Task(pred.TaskID)
-		if ok {
+		if child, ok := r.graph.Task(pred.TaskID); ok {
 			children = append(children, child)
 		}
 	}
+	return children
+}
+
+func (r *runner) drainIncoming(
+	ctx context.Context,
+	node Node,
+	task Task,
+	outputs map[string]string,
+	merged map[string]bool,
+) error {
+	children := r.incomingChildren(node)
 	if len(children) == 0 {
-		return input, nil
+		return nil
 	}
 	already := merged[node.ID]
 	joined, err := r.joinTasks(ctx, task, children, already)
 	if err != nil {
-		return "", err
+		return err
 	}
-	if !already {
-		merged[node.ID] = true
-		if err := r.saveProgress(node.TaskID, outputs, merged, true); err != nil {
-			return "", err
+	if already {
+		return nil
+	}
+	if err := r.discardJoinedFiles(joined); err != nil {
+		return err
+	}
+	merged[node.ID] = true
+	return r.saveProgress(node.TaskID, outputs, merged, true)
+}
+
+// joinTaskReports merges child memory and reports while leaving files for the
+// target role's prepared workspace to review.
+func (r *runner) joinTaskReports(ctx context.Context, parent Task, children []Task, already bool) ([]joinedTask, error) {
+	joined := make([]joinedTask, 0, len(children))
+	var joinedErr error
+	for _, child := range children {
+		out := r.savedTaskOutput(child.ID)
+		if !already {
+			var err error
+			out, err = r.waitTask(ctx, child.ID)
+			if err != nil {
+				reportErr := r.projectJoinedTaskReport(parent, child, fmt.Sprintf("任务未完成：%v", err))
+				joinedErr = errors.Join(joinedErr, err, reportErr)
+				continue
+			}
+			if err := r.stores.Memory.Merge(child.Env.ID, parent.Env.ID); err != nil {
+				joinedErr = errors.Join(joinedErr, err)
+			}
 		}
+		if err := r.projectJoinedTaskReport(parent, child, out); err != nil {
+			joinedErr = errors.Join(joinedErr, err)
+		}
+		joined = append(joined, joinedTask{task: child, out: out})
 	}
-	return input + "\n\n" + joinedTaskOutput(joined), nil
+	return joined, joinedErr
+}
+
+func (r *runner) cleanupJoined(joined joinedFiles) error {
+	if !joined.prepared {
+		return nil
+	}
+	return r.discardJoinedFiles(joined.items)
+}
+
+func (r *runner) discardJoinedFiles(joined []joinedTask) error {
+	var err error
+	for _, item := range joined {
+		err = errors.Join(err, r.stores.DiscardFiles(item.task.Env.ID))
+	}
+	return err
+}
+
+func mergeReviewInput(manifest vfs.MergeManifest) (string, error) {
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		return "", fmt.Errorf("encoding joined file manifest: %w", err)
+	}
+	return "\n\n[join files] 子任务文件已放入临时合入工作区。无冲突改动已应用；冲突路径保留当前版本。" +
+		"请用现有 read/write/edit/bash 工具检查 " + vfs.MergeRuntimeDir + "/manifest.json，" +
+		"双方文件位于 ours/ 与 sources/。只把需要的内容写入正常项目路径；本轮结束时当前工作区即为最终选择。" +
+		"\n合入清单：" + string(data), nil
 }
 
 type joinedTask struct {
@@ -725,16 +914,12 @@ func hasProgressID(items []string, want string) bool {
 }
 
 func (r *runner) discardTree(rootID string) error {
+	if r.progress == nil {
+		return nil
+	}
 	var err error
 	for _, id := range r.graph.taskTree(rootID) {
-		if r.progress != nil {
-			err = errors.Join(err, r.progress.Delete(id))
-		}
-		if r.stores.Files != nil {
-			if task, ok := r.graph.Task(id); ok {
-				err = errors.Join(err, r.stores.Files.Discard(task.Env.ID))
-			}
-		}
+		err = errors.Join(err, r.progress.Delete(id))
 	}
 	return err
 }

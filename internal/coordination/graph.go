@@ -174,11 +174,12 @@ func (g *Graph) reset() {
 	g.revision = 0
 }
 
-// AddTask 追加一个独立 task，内部连好 planner → executor → verifier。
+// AddTask 追加一个图上独立的 task，内部连好 planner → executor → verifier。
+// root task 的环境按顺序从前一个 root fork，便于后续 task 增量续作。
 func (g *Graph) AddTask() Task {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	task := g.decorateLocked(g.addTaskLocked(""))
+	task := g.decorateLocked(g.addRootLocked())
 	g.revision++
 	return task
 }
@@ -560,6 +561,15 @@ func (g *Graph) addTaskLocked(parentEnvID string) Task {
 		Edge{From: task.Executor.ID, To: task.Verifier.ID, Kind: EdgeKindSequence},
 	)
 	return task
+}
+
+func (g *Graph) addRootLocked() Task {
+	parentEnvID := ""
+	roots := g.rootTasksLocked()
+	if len(roots) > 0 {
+		parentEnvID = roots[len(roots)-1].Env.ID
+	}
+	return g.addTaskLocked(parentEnvID)
 }
 
 func (g *Graph) taskByIDLocked(id string) (Task, bool) {

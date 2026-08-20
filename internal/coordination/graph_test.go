@@ -292,6 +292,17 @@ func TestGraphTaskEnv(t *testing.T) {
 		}
 	})
 
+	t.Run("later root env forks previous root", func(t *testing.T) {
+		t.Parallel()
+
+		graph := newGraph()
+		first := graph.AddTask()
+		second := graph.AddTask()
+		if second.Env.ParentID != first.Env.ID {
+			t.Fatalf("second root env parent = %q, want %q", second.Env.ParentID, first.Env.ID)
+		}
+	})
+
 	t.Run("spawn forks parent env", func(t *testing.T) {
 		t.Parallel()
 
