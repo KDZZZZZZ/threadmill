@@ -40,3 +40,22 @@ func (s Stores) Merge(from, into string) error {
 	}
 	return nil
 }
+
+// MergeMemory 只把 from 的记忆增量合入 into。
+func (s Stores) MergeMemory(from, into string) error {
+	if s.Memory == nil {
+		return nil
+	}
+	return s.Memory.Merge(from, into)
+}
+
+// DiscardFiles 删除一次性文件环境及其仍在运行的命令。
+func (s Stores) DiscardFiles(envID string) error {
+	if s.Exec != nil {
+		s.Exec.Reap(envID)
+	}
+	if s.Files == nil {
+		return nil
+	}
+	return s.Files.Discard(envID)
+}

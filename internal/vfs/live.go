@@ -111,6 +111,25 @@ func (s *Store) Release(envID string) error {
 	return aerr
 }
 
+// Discard 删除 env 的 live 目录和 overlay，不吸收尚未收回的写入。
+func (s *Store) Discard(envID string) error {
+	if envID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	live := s.lives[envID]
+	delete(s.lives, envID)
+	delete(s.envs, envID)
+	s.mu.Unlock()
+	if live == "" {
+		return nil
+	}
+	if err := os.RemoveAll(live); err != nil {
+		return fmt.Errorf("vfs: discard: %w", err)
+	}
+	return nil
+}
+
 type overlayFile struct {
 	path string
 	b    blob

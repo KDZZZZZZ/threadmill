@@ -21,7 +21,8 @@ var (
 // Run 由图调度一次从 taskID 出发的执行，返回该 task 的 verifier 输出。
 //
 // 每个角色节点顺序是 join → Ask → spawn：
-//   - join：Ask 前等 IncomingJoins 的子 task 结束，Merge 子环境，把子输出拼进本节点输入。
+//   - join：Ask 前等 IncomingJoins 的子 task 结束，把子输出拼进本节点输入；
+//     记忆总会合入，文件只在目标节点是 executor 时合入。
 //   - Ask：跑这个角色的 ReAct；ProgressStore 已有输出则跳过。
 //   - spawn：Ask 之后 Fork 子环境，用本角色输出当子输入，拉起即走，不等待。
 //
@@ -166,7 +167,17 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 
 	output, ok := outputs[node.ID]
 	if !ok {
+		var cleanup func(bool) error
+		if roles.prepare != nil {
+			cleanup, err = roles.prepare(node.Role)
+			if err != nil {
+				return "", err
+			}
+		}
 		output, err = asker.Ask(ctx, input)
+		if cleanup != nil {
+			err = errors.Join(err, cleanup(err == nil))
+		}
 		if err != nil {
 			return "", err
 		}
@@ -227,13 +238,24 @@ func (r *runner) joinIncoming(ctx context.Context, node Node, task Task, input s
 	}
 	if !already {
 		for _, item := range items {
-			if err := r.stores.Merge(item.child.Env.ID, task.Env.ID); err != nil {
+			var err error
+			if node.Role == RoleExecutor {
+				err = r.stores.Merge(item.child.Env.ID, task.Env.ID)
+			} else {
+				err = r.stores.MergeMemory(item.child.Env.ID, task.Env.ID)
+			}
+			if err != nil {
 				return "", err
 			}
 		}
 		merged[node.ID] = true
 		if err := r.saveProgress(node.TaskID, outputs, merged); err != nil {
 			return "", err
+		}
+		for _, item := range items {
+			if err := r.stores.DiscardFiles(item.child.Env.ID); err != nil {
+				return "", err
+			}
 		}
 	}
 	for _, item := range items {

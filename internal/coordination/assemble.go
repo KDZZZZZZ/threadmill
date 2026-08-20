@@ -2,6 +2,7 @@ package coordination
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 	"github.com/KDZZZZZZ/threadmill/internal/env"
@@ -21,12 +22,14 @@ type Roles struct {
 	Planner  Asker
 	Executor Asker
 	Verifier Asker
+	prepare  func(string) (func(bool) error, error)
 }
 
-// AssembleFunc 按 task 组装三个角色；工具必须绑到 task.Env。
+// AssembleFunc 按 task 组装三个角色。
 type AssembleFunc func(Task) (Roles, error)
 
-// Assemble 按 yaml 装配 prompt、tool、hook，再把记忆图绑到 task.Env。
+// Assemble 按 yaml 装配 prompt、tool、hook。executor 使用 task.Env；planner/verifier
+// 使用一次性文件与执行分支，三者仍共享 task 记忆。
 // contextWindow 来自 llm.context_window。checkpoints 保存进行中的 ReAct，可为空。
 func Assemble(
 	stores Stores,
@@ -38,10 +41,6 @@ func Assemble(
 	overlay ...agent.FileOverlay,
 ) AssembleFunc {
 	return func(task Task) (Roles, error) {
-		e, err := openEnv(stores, task.Env.ID)
-		if err != nil {
-			return Roles{}, err
-		}
 		team, err := agent.NewTeam(
 			provider,
 			contextWindow,
@@ -53,6 +52,10 @@ func Assemble(
 			return Roles{}, err
 		}
 		team.BindCheckpoints(checkpoints, task.ID)
+		e, err := openEnv(stores, task.Env.ID)
+		if err != nil {
+			return Roles{}, err
+		}
 		if err := team.Bind(e); err != nil {
 			return Roles{}, err
 		}
@@ -60,6 +63,42 @@ func Assemble(
 			Planner:  team.Planner,
 			Executor: team.Executor,
 			Verifier: team.Verifier,
+			prepare: func(role string) (func(bool) error, error) {
+				workspaceID := task.Env.ID
+				disposable := stores.Files != nil && role != RoleExecutor
+				if disposable {
+					workspaceID = task.Env.ID + ":" + role
+					if err := stores.Files.Fork(task.Env.ID, workspaceID); err != nil {
+						return nil, err
+					}
+				}
+				e, err := openRoleEnv(stores, task.Env.ID, workspaceID)
+				if err != nil {
+					return nil, err
+				}
+				loop := roleLoop(team, role)
+				if loop == nil {
+					return nil, fmt.Errorf("%w: %s", ErrNilAsker, role)
+				}
+				if err := loop.Bind(e); err != nil {
+					if disposable {
+						_ = stores.DiscardFiles(workspaceID)
+					}
+					return nil, err
+				}
+				return func(completed bool) error {
+					if !disposable {
+						return nil
+					}
+					if stores.Exec != nil {
+						stores.Exec.Reap(workspaceID)
+					}
+					if completed {
+						return stores.Files.Discard(workspaceID)
+					}
+					return stores.Files.Release(workspaceID)
+				}, nil
+			},
 		}, nil
 	}
 }
@@ -93,17 +132,34 @@ func NewManagerLoop(
 }
 
 func openEnv(stores Stores, envID string) (env.Env, error) {
+	return openRoleEnv(stores, envID, envID)
+}
+
+func openRoleEnv(stores Stores, memoryID, workspaceID string) (env.Env, error) {
 	if stores.Memory == nil {
 		return env.Env{}, ErrNilStore
 	}
-	e := env.Open(envID, stores.Memory.View(envID))
+	e := env.Open(workspaceID, stores.Memory.View(memoryID))
 	if stores.Files != nil {
-		e = e.WithFiles(filesView{view: stores.Files.View(envID)})
+		e = e.WithFiles(filesView{view: stores.Files.View(workspaceID)})
 	}
 	if stores.Exec != nil && stores.Files != nil {
-		e = e.WithExec(stores.Exec.View(envID, stores.Files))
+		e = e.WithExec(stores.Exec.View(workspaceID, stores.Files))
 	}
 	return e, nil
+}
+
+func roleLoop(team *agent.Team, role string) *agent.Loop {
+	switch role {
+	case RolePlanner:
+		return team.Planner
+	case RoleExecutor:
+		return team.Executor
+	case RoleVerifier:
+		return team.Verifier
+	default:
+		return nil
+	}
 }
 
 func (r Roles) asker(role string) Asker {

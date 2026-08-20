@@ -53,7 +53,7 @@ type ExecView interface {
 	Run(ctx context.Context, spec Cmd) (ExecResult, error)
 }
 
-// Env 是一个 task 的隔离工作区。同一 task 的角色共用一份。
+// Env 是一个角色的隔离工作区。同一 task 的角色可共用记忆并使用不同文件/执行视图。
 type Env struct {
 	ID     string
 	Memory MemoryView

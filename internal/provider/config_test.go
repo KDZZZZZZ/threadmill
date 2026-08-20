@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"testing"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
@@ -654,6 +655,19 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 	}
 	if got.Agents.Planner.SystemPrompt == "" {
 		t.Fatal("workspace planner system_prompt is empty")
+	}
+	for _, role := range []struct {
+		name  string
+		tools []string
+	}{
+		{"planner", got.Agents.Planner.Tools},
+		{"verifier", got.Agents.Verifier.Tools},
+	} {
+		for _, name := range []string{"write", "edit", "bash"} {
+			if !slices.Contains(role.tools, name) {
+				t.Errorf("workspace %s tools = %v, want %q", role.name, role.tools, name)
+			}
+		}
 	}
 	if got.Prompts.Default == "" {
 		t.Fatal("workspace prompts.default is empty")

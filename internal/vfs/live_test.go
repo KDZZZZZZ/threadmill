@@ -393,6 +393,41 @@ func TestReleaseAbsorbsLiveWrites(t *testing.T) {
 	}
 }
 
+func TestStoreDiscardDropsOverlayAndUnabsorbedLiveWrites(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	mustFork(t, store, "", "parent")
+	mustFork(t, store, "parent", "scratch")
+	if err := store.View("scratch").Write("overlay.txt", []byte("overlay")); err != nil {
+		t.Fatal(err)
+	}
+	live, err := store.Materialize("scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "live.txt"), []byte("live"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Discard("scratch"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(live); !os.IsNotExist(err) {
+		t.Fatalf("discarded live dir still exists: %v", err)
+	}
+	for _, path := range []string{"overlay.txt", "live.txt"} {
+		if _, err := store.View("scratch").Read(path); err == nil {
+			t.Fatalf("%s survived discard: %v", path, err)
+		}
+	}
+
+	mustFork(t, store, "parent", "scratch")
+	if _, err := store.View("scratch").Read("overlay.txt"); err == nil {
+		t.Fatalf("reused environment kept stale overlay: %v", err)
+	}
+}
+
 func TestAbsorbRejectsSpecialFiles(t *testing.T) {
 	t.Parallel()
 

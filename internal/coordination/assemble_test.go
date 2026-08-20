@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -105,6 +106,137 @@ func TestAssembleBindsVFSFiles(t *testing.T) {
 	}
 	if string(got) != "from-assemble" {
 		t.Fatalf("a.txt = %q, want from-assemble", got)
+	}
+}
+
+func TestGraphRunKeepsExecutorFilesButDiscardsPlannerAndVerifierFiles(t *testing.T) {
+	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
+	ctxgraph.Update(ctxgraph.Copy{})
+
+	files := vfs.NewStore(t.TempDir())
+	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
+		var role, path, content string
+		switch {
+		case strings.Contains(request.SystemPrompt, "plan role"):
+			role, path, content = "planner", "planner.txt", "scratch"
+		case strings.Contains(request.SystemPrompt, "execute role"):
+			if got := firstUserContent(request.Messages); got != "the plan" {
+				return agent.AssistantMessage{}, errors.New("executor did not receive the planner artifact")
+			}
+			role, path, content = "executor", "executor.txt", "kept"
+		case strings.Contains(request.SystemPrompt, "verify role"):
+			role, path, content = "verifier", "verifier.txt", "scratch"
+		default:
+			return agent.AssistantMessage{}, errors.New("unknown role")
+		}
+		if !hasToolResult(request.Messages) {
+			args, err := json.Marshal(map[string]string{"path": path, "content": content})
+			if err != nil {
+				return agent.AssistantMessage{}, err
+			}
+			return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+				ID:        role + "-write",
+				Name:      "write",
+				Arguments: args,
+			}}}, nil
+		}
+		switch role {
+		case "planner":
+			return agent.AssistantMessage{Content: "the plan"}, nil
+		case "executor":
+			return agent.AssistantMessage{Content: "executed"}, nil
+		default:
+			return agent.AssistantMessage{Content: "verified"}, nil
+		}
+	})
+	agents := agent.FileAgents{
+		Planner:  agent.FileAgent{SystemPrompt: "plan role", Tools: []string{"write"}},
+		Executor: agent.FileAgent{SystemPrompt: "execute role", Tools: []string{"write"}},
+		Verifier: agent.FileAgent{SystemPrompt: "verify role", Tools: []string{"write"}},
+	}
+	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
+	graph := newGraph()
+	task := graph.AddTask()
+
+	got, err := graph.Run(
+		context.Background(),
+		task.ID,
+		"request",
+		stores,
+		Assemble(stores, provider, agents, nil, 0, nil),
+	)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got != "verified" {
+		t.Fatalf("Run() = %q, want verified", got)
+	}
+	if body, err := files.View(task.Env.ID).Read("executor.txt"); err != nil || string(body) != "kept" {
+		t.Fatalf("executor.txt = %q, %v; want kept", body, err)
+	}
+	for _, path := range []string{"planner.txt", "verifier.txt"} {
+		if _, err := files.View(task.Env.ID).Read(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s survived its disposable role workspace: %v", path, err)
+		}
+	}
+}
+
+func TestGraphRunKeepsPlannerWorkspaceAfterFailureAndDiscardsItAfterResume(t *testing.T) {
+	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
+	ctxgraph.Update(ctxgraph.Copy{})
+
+	files := vfs.NewStore(t.TempDir())
+	crashed := errors.New("planner crashed")
+	plannerCalls := 0
+	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
+		switch {
+		case strings.Contains(request.SystemPrompt, "plan role"):
+			plannerCalls++
+			switch plannerCalls {
+			case 1:
+				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+					ID:        "write-before-crash",
+					Name:      "write",
+					Arguments: json.RawMessage(`{"path":"resume.txt","content":"recover me"}`),
+				}}}, nil
+			case 2:
+				return agent.AssistantMessage{}, crashed
+			case 3:
+				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+					ID:        "read-after-crash",
+					Name:      "read",
+					Arguments: json.RawMessage(`{"path":"resume.txt"}`),
+				}}}, nil
+			default:
+				if !strings.Contains(lastToolContent(request.Messages), "recover me") {
+					return agent.AssistantMessage{}, errors.New("planner scratch was not recovered")
+				}
+				return agent.AssistantMessage{Content: "recovered plan"}, nil
+			}
+		case strings.Contains(request.SystemPrompt, "execute role"):
+			return agent.AssistantMessage{Content: "executed"}, nil
+		default:
+			return agent.AssistantMessage{Content: "verified"}, nil
+		}
+	})
+	agents := agent.FileAgents{
+		Planner:  agent.FileAgent{SystemPrompt: "plan role", Tools: []string{"read", "write"}},
+		Executor: agent.FileAgent{SystemPrompt: "execute role"},
+		Verifier: agent.FileAgent{SystemPrompt: "verify role"},
+	}
+	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
+	graph := newGraph()
+	task := graph.AddTask()
+	assemble := Assemble(stores, provider, agents, nil, 0, nil)
+
+	if _, err := graph.Run(context.Background(), task.ID, "request", stores, assemble); !errors.Is(err, crashed) {
+		t.Fatalf("first Run() error = %v, want %v", err, crashed)
+	}
+	if _, err := graph.Run(context.Background(), task.ID, "request", stores, assemble); err != nil {
+		t.Fatalf("resume Run() error = %v", err)
+	}
+	if _, err := files.View(task.Env.ID).Read("resume.txt"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("planner scratch leaked into task env after resume: %v", err)
 	}
 }
 
