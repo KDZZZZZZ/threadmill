@@ -165,6 +165,34 @@ func TestReadResponseStreamCompletedEmptySnapshotUsesDeltas(t *testing.T) {
 	}
 }
 
+func TestReadResponseStreamKeepsCompletedOutputItemArguments(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","encrypted_content":"opaque","summary":[]}}`,
+		``,
+		`data: {"type":"response.function_call_arguments.done","output_index":1,"item_id":"fc_1","name":"ping","arguments":"{}"}`,
+		``,
+		`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"ping","arguments":"{}","status":"completed"}}`,
+		``,
+		`data: {"type":"response.completed","response":{"status":"completed","output":[{"id":"rs_1","type":"reasoning","summary":[]},{"id":"fc_1","type":"function_call","call_id":"call_1","name":"ping","arguments":null,"status":"completed"}]}}`,
+		``,
+	}, "\n")
+
+	got, err := readResponseStream(strings.NewReader(body), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := got.assistantMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(message.ToolCalls) != 1 || string(message.ToolCalls[0].Arguments) != `{}` {
+		t.Fatalf("tool calls = %#v, want one call with complete arguments", message.ToolCalls)
+	}
+	if _, err := json.Marshal(message); err != nil {
+		t.Fatalf("assistant message cannot be persisted: %v", err)
+	}
+}
+
 func TestReadResponseStreamMissingCompleted(t *testing.T) {
 	_, err := readResponseStream(strings.NewReader("data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n"), nil)
 	if err == nil || !strings.Contains(err.Error(), "without response.completed") {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/KDZZZZZZ/threadmill/internal/event"
@@ -56,6 +57,7 @@ func readResponseStream(r io.Reader, sink func(string)) (createResponseResponse,
 
 	var eventName, data string
 	var completed *createResponseResponse
+	completedItems := make(map[int]json.RawMessage)
 	var streamed strings.Builder
 	total := 0
 	dispatch := func() error {
@@ -68,9 +70,11 @@ func readResponseStream(r io.Reader, sink func(string)) (createResponseResponse,
 			return errors.New("provider response exceeds 16 MiB")
 		}
 		var payload struct {
-			Type     string                  `json:"type"`
-			Delta    string                  `json:"delta"`
-			Response *createResponseResponse `json:"response"`
+			Type        string                  `json:"type"`
+			Delta       string                  `json:"delta"`
+			OutputIndex *int                    `json:"output_index"`
+			Item        json.RawMessage         `json:"item"`
+			Response    *createResponseResponse `json:"response"`
 			createResponseResponse
 		}
 		if err := json.Unmarshal([]byte(data), &payload); err != nil {
@@ -90,6 +94,10 @@ func readResponseStream(r io.Reader, sink func(string)) (createResponseResponse,
 					sink(payload.Delta)
 				}
 			}
+		case "response.output_item.done":
+			if payload.OutputIndex != nil && *payload.OutputIndex >= 0 && len(payload.Item) > 0 {
+				completedItems[*payload.OutputIndex] = payload.Item
+			}
 		case "response.completed", "response.done":
 			resp := payload.Response
 			if resp == nil {
@@ -99,6 +107,7 @@ func readResponseStream(r io.Reader, sink func(string)) (createResponseResponse,
 			if resp.Status == "" {
 				resp.Status = "completed"
 			}
+			mergeCompletedOutputItems(resp, completedItems)
 			if err := fillOutputFromDeltas(resp, streamed.String()); err != nil {
 				return err
 			}
@@ -145,6 +154,24 @@ func readResponseStream(r io.Reader, sink func(string)) (createResponseResponse,
 		return createResponseResponse{}, errors.New("responses stream ended without response.completed")
 	}
 	return *completed, nil
+}
+
+func mergeCompletedOutputItems(resp *createResponseResponse, items map[int]json.RawMessage) {
+	if resp == nil || len(items) == 0 {
+		return
+	}
+	indexes := make([]int, 0, len(items))
+	for index := range items {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	for _, index := range indexes {
+		if index < len(resp.Output) {
+			resp.Output[index] = items[index]
+			continue
+		}
+		resp.Output = append(resp.Output, items[index])
+	}
 }
 
 func fillOutputFromDeltas(resp *createResponseResponse, deltas string) error {
