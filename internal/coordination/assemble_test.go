@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -245,6 +246,69 @@ func TestGraphRunJoinToPlannerUsesDisposableWorkspace(t *testing.T) {
 	}
 	if _, err := files.View(root.Env.ID).Read("joined.txt"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("planner join leaked child implementation: %v", err)
+	}
+}
+
+func TestGraphRunJoinToVerifierUsesDisposableWorkspace(t *testing.T) {
+	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
+	ctxgraph.Update(ctxgraph.Copy{})
+
+	graph := newGraph()
+	root := graph.AddTask()
+	helper := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
+	setTaskInfo(t, graph, helper.ID, "verification helper")
+	files := vfs.NewStore(t.TempDir())
+	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
+		input := firstUserContent(request.Messages)
+		switch {
+		case strings.Contains(request.SystemPrompt, "plan role"):
+			if strings.Contains(input, "verification helper") {
+				return agent.AssistantMessage{Content: "helper plan"}, nil
+			}
+			return agent.AssistantMessage{Content: "plan"}, nil
+		case strings.Contains(request.SystemPrompt, "execute role"):
+			if input != "helper plan" || hasToolResult(request.Messages) {
+				return agent.AssistantMessage{Content: "executed"}, nil
+			}
+			return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+				ID:        "write-verification-fixture",
+				Name:      "write",
+				Arguments: json.RawMessage(`{"path":"joined.txt","content":"fixture"}`),
+			}}}, nil
+		case strings.Contains(input, "[join]"):
+			if !hasToolResult(request.Messages) {
+				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+					ID:        "read-verification-fixture",
+					Name:      "read",
+					Arguments: json.RawMessage(`{"path":"joined.txt"}`),
+				}}}, nil
+			}
+			if got := lastToolContent(request.Messages); !strings.Contains(got, "fixture") {
+				return agent.AssistantMessage{}, fmt.Errorf("verifier did not see joined fixture: %q", got)
+			}
+			return agent.AssistantMessage{Content: "verified"}, nil
+		default:
+			return agent.AssistantMessage{Content: "verified"}, nil
+		}
+	})
+	agents := agent.FileAgents{
+		Planner:  agent.FileAgent{SystemPrompt: "plan role"},
+		Executor: agent.FileAgent{SystemPrompt: "execute role", Tools: []string{"write"}},
+		Verifier: agent.FileAgent{SystemPrompt: "verify role", Tools: []string{"read"}},
+	}
+	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
+
+	if _, err := graph.Run(
+		context.Background(),
+		root.ID,
+		"request",
+		stores,
+		Assemble(stores, provider, agents, nil, 0, nil),
+	); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if _, err := files.View(root.Env.ID).Read("joined.txt"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("verifier join leaked helper implementation: %v", err)
 	}
 }
 

@@ -74,21 +74,13 @@ func Assemble(
 				disposable := false
 				if stores.Files != nil {
 					switch role {
-					case RolePlanner:
+					case RolePlanner, RoleVerifier:
 						workspaceID = task.Env.ID + ":" + role
 						joinFilesID = workspaceID
 						disposable = true
 					case RoleExecutor:
-					case RoleVerifier:
-						workspaceID = task.Env.ID + ":" + role
-						disposable = true
 					default:
 						return roleScope{}, fmt.Errorf("%w: %s", ErrNilAsker, role)
-					}
-				}
-				if disposable && role == RolePlanner {
-					if err := stores.Files.Fork(task.Env.ID, workspaceID); err != nil {
-						return roleScope{}, err
 					}
 				}
 				return roleScope{

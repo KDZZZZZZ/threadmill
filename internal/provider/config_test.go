@@ -679,11 +679,16 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 	for _, want := range []string{
 		"join 到 planner：子任务输出、记忆和实现进入一次性规划环境",
 		"join 到 executor：子任务输出、记忆和实现先进入 task 持久环境",
-		"join 到 verifier：子任务输出、记忆和实现先进入 task 持久环境，再 fork 一次性核验环境",
+		"join 到 verifier：子任务文件实现只进入一次性核验环境",
+		"verifier 报告指出实现缺陷时，调用 coordination_replacePending 增量增加新的 task",
+		"不要回退或覆盖已完成 task 的实现",
 	} {
 		if !strings.Contains(got.Agents.Manager.SystemPrompt, want) {
 			t.Errorf("workspace manager system_prompt missing %q", want)
 		}
+	}
+	if !strings.Contains(got.Agents.Verifier.SystemPrompt, "发现实现缺陷只写入核验报告") {
+		t.Fatal("workspace verifier system_prompt missing report-only defect guidance")
 	}
 	if got.Tools["coordination_replacePending"].Description == "" {
 		t.Fatal("workspace tools.coordination_replacePending.description is empty")

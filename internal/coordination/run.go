@@ -20,7 +20,8 @@ var (
 
 // Run 由图调度一次从 taskID 出发的执行，返回该 task 的 verifier 输出。
 //
-// 每个角色节点顺序是 join → Ask → spawn：
+// 每个角色节点顺序是 fork → join → Ask → spawn：
+//   - fork：目标角色先准备自己的文件与执行环境。
 //   - join：Ask 前等 IncomingJoins 的子 task 结束，把子输出拼进本节点输入；
 //     记忆合入 task 环境，文件合入该角色声明的 join 环境。
 //   - Ask：跑这个角色的 ReAct；ProgressStore 已有输出则跳过。
@@ -149,7 +150,7 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (output stri
 	return output, nil
 }
 
-// runRole 执行图上的一个角色节点：join → Ask → spawn。
+// runRole 执行图上的一个角色节点：fork → join → Ask → spawn。
 func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input string, outputs map[string]string, merged map[string]bool) (string, error) {
 	asker := roles.asker(node.Role)
 	if asker == nil {
@@ -170,19 +171,23 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 		}
 	}
 
+	var cleanup func(bool) error
+	if !completed && scope.prepare != nil {
+		cleanup, err = scope.prepare()
+		if err != nil {
+			return "", err
+		}
+	}
+
 	input, err = r.joinIncoming(ctx, node, task, scope.joinFilesID, input, outputs, merged)
 	if err != nil {
+		if cleanup != nil {
+			err = errors.Join(err, cleanup(false))
+		}
 		return "", err
 	}
 
 	if !completed {
-		var cleanup func(bool) error
-		if scope.prepare != nil {
-			cleanup, err = scope.prepare()
-			if err != nil {
-				return "", err
-			}
-		}
 		output, err = asker.Ask(ctx, input)
 		if cleanup != nil {
 			err = errors.Join(err, cleanup(err == nil))
