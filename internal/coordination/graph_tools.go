@@ -35,8 +35,8 @@ func GraphToolMap(graph *Graph) map[string]agenttool.Tool {
 func (t graphTool) Definition() agenttool.Definition {
 	return agenttool.Definition{
 		Name:        coordReplacePendingName,
-		Description: "提交尚未执行切片的完整期望态，由图 diff 后改拓扑。roots 是根任务列表（按序号对齐，每项必须写 info）；spawns 是期望的 spawn/join 全集，每项带 info。成环、跨任务树或拆根会失败，图保持原样。任务执行期间不要改图。",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"roots":{"type":"array","items":{"type":"object","properties":{"info":{"type":"string"}},"additionalProperties":false}},"spawns":{"type":"array","items":{"type":"object","properties":{"from":{"type":"string"},"join":{"type":"string"},"info":{"type":"string"}},"required":["from","join"],"additionalProperties":false}}},"additionalProperties":false}`),
+		Description: "提交尚未执行切片的完整期望态。roots 按序号对齐且只可追加；辅助任务只能写 spawns，不能写成额外 root。from/join 必须是当前图或上次工具结果中的完整节点 ID（如 task-1:planner），禁止占位符。新 root 需要 spawn 时分两次：先只提交 roots 取得真实 ID，再原样保留 roots 并提交完整 spawns。成环、跨树、拆根或执行期改图会失败且图不变。",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"roots":{"type":"array","minItems":1,"description":"全部根任务，必须保留现有顺序；只可追加。辅助分支不要放这里。","items":{"type":"object","properties":{"info":{"type":"string"}},"required":["info"],"additionalProperties":false}},"spawns":{"type":"array","description":"完整 spawn/join 期望集；新根先单独创建并从工具结果取得真实节点 ID。","items":{"type":"object","properties":{"from":{"type":"string","description":"真实来源节点 ID，例如 task-1:planner。"},"join":{"type":"string","description":"同一任务树中的真实汇合节点 ID，例如 task-1:executor。"},"info":{"type":"string"}},"required":["from","join","info"],"additionalProperties":false}}},"required":["roots"],"additionalProperties":false}`),
 	}
 }
 

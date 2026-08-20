@@ -697,12 +697,16 @@ func hasProgressID(items []string, want string) bool {
 }
 
 func (r *runner) discardTree(rootID string) error {
-	if r.progress == nil {
-		return nil
-	}
 	var err error
 	for _, id := range r.graph.taskTree(rootID) {
-		err = errors.Join(err, r.progress.Delete(id))
+		if r.progress != nil {
+			err = errors.Join(err, r.progress.Delete(id))
+		}
+		if r.stores.Files != nil {
+			if task, ok := r.graph.Task(id); ok {
+				err = errors.Join(err, r.stores.Files.Discard(task.Env.ID))
+			}
+		}
 	}
 	return err
 }

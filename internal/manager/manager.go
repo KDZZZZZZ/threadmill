@@ -108,6 +108,10 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
+	files, err := vfs.NewPersistentStore(opt.Root, paths.VFSDir)
+	if err != nil {
+		return nil, err
+	}
 
 	s := &Manager{
 		graph:     graph,
@@ -120,7 +124,7 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 	s.idle = sync.NewCond(&s.mu)
 	s.stores = coordination.Stores{
 		Memory: memory,
-		Files:  vfs.NewStore(opt.Root),
+		Files:  files,
 		Exec: tmexec.New(tmexec.Config{
 			Slots:          file.Exec.Slots,
 			Timeout:        time.Duration(file.Exec.Timeout) * time.Second,
@@ -209,7 +213,10 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 		s.wg.Wait()
 		return nil, ctx.Err()
 	}
-	if err := s.runReady(ctx); err != nil {
+	if !managerPending {
+		err = s.runReady(ctx)
+	}
+	if err != nil {
 		cancel()
 		s.wg.Wait()
 		return nil, err

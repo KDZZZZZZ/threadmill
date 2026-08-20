@@ -151,6 +151,7 @@ func (g *Graph) applyPendingLocked(next PendingSubgraph) error {
 	type spawnKey struct {
 		From string
 		Join string
+		Info string
 	}
 	desired := make(map[spawnKey]PendingSpawn, len(next.Spawns))
 	for _, spawn := range next.Spawns {
@@ -159,7 +160,7 @@ func (g *Graph) applyPendingLocked(next PendingSubgraph) error {
 		if spawn.From == "" || spawn.Join == "" {
 			return fmt.Errorf("%w: spawn from and join are required", ErrInvalidPending)
 		}
-		desired[spawnKey{From: spawn.From, Join: spawn.Join}] = spawn
+		desired[spawnKey{From: spawn.From, Join: spawn.Join, Info: spawn.Info}] = spawn
 	}
 
 	have := make(map[spawnKey]string)
@@ -168,7 +169,7 @@ func (g *Graph) applyPendingLocked(next PendingSubgraph) error {
 		if !ok {
 			continue
 		}
-		have[spawnKey{From: pair.From, Join: pair.Join}] = task.ID
+		have[spawnKey{From: pair.From, Join: pair.Join, Info: task.Info}] = task.ID
 	}
 	for key, spawn := range desired {
 		if id, ok := have[key]; ok {
@@ -189,7 +190,7 @@ func (g *Graph) applyPendingLocked(next PendingSubgraph) error {
 			if !ok {
 				continue
 			}
-			if _, keep := desired[spawnKey{From: pair.From, Join: pair.Join}]; keep {
+			if _, keep := desired[spawnKey{From: pair.From, Join: pair.Join, Info: task.Info}]; keep {
 				continue
 			}
 			if _, err := g.unspawnLocked(task.ID); err != nil {

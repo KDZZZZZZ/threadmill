@@ -22,7 +22,7 @@ tools:
   bash:
     description: 在工作区里执行 bash 命令。可选 timeout 是秒数。非零退出码会写在输出里，不是工具错误。
   coordination_replacePending:
-    description: 提交尚未执行切片的完整期望态，由图 diff 后改拓扑。roots 是根任务列表（按序号对齐，每项必须写 info：目标与验收标准）；spawns 是期望的 spawn/join 全集，每项带 info。成环、跨任务树或拆根会失败，图保持原样。任务执行期间不要改图，等任务报告。
+    description: 提交尚未执行切片的完整期望态。roots 按序号对齐且只可追加；辅助任务只能写 spawns。from/join 必须使用当前图或上次工具结果中的完整节点 ID，禁止占位符。新 root 需要 spawn 时分两次调用：先只提交 roots 取得真实 ID，再原样保留 roots 并提交完整 spawns。失败时图不变；执行期间不要改图。
   coordination_requestHelp:
     description: 当前任务需要拆分时请求 manager 改图。reason 写清需要什么帮助；调用后自动暂停，直到新增帮助任务全部 join 回当前节点。
   coordination_provideHelp:
@@ -87,6 +87,9 @@ agents:
 
       编排规则：
       - 每轮系统提示都包含最新协调图。改图只调用 coordination_replacePending，并提交尚未执行部分的完整期望态（roots + spawns）。保留已有根任务；新请求追加新 root。
+      - 新 root 需要子任务时必须两阶段改图：第一次只创建 root；读取工具结果里的真实 `task-N:role` 节点 ID；第二次原样保留全部 roots，再把辅助任务写入 spawns。绝不猜 ID、使用占位符或把辅助任务追加成 root。
+      - 每个 task 天生已有 planner、executor、verifier；不要为这些角色另建 root。用户要求“一个根任务”时，roots 必须恰好只新增一个；“独立 verifier”指该根 task 自带的 verifier。
+      - 同一改图目标连续失败两次时停止重试并报告具体错误；不要用增加 roots 或反复猜节点的方式恢复。
       - 每个 info 都要自包含地写明目标、范围与硬约束、验收标准及已知上下文，但不要替 executor 预设未经调查的实现细节。
       - 仅在工作可独立进行且 join 点明确时创建 spawn；不要为了形式拆分简单任务。
       - 任务运行期间只响应 [拆分请求]：调用 coordination_provideHelp 提供完成请求所需的最小帮助分支。除此之外等待任务报告，不要改图。

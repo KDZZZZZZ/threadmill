@@ -137,6 +137,39 @@ func TestReplacePendingDiffsSpawns(t *testing.T) {
 	}
 }
 
+func TestReplacePendingKeepsSiblingSpawnsWithSameEndpoints(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "integrate"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := snap.Tasks[0]
+	want := PendingSubgraph{
+		Roots: []PendingRoot{{Info: "integrate"}},
+		Spawns: []PendingSpawn{
+			{From: root.Planner.ID, Join: root.Executor.ID, Info: "pricing"},
+			{From: root.Planner.ID, Join: root.Executor.ID, Info: "inventory"},
+			{From: root.Planner.ID, Join: root.Executor.ID, Info: "shipping"},
+		},
+	}
+	if _, err := graph.ReplacePending(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	if got := graph.taskCount(); got != 4 {
+		t.Fatalf("tasks = %d, want one root and three siblings", got)
+	}
+	if _, err := graph.ReplacePending(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	if got := graph.taskCount(); got != 4 {
+		t.Fatalf("tasks after identical replace = %d, want no duplicates", got)
+	}
+}
+
 func TestReplacePendingRejectsCycleWithoutMutating(t *testing.T) {
 	t.Parallel()
 

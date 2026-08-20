@@ -18,6 +18,7 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/logging"
 	"github.com/KDZZZZZZ/threadmill/internal/provider"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
+	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
 func TestOpenUsesOneUserStateDirectoryForCanonicalPath(t *testing.T) {
@@ -76,7 +77,8 @@ func TestStateUsesUserProjectDirectory(t *testing.T) {
 	}
 	if paths.ManagerReactDir != filepath.Join(projectDir, "checkpoints", "manager") ||
 		paths.ReactDir != filepath.Join(projectDir, "checkpoints", "tasks") ||
-		paths.ProgressDir != filepath.Join(projectDir, "progress") {
+		paths.ProgressDir != filepath.Join(projectDir, "progress") ||
+		paths.VFSDir != filepath.Join(projectDir, "vfs") {
 		t.Fatalf("state paths = %#v, want checkpoints and progress under project state", paths)
 	}
 }
@@ -251,6 +253,179 @@ func TestOpenTracksResumedManagerTurnUntilIdle(t *testing.T) {
 	releaseOnce.Do(func() { close(release) })
 	if err := mgr.WaitIdle(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOpenFinishesResumedManagerTurnBeforeStartingActiveTask(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	project := t.TempDir()
+	paths, err := openStatePaths(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph, err := coordination.OpenGraph(paths.GraphFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := graph.ReplacePending(ctx, coordination.PendingSubgraph{
+		Roots: []coordination.PendingRoot{{Info: "start after manager recovery"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store, err := agent.NewDirCheckpointStore(paths.ManagerReactDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save("manager", agent.Checkpoint{
+		Messages: []agent.Message{{Role: agent.RoleUser, Content: "finish manager recovery first"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	managerStarted := make(chan struct{})
+	releaseManager := make(chan struct{})
+	taskStarted := make(chan struct{})
+	var managerOnce, taskOnce sync.Once
+	mgr, err := Open(ctx, Options{
+		Root: project,
+		File: loadRepoConfig(t),
+		Provider: stubProvider(func(callCtx context.Context, request agent.Request) (agent.AssistantMessage, error) {
+			switch {
+			case strings.Contains(request.SystemPrompt, "经理 Agent"):
+				managerOnce.Do(func() { close(managerStarted) })
+				select {
+				case <-releaseManager:
+					return agent.AssistantMessage{Content: "manager recovered"}, nil
+				case <-callCtx.Done():
+					return agent.AssistantMessage{}, callCtx.Err()
+				}
+			case strings.Contains(request.SystemPrompt, "记忆整理器"):
+				return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
+			default:
+				taskOnce.Do(func() { close(taskStarted) })
+				return agent.AssistantMessage{Content: "role done"}, nil
+			}
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	select {
+	case <-managerStarted:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	select {
+	case <-taskStarted:
+		t.Fatal("active task started before the manager checkpoint finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseManager)
+	if err := mgr.WaitIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-taskStarted:
+	default:
+		t.Fatal("active task did not start after manager recovery")
+	}
+}
+
+func TestOpenRestoresDurableTaskFilesBeforeResumingVerifier(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, "work.txt"), []byte("host"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := openStatePaths(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph, err := coordination.OpenGraph(paths.GraphFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := graph.ReplacePending(ctx, coordination.PendingSubgraph{
+		Roots: []coordination.PendingRoot{{Info: "resume verifier with task files"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task := graph.Snapshot().Tasks[0]
+	progress, err := coordination.NewDirProgressStore(paths.ProgressDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := progress.Save(task.ID, coordination.TaskProgress{
+		Prepared: true,
+		Outputs: map[string]string{
+			task.Planner.ID:  "planned",
+			task.Executor.ID: "executor changed work.txt",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	durableFiles, err := vfs.NewPersistentStore(project, paths.VFSDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := durableFiles.Fork("", task.Env.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := durableFiles.View(task.Env.ID).Write("work.txt", []byte("task")); err != nil {
+		t.Fatal(err)
+	}
+	if err := durableFiles.Release(task.Env.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var verifierRead string
+	mgr, err := Open(ctx, Options{
+		Root: project,
+		File: loadRepoConfig(t),
+		Provider: stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
+			switch {
+			case strings.Contains(request.SystemPrompt, "经理 Agent"):
+				return agent.AssistantMessage{Content: "reported"}, nil
+			case strings.Contains(request.SystemPrompt, "记忆整理器"):
+				return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
+			case strings.Contains(request.SystemPrompt, "核验 Agent"):
+				for _, message := range request.Messages {
+					if message.Role == agent.RoleTool {
+						verifierRead = message.Content
+					}
+				}
+				if verifierRead != "" {
+					return agent.AssistantMessage{Content: "结论: PASS"}, nil
+				}
+				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+					ID:        "read-work",
+					Name:      "read",
+					Arguments: json.RawMessage(`{"path":"work.txt"}`),
+				}}}, nil
+			default:
+				t.Fatalf("unexpected resumed role: %s", request.SystemPrompt)
+				return agent.AssistantMessage{}, nil
+			}
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+	if err := mgr.WaitIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(verifierRead, "task") {
+		t.Fatalf("verifier read = %q, want durable task contents", verifierRead)
 	}
 }
 
