@@ -221,6 +221,40 @@ func TestResponsesGenerateReplaysProviderOutput(t *testing.T) {
 	}
 }
 
+func TestResponsesGenerateKeepsEmptyToolOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var got struct {
+			Input []map[string]any `json:"input"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		last := got.Input[len(got.Input)-1]
+		output, exists := last["output"]
+		if !exists || output != "" {
+			t.Fatalf("function_call_output = %#v, want explicit empty output", last)
+		}
+		_, _ = w.Write([]byte(`{
+  "status":"completed",
+  "output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+}`))
+	}))
+	defer server.Close()
+
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = model.Generate(context.Background(), agent.Request{Messages: []agent.Message{
+		{Role: agent.RoleUser, Content: "run"},
+		{Role: agent.RoleAssistant, ToolCalls: []agenttool.Call{{ID: "call-1", Name: "bash"}}},
+		{Role: agent.RoleTool, ToolResult: &agenttool.Result{CallID: "call-1", Name: "bash", Content: ""}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestResponsesGenerateReturnsRefusal(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
