@@ -13,16 +13,16 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/KDZZZZZZ/threadmill/internal/event"
-	"github.com/KDZZZZZZ/threadmill/internal/session"
+	"github.com/KDZZZZZZ/threadmill/internal/manager"
 	"github.com/KDZZZZZZ/threadmill/internal/tui"
 )
 
-// IO 是 CLI 的输入输出和可选的会话工厂。
+// IO 是 CLI 的输入输出和可选的 manager 工厂。
 type IO struct {
 	In   io.Reader
 	Out  io.Writer
 	Err  io.Writer
-	Open func(context.Context, session.Options) (*session.Session, error)
+	Open func(context.Context, manager.Options) (*manager.Manager, error)
 }
 
 type options struct {
@@ -42,7 +42,7 @@ func Run(args []string, stdio IO) int {
 	}
 	open := stdio.Open
 	if open == nil {
-		open = session.Open
+		open = manager.Open
 	}
 	out := stdio.Out
 	if out == nil {
@@ -62,9 +62,9 @@ func Run(args []string, stdio IO) int {
 	return runTUI(ctx, opts, open, errOut)
 }
 
-func runPrint(ctx context.Context, stop context.CancelFunc, opts options, open func(context.Context, session.Options) (*session.Session, error), out, errOut io.Writer) int {
+func runPrint(ctx context.Context, stop context.CancelFunc, opts options, open func(context.Context, manager.Options) (*manager.Manager, error), out, errOut io.Writer) int {
 	printer := &stdoutPrinter{out: out}
-	sess, err := open(ctx, session.Options{
+	mgr, err := open(ctx, manager.Options{
 		Root:   opts.dir,
 		Output: printer.write,
 		OnEvent: func(_ context.Context, ev event.RuntimeEvent) {
@@ -78,7 +78,7 @@ func runPrint(ctx context.Context, stop context.CancelFunc, opts options, open f
 		fmt.Fprintln(errOut, err)
 		return 1
 	}
-	defer sess.Close()
+	defer mgr.Close()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
@@ -89,7 +89,7 @@ func runPrint(ctx context.Context, stop context.CancelFunc, opts options, open f
 			case <-ctx.Done():
 				return
 			case <-sig:
-				if !sess.Cancel() {
+				if !mgr.Cancel() {
 					stop()
 					return
 				}
@@ -97,17 +97,17 @@ func runPrint(ctx context.Context, stop context.CancelFunc, opts options, open f
 		}
 	}()
 
-	sess.Send(opts.message)
-	if err := sess.WaitIdle(ctx); err != nil {
+	mgr.Send(opts.message)
+	if err := mgr.WaitIdle(ctx); err != nil {
 		fmt.Fprintln(errOut, err)
 		return 1
 	}
 	return 0
 }
 
-func runTUI(ctx context.Context, opts options, open func(context.Context, session.Options) (*session.Session, error), errOut io.Writer) int {
+func runTUI(ctx context.Context, opts options, open func(context.Context, manager.Options) (*manager.Manager, error), errOut io.Writer) int {
 	var p *tea.Program
-	sess, err := open(ctx, session.Options{
+	mgr, err := open(ctx, manager.Options{
 		Root: opts.dir,
 		Output: func(text string) {
 			if p != nil {
@@ -124,9 +124,9 @@ func runTUI(ctx context.Context, opts options, open func(context.Context, sessio
 		fmt.Fprintln(errOut, err)
 		return 1
 	}
-	defer sess.Close()
+	defer mgr.Close()
 
-	p = tui.NewProgram(ctx, sess, tui.Info{Root: opts.dir, Model: sess.ModelName()})
+	p = tui.NewProgram(ctx, mgr, tui.Info{Root: opts.dir, Model: mgr.ModelName()})
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(errOut, err)
 		return 1

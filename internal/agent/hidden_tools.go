@@ -117,7 +117,9 @@ func (t compactMemoryTool) Execute(ctx context.Context, call agenttool.Call) (ag
 	if err != nil {
 		return agenttool.Output{}, err
 	}
-	t.memory.Commit(graph)
+	if err := t.memory.Commit(graph); err != nil {
+		return agenttool.Output{}, fmt.Errorf("commit compacted memory: %w", err)
+	}
 	details, err := json.Marshal(tail)
 	if err != nil {
 		return agenttool.Output{}, fmt.Errorf("encode compact tail: %w", err)
@@ -196,9 +198,11 @@ func unwrapEventProvider(p Provider) Provider {
 func (l *Loop) snapshotTranscript() Transcript {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	subscribed := append([]string(nil), l.fixedSubscribedSubgraphs...)
+	subscribed = uniqueIDs(append(subscribed, l.subscribedSubgraphs...))
 	return Transcript{
 		Messages:            cloneMessages(l.messages),
-		Subscribed:          append([]string(nil), l.subscribedSubgraphs...),
+		Subscribed:          subscribed,
 		Provider:            unwrapEventProvider(l.provider),
 		ContextWindow:       l.contextWindow,
 		AgentID:             l.agentID,

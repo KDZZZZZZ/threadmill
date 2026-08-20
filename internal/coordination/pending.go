@@ -38,23 +38,98 @@ func (g *Graph) ReplacePending(ctx context.Context, next PendingSubgraph) (Snaps
 		return Snapshot{}, fmt.Errorf("replace pending: nil graph")
 	}
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if g.executing {
+		g.mu.Unlock()
 		return Snapshot{}, ErrGraphBusy
 	}
 	nextGraph := &Graph{
-		tasks:  append([]Task(nil), g.tasks...),
-		edges:  append([]Edge(nil), g.edges...),
-		nextID: g.nextID,
+		tasks:     append([]Task(nil), g.tasks...),
+		edges:     append([]Edge(nil), g.edges...),
+		nextID:    g.nextID,
+		helps:     cloneHelpStates(g.helps),
+		statePath: g.statePath,
 	}
 	if err := nextGraph.applyPendingLocked(next); err != nil {
+		g.mu.Unlock()
 		return Snapshot{}, err
+	}
+	if err := completedTasksUnchanged(g, nextGraph); err != nil {
+		g.mu.Unlock()
+		return Snapshot{}, err
+	}
+	nextGraph.revision = g.revision + 1
+	if err := nextGraph.saveLocked(); err != nil {
+		g.mu.Unlock()
+		return Snapshot{}, err
+	}
+	snap := nextGraph.snapshotLocked()
+	if err := emitTasks(g.taskSink, snap.Tasks); err != nil {
+		rollbackErr := g.saveLocked()
+		g.mu.Unlock()
+		return Snapshot{}, errors.Join(err, rollbackErr)
 	}
 	g.tasks = nextGraph.tasks
 	g.edges = nextGraph.edges
 	g.nextID = nextGraph.nextID
-	g.revision++
-	return g.snapshotLocked(), nil
+	g.helps = nextGraph.helps
+	g.revision = nextGraph.revision
+	g.mu.Unlock()
+	return snap, nil
+}
+
+func completedTasksUnchanged(current, next *Graph) error {
+	for _, task := range current.tasks {
+		if task.Outcome == OutcomeActive {
+			continue
+		}
+		candidate, ok := next.taskByIDLocked(task.ID)
+		if !ok || !sameTask(task, candidate) || !sameEdges(
+			incidentEdges(current, task), incidentEdges(next, task),
+		) {
+			return fmt.Errorf("%w: completed task %q is immutable", ErrInvalidPending, task.ID)
+		}
+	}
+	return nil
+}
+
+func sameTask(left, right Task) bool {
+	return left.ID == right.ID &&
+		left.Info == right.Info &&
+		left.Env == right.Env &&
+		left.Planner == right.Planner &&
+		left.Executor == right.Executor &&
+		left.Verifier == right.Verifier &&
+		left.Outcome == right.Outcome &&
+		left.RunPolicy == right.RunPolicy
+}
+
+func incidentEdges(graph *Graph, task Task) []Edge {
+	nodes := map[string]struct{}{
+		task.Planner.ID:  {},
+		task.Executor.ID: {},
+		task.Verifier.ID: {},
+	}
+	var edges []Edge
+	for _, edge := range graph.edges {
+		_, from := nodes[edge.From]
+		_, to := nodes[edge.To]
+		if from || to {
+			edges = append(edges, edge)
+		}
+	}
+	return edges
+}
+
+func sameEdges(left, right []Edge) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (g *Graph) applyPendingLocked(next PendingSubgraph) error {

@@ -200,3 +200,23 @@ func (l *Loop) snapshotReactLocked() Checkpoint {
 		Committed:           l.reactCommitted,
 	}
 }
+
+// BindCheckpointStore 给尚未运行的 Loop 绑定进行中 ReAct 存储。
+func (l *Loop) BindCheckpointStore(store CheckpointStore) {
+	l.mu.Lock()
+	l.checkpoints = store
+	l.mu.Unlock()
+}
+
+// HasPendingCheckpoint 表示 Loop 下次运行时会恢复一个尚未提交的回合。
+func (l *Loop) HasPendingCheckpoint() (bool, error) {
+	l.mu.Lock()
+	store := l.checkpoints
+	agentID := l.agentID
+	l.mu.Unlock()
+	if store == nil {
+		return false, nil
+	}
+	checkpoint, ok, err := store.Load(agentID)
+	return ok && !checkpoint.Committed, err
+}

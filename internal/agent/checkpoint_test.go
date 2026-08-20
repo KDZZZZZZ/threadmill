@@ -4,10 +4,44 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
+
+func TestRestoreCheckpointKeepsFixedSubscriptions(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewDirCheckpointStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save("agent", Checkpoint{SubscribedSubgraphs: []string{"dynamic"}}); err != nil {
+		t.Fatal(err)
+	}
+	loop, err := NewLoop(Config{
+		AgentID:         "agent",
+		CheckpointStore: store,
+		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+			return AssistantMessage{}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop.SetFixedSubscribedSubgraphs([]string{"fixed"})
+	if restored, err := loop.restoreCheckpoint(); err != nil || !restored {
+		t.Fatalf("restoreCheckpoint() = %v, %v", restored, err)
+	}
+	if got, want := loop.snapshotTranscript().Subscribed, []string{"fixed", "dynamic"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("subscriptions = %v, want %v", got, want)
+	}
+	loop.SetSubscribedSubgraphs(nil)
+	if got := loop.snapshotTranscript().Subscribed; !reflect.DeepEqual(got, []string{"fixed"}) {
+		t.Fatalf("subscriptions after replace = %v, want fixed", got)
+	}
+}
 
 func TestAskDiscardsCheckpointWhenTurnCompletes(t *testing.T) {
 	t.Parallel()
@@ -52,6 +86,48 @@ func TestAskDiscardsCheckpointWhenTurnCompletes(t *testing.T) {
 		t.Fatal(err)
 	} else if ok {
 		t.Fatal("checkpoint kept after the turn completed")
+	}
+}
+
+func TestRunResumesCheckpointBeforeWaitingForNewMessage(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewDirCheckpointStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const agentID = "manager"
+	if err := store.Save(agentID, Checkpoint{
+		Messages: []Message{{Role: RoleUser, Content: "restore me"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var request Request
+	loop, err := NewLoop(Config{
+		AgentID:         agentID,
+		CheckpointStore: store,
+		Provider: modelFunc(func(_ context.Context, got Request) (AssistantMessage, error) {
+			request = got
+			cancel()
+			return AssistantMessage{Content: "done"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if len(request.Messages) != 1 || request.Messages[0].Content != "restore me" {
+		t.Fatalf("resume request = %#v, want persisted user message", request.Messages)
+	}
+	if _, ok, err := store.Load(agentID); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatal("checkpoint kept after Run resumed the turn")
 	}
 }
 

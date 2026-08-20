@@ -52,7 +52,6 @@ func CompactHistory(
 	if err != nil {
 		return ctxgraph.Graph{}, nil, err
 	}
-
 	previousID := ""
 	if last, ok := graph.LastNodeOfCreator(agentID); ok {
 		previousID = last.ID
@@ -133,7 +132,7 @@ func buildOrganizeUserPrompt(graph ctxgraph.Graph, subgraphIDs []string, message
 	writeSubgraphCatalog(&b, graph, subgraphIDs)
 	b.WriteString("\n可选归属子图：\n")
 	writeSubgraphCatalog(&b, graph, allSubgraphIDs(graph))
-	b.WriteString("\n已有记忆：\n")
+	b.WriteString("\n已有记忆（即 Agent 当前可见节点）：\n")
 	existing := graph.NodesInSubgraphs(subgraphIDs)
 	if len(existing) == 0 {
 		b.WriteString("（无）\n")
@@ -167,6 +166,9 @@ func writeSubgraphCatalog(b *strings.Builder, graph ctxgraph.Graph, ids []string
 func allSubgraphIDs(graph ctxgraph.Graph) []string {
 	ids := make([]string, 0, len(graph.Subgraphs))
 	for _, subgraph := range graph.Subgraphs {
+		if subgraph.Kind == ctxgraph.SubgraphKindSystem || subgraph.Kind == ctxgraph.SubgraphKindPackage {
+			continue
+		}
 		ids = append(ids, subgraph.ID)
 	}
 	return uniqueIDs(ids)
@@ -302,21 +304,33 @@ func serializeConversation(messages []Message) string {
 			if len(message.ToolCalls) > 0 {
 				calls := make([]string, 0, len(message.ToolCalls))
 				for _, call := range message.ToolCalls {
+					if isMemoryToolName(call.Name) {
+						continue
+					}
 					args := strings.TrimSpace(string(call.Arguments))
 					if args == "" {
 						args = "{}"
 					}
 					calls = append(calls, fmt.Sprintf("%s(%s)", call.Name, compactJSON(args)))
 				}
-				parts = append(parts, "[Assistant tool calls]: "+strings.Join(calls, "; "))
+				if len(calls) > 0 {
+					parts = append(parts, "[Assistant tool calls]: "+strings.Join(calls, "; "))
+				}
 			}
 		case RoleTool:
+			if message.ToolResult != nil && isMemoryToolName(message.ToolResult.Name) {
+				continue
+			}
 			if text := strings.TrimSpace(message.Content); text != "" {
 				parts = append(parts, "[Tool result]: "+text)
 			}
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+func isMemoryToolName(name string) bool {
+	return name == organizeSubgraphToolName || strings.HasPrefix(name, "memory_")
 }
 
 func keepRecentBudget(contextWindow int) int {

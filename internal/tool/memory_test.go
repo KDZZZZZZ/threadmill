@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -296,6 +297,43 @@ func TestMemoryAddToSubgraphRequiresCommit(t *testing.T) {
 	}
 }
 
+func TestMemoryAddToSubgraphReturnsCommitError(t *testing.T) {
+	copy := seedMemoryCopy()
+	wantErr := errors.New("persist failed")
+	var tool Tool
+	for _, candidate := range MemoryTools(
+		func() ctxgraph.Copy { return copy },
+		func(ctxgraph.Copy) error { return wantErr },
+	) {
+		if candidate.Definition().Name == memoryAddToSubgraphName {
+			tool = candidate
+			break
+		}
+	}
+
+	_, err := tool.Execute(context.Background(), Call{
+		ID:        "call-1",
+		Name:      memoryAddToSubgraphName,
+		Arguments: json.RawMessage(`{"subgraph_id":"sg-b","node_ids":["n0"]}`),
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Execute() error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestMemoryAddToSubgraphRejectsSystemSubgraph(t *testing.T) {
+	copy := seedMemoryCopy()
+	copy.Graph.Subgraphs = append(copy.Graph.Subgraphs, ctxgraph.Subgraph{
+		ID:   "system",
+		Kind: ctxgraph.SubgraphKindSystem,
+	})
+
+	_, err := executeMemory(t, &copy, "memory_add_to_subgraph", `{"subgraph_id":"system","node_ids":["n0"]}`)
+	if err == nil || !strings.Contains(err.Error(), "system subgraph") {
+		t.Fatalf("Execute() error = %v, want system subgraph rejection", err)
+	}
+}
+
 func seedMemoryCopy() ctxgraph.Copy {
 	return ctxgraph.Copy{
 		AgentID: "test",
@@ -324,7 +362,10 @@ func executeMemory(t *testing.T, copy *ctxgraph.Copy, name, arguments string) (O
 	t.Helper()
 	for _, tool := range MemoryTools(
 		func() ctxgraph.Copy { return *copy },
-		func(updated ctxgraph.Copy) { *copy = updated },
+		func(updated ctxgraph.Copy) error {
+			*copy = updated
+			return nil
+		},
 	) {
 		if tool.Definition().Name != name {
 			continue

@@ -1,5 +1,5 @@
-// Package session 把经理循环、协调图调度和任务报告串成一次可唤醒的会话。
-package session
+// Package manager 把经理循环、协调图调度和任务报告串成一个可唤醒的运行单元。
+package manager
 
 import (
 	"context"
@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +22,7 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
-// Options 打开会话所需的工作区、配置和可选依赖。
+// Options 启动 manager 所需的工作区、配置和可选依赖。
 type Options struct {
 	Root     string
 	File     provider.FileConfig
@@ -33,33 +32,39 @@ type Options struct {
 	Logger   *slog.Logger
 }
 
-// Session 是长命经理加串行任务调度。
-type Session struct {
-	graph     *coordination.Graph
-	stores    coordination.Stores
-	assemble  coordination.AssembleFunc
-	manager   *agent.Loop
-	tokens    *tokenCounter
-	output    func(string)
-	modelName string
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	mu        sync.Mutex
-	pending   int
-	idle      *sync.Cond
-	err       error
-	cancelRun context.CancelFunc
-	logFile   io.Closer
+// Manager 是长命经理加串行任务调度。
+type Manager struct {
+	graph       *coordination.Graph
+	stores      coordination.Stores
+	assemble    coordination.AssembleFunc
+	loop        *agent.Loop
+	tokens      *tokenCounter
+	output      func(string)
+	modelName   string
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	mu          sync.Mutex
+	pending     int
+	idle        *sync.Cond
+	err         error
+	cancelRun   context.CancelFunc
+	taskRunning bool
+	logFile     io.Closer
 }
 
 // Open 接线存储、装配经理并启动常驻 Run。
-func Open(parent context.Context, opt Options) (*Session, error) {
+func Open(parent context.Context, opt Options) (*Manager, error) {
 	if parent == nil {
 		panic("nil context")
 	}
 	if opt.Root == "" {
-		return nil, fmt.Errorf("session: root is required")
+		return nil, fmt.Errorf("manager: root is required")
 	}
+	paths, err := openStatePaths(opt.Root)
+	if err != nil {
+		return nil, err
+	}
+	opt.Root = paths.ProjectRoot
 	file := opt.File
 	if file.LLM.Provider == "" {
 		loaded, err := provider.LoadConfig(opt.Root)
@@ -77,26 +82,36 @@ func Open(parent context.Context, opt Options) (*Session, error) {
 		llm = got
 	}
 
-	reactDir := filepath.Join(opt.Root, ".threadmill", "react")
-	progressDir := filepath.Join(opt.Root, ".threadmill", "progress")
-	checkpoints, err := agent.NewDirCheckpointStore(reactDir)
+	checkpoints, err := agent.NewDirCheckpointStore(paths.ReactDir)
 	if err != nil {
 		return nil, err
 	}
-	progress, err := coordination.NewDirProgressStore(progressDir)
+	managerCheckpoints, err := agent.NewDirCheckpointStore(paths.ManagerReactDir)
+	if err != nil {
+		return nil, err
+	}
+	progress, err := coordination.NewDirProgressStore(paths.ProgressDir)
+	if err != nil {
+		return nil, err
+	}
+	graph, err := coordination.OpenGraph(paths.GraphFile)
+	if err != nil {
+		return nil, err
+	}
+	memory, err := ctxgraph.OpenStore(paths.MemoryFile)
 	if err != nil {
 		return nil, err
 	}
 
-	s := &Session{
-		graph:     coordination.New(),
+	s := &Manager{
+		graph:     graph,
 		tokens:    newTokenCounter(),
 		output:    opt.Output,
 		modelName: file.LLM.Model,
 	}
 	s.idle = sync.NewCond(&s.mu)
 	s.stores = coordination.Stores{
-		Memory: ctxgraph.NewStore(),
+		Memory: memory,
 		Files:  vfs.NewStore(opt.Root),
 		Exec: tmexec.New(tmexec.Config{
 			Slots:       file.Exec.Slots,
@@ -105,11 +120,13 @@ func Open(parent context.Context, opt Options) (*Session, error) {
 		}),
 	}
 	s.graph.SetProgressStore(progress)
+	if err := s.graph.SetTaskSink(s.stores.ProjectManagerTaskInfos); err != nil {
+		return nil, err
+	}
 
 	logger := opt.Logger
 	if logger == nil {
-		logPath := filepath.Join(opt.Root, ".threadmill", "threadmill.log")
-		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		f, err := os.OpenFile(paths.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return nil, err
 		}
@@ -122,6 +139,7 @@ func Open(parent context.Context, opt Options) (*Session, error) {
 		Prompts: file.Prompts,
 		Events:  bus,
 	}
+	overlay.NamedTools = s.graph.HelpTools(s.enqueueManager)
 	s.assemble = coordination.Assemble(
 		s.stores,
 		llm,
@@ -131,7 +149,7 @@ func Open(parent context.Context, opt Options) (*Session, error) {
 		checkpoints,
 		overlay,
 	)
-	manager, err := coordination.NewManagerLoop(
+	loop, err := coordination.NewManagerLoop(
 		s.graph,
 		s.stores,
 		llm,
@@ -143,15 +161,22 @@ func Open(parent context.Context, opt Options) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := manager.AddHooks(s.hooks()); err != nil {
+	if err := loop.AddHooks(s.hooks()); err != nil {
 		return nil, err
 	}
-	s.manager = manager
-
+	loop.BindCheckpointStore(managerCheckpoints)
+	managerPending, err := loop.HasPendingCheckpoint()
+	if err != nil {
+		return nil, err
+	}
+	if managerPending {
+		s.pending++
+	}
+	s.loop = loop
 	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
 	ready := make(chan struct{})
-	if err := manager.AddHooks(agent.Hooks{
+	if err := loop.AddHooks(agent.Hooks{
 		BeforeRun: []agent.RunHook{func(context.Context) error {
 			close(ready)
 			return nil
@@ -163,7 +188,7 @@ func Open(parent context.Context, opt Options) (*Session, error) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		err := manager.Run(ctx)
+		err := loop.Run(ctx)
 		s.setErr(err)
 	}()
 	select {
@@ -173,17 +198,26 @@ func Open(parent context.Context, opt Options) (*Session, error) {
 		s.wg.Wait()
 		return nil, ctx.Err()
 	}
+	if err := s.runReady(ctx); err != nil {
+		cancel()
+		s.wg.Wait()
+		return nil, err
+	}
 	return s, nil
 }
 
 // Send 把用户消息入队，唤醒经理。
-func (s *Session) Send(text string) {
+func (s *Manager) Send(text string) {
+	if err := s.stores.ProjectManagerUserMessage(text); err != nil {
+		s.setErr(err)
+		return
+	}
 	s.addPending(1)
-	s.manager.Enqueue(agent.UserMessage{Content: text})
+	s.loop.Enqueue(agent.UserMessage{Content: text})
 }
 
 // WaitIdle 等到经理队列清空且没有正在跑的任务。
-func (s *Session) WaitIdle(ctx context.Context) error {
+func (s *Manager) WaitIdle(ctx context.Context) error {
 	if ctx == nil {
 		panic("nil context")
 	}
@@ -196,7 +230,7 @@ func (s *Session) WaitIdle(ctx context.Context) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for s.pending > 0 && s.err == nil && ctx.Err() == nil {
+	for (s.pending > 0 || s.taskRunning) && s.err == nil && ctx.Err() == nil {
 		s.idle.Wait()
 	}
 	if s.err != nil && !errors.Is(s.err, context.Canceled) {
@@ -206,12 +240,12 @@ func (s *Session) WaitIdle(ctx context.Context) error {
 }
 
 // Snapshot 返回当前协调图。
-func (s *Session) Snapshot() coordination.Snapshot {
+func (s *Manager) Snapshot() coordination.Snapshot {
 	return s.graph.Snapshot()
 }
 
 // Cancel 取消正在跑的任务树或抢占经理当前轮；没有可取消的工作时返回 false。
-func (s *Session) Cancel() bool {
+func (s *Manager) Cancel() bool {
 	s.mu.Lock()
 	cancel := s.cancelRun
 	s.mu.Unlock()
@@ -219,23 +253,23 @@ func (s *Session) Cancel() bool {
 		cancel()
 		return true
 	}
-	return s.manager.Preempt()
+	return s.loop.Preempt()
 }
 
 // ModelName 返回配置里的 LLM 模型名。
-func (s *Session) ModelName() string {
+func (s *Manager) ModelName() string {
 	return s.modelName
 }
 
 // Busy 表示还有未完成的经理轮或任务。
-func (s *Session) Busy() bool {
+func (s *Manager) Busy() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.pending > 0
+	return s.pending > 0 || s.taskRunning
 }
 
 // Close 停掉经理循环。
-func (s *Session) Close() {
+func (s *Manager) Close() {
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -245,7 +279,7 @@ func (s *Session) Close() {
 	}
 }
 
-func (s *Session) hooks() agent.Hooks {
+func (s *Manager) hooks() agent.Hooks {
 	return agent.Hooks{
 		AfterAssistant: []agent.AfterAssistantHook{
 			func(_ context.Context, message agent.AssistantMessage) error {
@@ -266,62 +300,95 @@ func (s *Session) hooks() agent.Hooks {
 	}
 }
 
-func (s *Session) runReady(ctx context.Context) error {
-	var roots []coordination.Task
+func (s *Manager) runReady(ctx context.Context) error {
+	s.mu.Lock()
+	running := s.taskRunning
+	s.mu.Unlock()
+	if running {
+		return nil
+	}
+
+	var root coordination.Task
 	for _, task := range s.graph.Snapshot().Tasks {
 		if task.SpawnedFrom != "" || task.Outcome != coordination.OutcomeActive || task.RunPolicy != coordination.RunPolicyEnabled {
 			continue
 		}
-		roots = append(roots, task)
+		root = task
+		break
 	}
-	var err error
-	for _, task := range roots {
-		err = errors.Join(err, s.runRoot(ctx, task))
+	if root.ID == "" {
+		return nil
 	}
-	return err
-}
 
-func (s *Session) runRoot(ctx context.Context, task coordination.Task) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	s.mu.Lock()
-	s.cancelRun = cancel
-	s.mu.Unlock()
-	defer func() {
-		cancel()
-		s.mu.Lock()
-		if s.cancelRun != nil {
-			s.cancelRun = nil
-		}
+	if s.taskRunning {
 		s.mu.Unlock()
-	}()
-
-	started := time.Now()
-	before := s.tokens.sumPrefix(task.ID + ":")
-	out, runErr := s.graph.Run(runCtx, task.ID, task.Info, s.stores, s.assemble)
-	tokens := s.tokens.sumPrefix(task.ID+":") - before
-	latest, ok := s.graph.Task(task.ID)
-	if !ok {
-		latest = task
+		cancel()
+		return nil
 	}
-	s.enqueueReport(formatReport(latest, out, runErr, time.Since(started), tokens))
+	s.taskRunning = true
+	s.cancelRun = cancel
+	s.wg.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.wg.Done()
+		s.runRoot(runCtx, cancel, root)
+	}()
 	return nil
 }
 
-func (s *Session) enqueueReport(text string) {
-	if s.output != nil {
-		s.output(text)
+func (s *Manager) runRoot(ctx context.Context, cancel context.CancelFunc, task coordination.Task) {
+	defer cancel()
+	started := time.Now()
+	before := s.tokens.sumPrefix(task.ID + ":")
+	var report string
+	reported := false
+	_, runErr := s.graph.RunWithReport(
+		ctx, task.ID, task.Info, s.stores, s.assemble,
+		func(latest coordination.Task, output string, taskErr error) error {
+			tokens := s.tokens.sumPrefix(task.ID+":") - before
+			report = formatReport(latest, output, taskErr, time.Since(started), tokens)
+			if err := s.stores.ProjectManagerTaskReport(latest, report); err != nil {
+				return err
+			}
+			reported = true
+			return nil
+		},
+	)
+	latest, _ := s.graph.Task(task.ID)
+	if latest.Outcome == coordination.OutcomeActive || !reported {
+		s.mu.Lock()
+		s.taskRunning = false
+		s.cancelRun = nil
+		s.mu.Unlock()
+		s.setErr(runErr)
+		return
 	}
-	s.addPending(1)
-	s.manager.Enqueue(agent.UserMessage{Content: text})
+
+	s.mu.Lock()
+	s.taskRunning = false
+	s.cancelRun = nil
+	s.pending++
+	s.mu.Unlock()
+	if s.output != nil {
+		s.output(report)
+	}
+	s.loop.Enqueue(agent.UserMessage{Content: report})
 }
 
-func (s *Session) addPending(n int) {
+func (s *Manager) enqueueManager(text string) {
+	s.addPending(1)
+	s.loop.Enqueue(agent.UserMessage{Content: text})
+}
+
+func (s *Manager) addPending(n int) {
 	s.mu.Lock()
 	s.pending += n
 	s.mu.Unlock()
 }
 
-func (s *Session) turnDone() {
+func (s *Manager) turnDone() {
 	s.mu.Lock()
 	s.pending--
 	if s.pending <= 0 {
@@ -331,7 +398,7 @@ func (s *Session) turnDone() {
 	s.mu.Unlock()
 }
 
-func (s *Session) setErr(err error) {
+func (s *Manager) setErr(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err == nil || errors.Is(err, context.Canceled) {
@@ -346,7 +413,7 @@ func (s *Session) setErr(err error) {
 	s.idle.Broadcast()
 }
 
-func (s *Session) onEvent(_ context.Context, ev event.RuntimeEvent) {
+func (s *Manager) onEvent(_ context.Context, ev event.RuntimeEvent) {
 	if ev.Kind == event.KindModel && ev.Phase == event.PhaseEnd && ev.Tokens > 0 {
 		s.tokens.add(ev.AgentID, ev.Tokens)
 	}

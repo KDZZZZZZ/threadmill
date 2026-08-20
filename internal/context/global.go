@@ -46,6 +46,7 @@ func (v *SharedView) Snapshot() Graph {
 }
 
 // Commit 用传入的图替换全局记忆图。
-func (v *SharedView) Commit(graph Graph) {
+func (v *SharedView) Commit(graph Graph) error {
 	Update(Copy{AgentID: v.agentID, Graph: graph})
+	return nil
 }

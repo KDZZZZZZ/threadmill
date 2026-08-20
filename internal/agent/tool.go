@@ -140,9 +140,9 @@ func (l *Loop) executeToolCall(ctx context.Context, call agenttool.Call) (agentt
 			return result, l.hooks.afterTool(ctx, call, result)
 		}
 
-		toolCtx := ctx
+		toolCtx := agenttool.WithAgentID(ctx, l.agentID)
 		if toolHidden(registered) {
-			toolCtx = l.withTranscript(ctx)
+			toolCtx = l.withTranscript(toolCtx)
 		}
 		output, err := registered.Execute(toolCtx, cloneCall(call))
 		if err != nil {

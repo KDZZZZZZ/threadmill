@@ -1,7 +1,7 @@
 llm:
   provider: openai-responses
   base_url: https://opencode.ai/zen/go/v1
-  api_key_env: OPENCODE_API_KEY
+  credential: opencode
   model: deepseek-v4-flash
   context_window: 128000
 tools:
@@ -23,6 +23,10 @@ tools:
     description: 在工作区里执行 bash 命令。可选 timeout 是秒数。非零退出码会写在输出里，不是工具错误。
   coordination_replacePending:
     description: 提交尚未执行切片的完整期望态，由图 diff 后改拓扑。roots 是根任务列表（按序号对齐，每项必须写 info：目标与验收标准）；spawns 是期望的 spawn/join 全集，每项带 info。成环、跨任务树或拆根会失败，图保持原样。任务执行期间不要改图，等任务报告。
+  coordination_requestHelp:
+    description: 当前任务需要拆分时请求 manager 改图。reason 写清需要什么帮助；调用后自动暂停，直到新增帮助任务全部 join 回当前节点。
+  coordination_provideHelp:
+    description: 响应拆分请求。request_id 来自请求消息；spawns 从其他节点拉出帮助任务，系统自动将它们 join 回请求节点。一次提交完整帮助列表。
   memory_neighbors:
     description: 查看某记忆节点的上游（前）和下游（后）节点。before/after：负数从该方向列表最前取 |n| 个，正数从最后取 n 个；省略则返回该方向全部节点。只读本 Agent 的图副本。
   memory_subgraphs_of:
@@ -73,12 +77,13 @@ agents:
 
       规则：
       - 每次请求都会带上最新协调图。改图只调用 coordination_replacePending，提交完整期望态（roots + spawns）。每个 root/spawn 必须写清 info（任务目标与验收标准）。
-      - 任务执行期间不要改图，等任务报告。收到 [任务报告] 后再决定汇报用户或继续拉任务。
+      - 任务执行期间只响应 [拆分请求]：调用 coordination_provideHelp，从其他合适节点拉出帮助任务。除此之外等任务报告，不要改图。
       - 成环、跨任务树或拆根会失败，图保持原样。不要对象级 spawn/unspawn，不要自己跑图。
       - 不要自己去做规划、执行或核验工作。
       - 不要编造工具结果。
     tools:
       - coordination_replacePending
+      - coordination_provideHelp
       - organize_subgraph
     hooks:
       - inject_subscribed_memory
@@ -92,9 +97,11 @@ agents:
       规则：
       - 只规划，不要执行计划中的操作。
       - 每一步具体、可独立执行，按合理顺序排列。
+      - 当前任务需要拆分协助时，调用 coordination_requestHelp；调用后会自动暂停并等待帮助任务 join。
       - 不要编造工具结果；需要读信息时才调用可用工具。
     tools:
       - organize_subgraph
+      - coordination_requestHelp
       - read
       - ls
       - grep
@@ -111,9 +118,11 @@ agents:
       规则：
       - 严格按计划执行，不要擅自改写目标。
       - 需要操作时调用可用工具；不要编造工具结果。
+      - 当前任务需要拆分协助时，调用 coordination_requestHelp；调用后会自动暂停并等待帮助任务 join。
       - 完成后用简短文字报告这一步的结果。
     tools:
       - organize_subgraph
+      - coordination_requestHelp
       - read
       - write
       - edit
@@ -130,9 +139,11 @@ agents:
       规则：
       - 只核验，不要继续执行计划，不要改写计划。
       - 明确给出通过或不通过，并列出依据。
+      - 当前任务需要拆分协助时，调用 coordination_requestHelp；调用后会自动暂停并等待帮助任务 join。
       - 不要编造未出现在记忆或对话里的事实。
     tools:
       - organize_subgraph
+      - coordination_requestHelp
       - read
       - ls
       - grep

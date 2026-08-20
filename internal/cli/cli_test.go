@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/KDZZZZZZ/threadmill/internal/event"
-	"github.com/KDZZZZZZ/threadmill/internal/session"
+	"github.com/KDZZZZZZ/threadmill/internal/manager"
 )
 
 var errSkipOpen = errors.New("open skipped")
@@ -40,7 +40,7 @@ func TestRunPrintOpensWorkspace(t *testing.T) {
 		In:  strings.NewReader(""),
 		Out: io.Discard,
 		Err: io.Discard,
-		Open: func(_ context.Context, opt session.Options) (*session.Session, error) {
+		Open: func(_ context.Context, opt manager.Options) (*manager.Manager, error) {
 			root = opt.Root
 			return nil, errSkipOpen
 		},
@@ -58,7 +58,7 @@ func TestRunInteractiveOpensWorkspace(t *testing.T) {
 	code := Run([]string{"-C", "/tmp/tui"}, IO{
 		Out: io.Discard,
 		Err: io.Discard,
-		Open: func(_ context.Context, opt session.Options) (*session.Session, error) {
+		Open: func(_ context.Context, opt manager.Options) (*manager.Manager, error) {
 			root = opt.Root
 			return nil, errSkipOpen
 		},

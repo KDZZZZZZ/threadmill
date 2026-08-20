@@ -34,6 +34,8 @@ const (
 	bashToolName      = "bash"
 
 	coordReplacePendingToolName = "coordination_replacePending"
+	coordRequestHelpToolName    = "coordination_requestHelp"
+	coordProvideHelpToolName    = "coordination_provideHelp"
 
 	hookInjectSubscribedMemory      = "inject_subscribed_memory"
 	hookCompactOnOverflow           = "compact_on_overflow"
@@ -66,6 +68,8 @@ var knownFileTools = map[string]struct{}{
 	fileFindToolName:              {},
 	bashToolName:                  {},
 	coordReplacePendingToolName:   {},
+	coordRequestHelpToolName:      {},
+	coordProvideHelpToolName:      {},
 }
 
 var knownFileHooks = map[string]struct{}{
@@ -77,6 +81,7 @@ var knownFileHooks = map[string]struct{}{
 
 var managerOnlyTools = map[string]struct{}{
 	coordReplacePendingToolName: {},
+	coordProvideHelpToolName:    {},
 }
 
 // FileAgent 是 threadmill.yaml 里单个 Agent 的配置。
@@ -128,6 +133,30 @@ type Team struct {
 	Executor  *Loop
 	Verifier  *Loop
 	Organizer *Loop
+}
+
+// PrepareTaskContext 让整理 Agent 按 Task Info 把最小必要节点加入指定启动包。
+func (t *Team) PrepareTaskContext(
+	ctx context.Context,
+	memory env.MemoryView,
+	taskInfo, subgraphID string,
+) error {
+	if t == nil || t.Organizer == nil {
+		return fmt.Errorf("prepare task context: nil organizer")
+	}
+	if memory == nil {
+		return fmt.Errorf("prepare task context: nil memory")
+	}
+	query := "为下面的 Task Info 准备任务启动包。只选择执行任务必需的最小节点集合；" +
+		"如果已有子图混有大量无关节点，不要整图加入。保留节点原有归属，只把必要节点加入目标子图。\n\n" +
+		"Task Info: " + strings.TrimSpace(taskInfo)
+	_, err := t.Organizer.Ask(ctx, organizeQuery(
+		query,
+		subgraphID,
+		memory.Snapshot(),
+		t.Organizer.organizeQueryText(),
+	))
+	return err
 }
 
 // Validate 拒绝空白 ID、负的步数，以及未知或重复的 tool/hook 名。
@@ -792,7 +821,9 @@ func (t *organizeSubgraphTool) Execute(ctx context.Context, call agenttool.Call)
 		return agenttool.Output{}, fmt.Errorf("%s: unbound memory", organizeSubgraphToolName)
 	}
 	graph := t.memory.Snapshot().WithSubgraph(subgraph)
-	t.memory.Commit(graph)
+	if err := t.memory.Commit(graph); err != nil {
+		return agenttool.Output{}, fmt.Errorf("commit organized subgraph: %w", err)
+	}
 
 	if _, err := t.organizer.Ask(ctx, organizeQuery(
 		query,

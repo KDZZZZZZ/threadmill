@@ -14,8 +14,6 @@ import (
 )
 
 func TestResponsesGenerateStreamsDeltas(t *testing.T) {
-	t.Setenv("TEST_OPENAI_API_KEY", "test-key")
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Accept") != "text/event-stream" {
 			t.Errorf("Accept = %q, want text/event-stream", request.Header.Get("Accept"))
@@ -52,12 +50,7 @@ func TestResponsesGenerateStreamsDeltas(t *testing.T) {
 	}))
 	defer server.Close()
 
-	model, err := NewResponses(LLMConfig{
-		Provider:  OpenAIResponses,
-		BaseURL:   server.URL + "/v1",
-		APIKeyEnv: "TEST_OPENAI_API_KEY",
-		Model:     "gpt-5",
-	}, server.Client())
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,8 +77,6 @@ func TestResponsesGenerateStreamsDeltas(t *testing.T) {
 }
 
 func TestResponsesGenerateStreamFailed(t *testing.T) {
-	t.Setenv("TEST_OPENAI_API_KEY", "test-key")
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher := w.(http.Flusher)
@@ -93,12 +84,7 @@ func TestResponsesGenerateStreamFailed(t *testing.T) {
 	}))
 	defer server.Close()
 
-	model, err := NewResponses(LLMConfig{
-		Provider:  OpenAIResponses,
-		BaseURL:   server.URL + "/v1",
-		APIKeyEnv: "TEST_OPENAI_API_KEY",
-		Model:     "gpt-5",
-	}, server.Client())
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}

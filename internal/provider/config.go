@@ -46,8 +46,7 @@ type ExecConfig struct {
 type LLMConfig struct {
 	Provider      string `yaml:"provider"`
 	BaseURL       string `yaml:"base_url"`
-	APIKey        string `yaml:"api_key"`
-	APIKeyEnv     string `yaml:"api_key_env"`
+	Credential    string `yaml:"credential"`
 	Model         string `yaml:"model"`
 	ContextWindow int    `yaml:"context_window"`
 }
@@ -108,16 +107,15 @@ func (c *ExecConfig) validate() error {
 func (config LLMConfig) validate() error {
 	if strings.TrimSpace(config.Provider) != config.Provider ||
 		strings.TrimSpace(config.BaseURL) != config.BaseURL ||
-		strings.TrimSpace(config.APIKey) != config.APIKey ||
-		strings.TrimSpace(config.APIKeyEnv) != config.APIKeyEnv ||
+		strings.TrimSpace(config.Credential) != config.Credential ||
 		strings.TrimSpace(config.Model) != config.Model {
 		return fmt.Errorf("%w: llm fields must not have surrounding whitespace", ErrInvalidConfig)
 	}
 	if config.Provider != OpenAIResponses {
 		return fmt.Errorf("%w: llm.provider must be %q", ErrInvalidConfig, OpenAIResponses)
 	}
-	if config.APIKey == "" && config.APIKeyEnv == "" {
-		return fmt.Errorf("%w: llm.api_key or llm.api_key_env is required", ErrInvalidConfig)
+	if config.Credential == "" {
+		return fmt.Errorf("%w: llm.credential is required", ErrInvalidConfig)
 	}
 	if strings.TrimSpace(config.Model) == "" {
 		return fmt.Errorf("%w: llm.model is required", ErrInvalidConfig)
@@ -140,18 +138,39 @@ func (config LLMConfig) validate() error {
 }
 
 func (config LLMConfig) resolveAPIKey() (string, error) {
-	if config.APIKey != "" {
-		return config.APIKey, nil
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("%w: find user home: %v", ErrInvalidConfig, err)
 	}
-	apiKey, exists := os.LookupEnv(config.APIKeyEnv)
-	if !exists || strings.TrimSpace(apiKey) == "" {
-		return "", fmt.Errorf(
-			"%w: environment variable %q is empty",
-			ErrInvalidConfig,
-			config.APIKeyEnv,
-		)
+	path := filepath.Join(home, ".threadmill", "credentials.yaml")
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("%w: open credentials %q: %v", ErrInvalidConfig, path, err)
 	}
-	return strings.TrimSpace(apiKey), nil
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", fmt.Errorf("%w: inspect credentials %q: %v", ErrInvalidConfig, path, err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("%w: credentials %q must only be accessible by its owner", ErrInvalidConfig, path)
+	}
+
+	decoder := yaml.NewDecoder(file)
+	var credentials map[string]string
+	if err := decoder.Decode(&credentials); err != nil {
+		return "", fmt.Errorf("%w: decode credentials %q", ErrInvalidConfig, path)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("%w: decode credentials %q", ErrInvalidConfig, path)
+	}
+
+	apiKey := strings.TrimSpace(credentials[config.Credential])
+	if apiKey == "" {
+		return "", fmt.Errorf("%w: credential %q is empty or missing", ErrInvalidConfig, config.Credential)
+	}
+	return apiKey, nil
 }
 
 // isLoopbackHost 只为本地 OpenAI-compatible 开发服务放行明文 HTTP。

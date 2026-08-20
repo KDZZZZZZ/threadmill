@@ -28,7 +28,7 @@ type memoryNode struct {
 type memoryTool struct {
 	name     string
 	snapshot func() ctxgraph.Copy
-	commit   func(ctxgraph.Copy)
+	commit   func(ctxgraph.Copy) error
 }
 
 var (
@@ -38,7 +38,7 @@ var (
 
 // MemoryTools 返回操作本 Agent 已持有图副本的工具。
 // snapshot 必须返回那份副本；写入工具通过 commit 写回，不得再 Clone 全局图。
-func MemoryTools(snapshot func() ctxgraph.Copy, commit func(ctxgraph.Copy)) []Tool {
+func MemoryTools(snapshot func() ctxgraph.Copy, commit func(ctxgraph.Copy) error) []Tool {
 	return []Tool{
 		memoryTool{name: memoryNeighborsName, snapshot: snapshot, commit: commit},
 		memoryTool{name: memorySubgraphsOfName, snapshot: snapshot, commit: commit},
@@ -90,10 +90,11 @@ func (t memoryTool) BindEnv(e env.Env) Tool {
 		}
 		return ctxgraph.Copy{Graph: e.Memory.Snapshot()}
 	}
-	t.commit = func(copy ctxgraph.Copy) {
-		if e.Memory != nil {
-			e.Memory.Commit(copy.Graph)
+	t.commit = func(copy ctxgraph.Copy) error {
+		if e.Memory == nil {
+			return nil
 		}
+		return e.Memory.Commit(copy.Graph)
 	}
 	return t
 }
@@ -211,6 +212,11 @@ func (t memoryTool) addToSubgraph(raw json.RawMessage) (Output, error) {
 	if t.snapshot != nil {
 		copy = t.snapshot()
 	}
+	for _, subgraph := range copy.Graph.Subgraphs {
+		if subgraph.ID == args.SubgraphID && subgraph.Kind == ctxgraph.SubgraphKindSystem {
+			return Output{}, fmt.Errorf("%s: system subgraph is runtime-managed", t.name)
+		}
+	}
 
 	known := make(map[string]struct{}, len(copy.Graph.Nodes))
 	for _, node := range copy.Graph.Nodes {
@@ -238,7 +244,9 @@ func (t memoryTool) addToSubgraph(raw json.RawMessage) (Output, error) {
 	}
 
 	copy.Graph = copy.Graph.WithNodesInSubgraph(args.SubgraphID, added)
-	t.commit(copy)
+	if err := t.commit(copy); err != nil {
+		return Output{}, err
+	}
 	return marshalMemory(struct {
 		SubgraphID string   `json:"subgraph_id"`
 		Added      []string `json:"added"`

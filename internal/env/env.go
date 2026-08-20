@@ -11,7 +11,7 @@ import (
 // MemoryView 是某个环境的记忆图视图。
 type MemoryView interface {
 	Snapshot() ctxgraph.Graph
-	Commit(ctxgraph.Graph)
+	Commit(ctxgraph.Graph) error
 }
 
 // FileInfo 是路径上的文件元数据。

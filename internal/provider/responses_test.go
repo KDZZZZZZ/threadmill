@@ -13,8 +13,6 @@ import (
 )
 
 func TestResponsesGenerateCallsResponsesAPI(t *testing.T) {
-	t.Setenv("TEST_OPENAI_API_KEY", "test-key")
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/responses" {
 			t.Errorf("request path = %q, want /v1/responses", request.URL.Path)
@@ -87,12 +85,7 @@ func TestResponsesGenerateCallsResponsesAPI(t *testing.T) {
 	}))
 	defer server.Close()
 
-	model, err := NewResponses(LLMConfig{
-		Provider:  OpenAIResponses,
-		BaseURL:   server.URL + "/v1",
-		APIKeyEnv: "TEST_OPENAI_API_KEY",
-		Model:     "gpt-5",
-	}, server.Client())
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,8 +129,6 @@ func TestResponsesGenerateCallsResponsesAPI(t *testing.T) {
 }
 
 func TestResponsesGenerateReplaysProviderOutput(t *testing.T) {
-	t.Setenv("TEST_OPENAI_API_KEY", "test-key")
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		var got map[string]any
 		if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
@@ -195,12 +186,7 @@ func TestResponsesGenerateReplaysProviderOutput(t *testing.T) {
 	}))
 	defer server.Close()
 
-	model, err := NewResponses(LLMConfig{
-		Provider:  OpenAIResponses,
-		BaseURL:   server.URL + "/v1",
-		APIKeyEnv: "TEST_OPENAI_API_KEY",
-		Model:     "gpt-5",
-	}, server.Client())
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,8 +219,6 @@ func TestResponsesGenerateReplaysProviderOutput(t *testing.T) {
 }
 
 func TestResponsesGenerateReturnsRefusal(t *testing.T) {
-	t.Setenv("TEST_OPENAI_API_KEY", "test-key")
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -250,12 +234,7 @@ func TestResponsesGenerateReturnsRefusal(t *testing.T) {
 	}))
 	defer server.Close()
 
-	model, err := NewResponses(LLMConfig{
-		Provider:  OpenAIResponses,
-		BaseURL:   server.URL + "/v1",
-		APIKeyEnv: "TEST_OPENAI_API_KEY",
-		Model:     "gpt-5",
-	}, server.Client())
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
