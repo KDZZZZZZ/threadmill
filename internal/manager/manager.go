@@ -122,9 +122,10 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 		Memory: memory,
 		Files:  vfs.NewStore(opt.Root),
 		Exec: tmexec.New(tmexec.Config{
-			Slots:       file.Exec.Slots,
-			Timeout:     time.Duration(file.Exec.Timeout) * time.Second,
-			OutputCapKB: file.Exec.OutputCapKB,
+			Slots:          file.Exec.Slots,
+			Timeout:        time.Duration(file.Exec.Timeout) * time.Second,
+			OutputCapKB:    file.Exec.OutputCapKB,
+			ContainerImage: file.Exec.ContainerImage,
 		}),
 	}
 	s.graph.SetProgressStore(progress)

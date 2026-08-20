@@ -634,6 +634,48 @@ exec:
 	}
 }
 
+func TestLoadConfigAcceptsExecContainerImage(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  credential: test
+  model: gpt-5
+exec:
+  container_image: golang:1.26.5-alpine
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Exec.ContainerImage != "golang:1.26.5-alpine" {
+		t.Fatalf("Exec.ContainerImage = %q", got.Exec.ContainerImage)
+	}
+}
+
+func TestLoadConfigRejectsPaddedExecContainerImage(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  credential: test
+  model: gpt-5
+exec:
+  container_image: " golang:1.26.5-alpine "
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadConfig(root); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig() error = %v, want ErrInvalidConfig", err)
+	}
+}
+
 func TestLoadConfigAcceptsBashTool(t *testing.T) {
 	root := t.TempDir()
 	content := []byte(`llm:

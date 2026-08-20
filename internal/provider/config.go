@@ -35,11 +35,12 @@ type FileConfig struct {
 	Exec    ExecConfig            `yaml:"exec"`
 }
 
-// ExecConfig 配置命令执行槽位、超时和输出上限。
+// ExecConfig 配置命令执行槽位、超时、输出上限和可选容器沙箱。
 type ExecConfig struct {
-	Slots       int `yaml:"slots"`
-	Timeout     int `yaml:"timeout"`       // 秒；0 表示只跟 ctx
-	OutputCapKB int `yaml:"output_cap_kb"` // 0 时调度器默认 256KB
+	Slots          int    `yaml:"slots"`
+	Timeout        int    `yaml:"timeout"`       // 秒；0 表示只跟 ctx
+	OutputCapKB    int    `yaml:"output_cap_kb"` // 0 时调度器默认 256KB
+	ContainerImage string `yaml:"container_image"`
 }
 
 // LLMConfig 配置一个 OpenAI-compatible Responses API Provider。
@@ -96,6 +97,9 @@ func LoadConfig(root string) (FileConfig, error) {
 func (c *ExecConfig) validate() error {
 	if c.Slots < 0 {
 		return fmt.Errorf("%w: exec.slots must not be negative", ErrInvalidConfig)
+	}
+	if strings.TrimSpace(c.ContainerImage) != c.ContainerImage {
+		return fmt.Errorf("%w: exec.container_image must not have surrounding whitespace", ErrInvalidConfig)
 	}
 	if c.Slots == 0 {
 		c.Slots = runtime.NumCPU()

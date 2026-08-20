@@ -26,13 +26,15 @@ type sandboxKind int
 const (
 	sandboxNone sandboxKind = iota
 	sandboxBwrap
+	sandboxDocker
 )
 
 // Config 是执行调度器的槽位、超时和输出上限。
 type Config struct {
-	Slots       int
-	Timeout     time.Duration
-	OutputCapKB int
+	Slots          int
+	Timeout        time.Duration
+	OutputCapKB    int
+	ContainerImage string
 }
 
 // Scheduler 用信号量限制并发，并把命令跑进某个 env 的 live 目录。
@@ -42,6 +44,7 @@ type Scheduler struct {
 	timeout   time.Duration
 	outputCap int
 	sandbox   sandboxKind
+	image     string
 	run       func(context.Context, string, env.Cmd) (env.ExecResult, error)
 
 	mu       sync.Mutex
@@ -97,8 +100,9 @@ func New(cfg Config) *Scheduler {
 		capacity:  n,
 		timeout:   cfg.Timeout,
 		outputCap: capBytes,
-		sandbox:   probeSandbox(),
+		image:     cfg.ContainerImage,
 	}
+	s.sandbox = probeSandbox(cfg.ContainerImage)
 	for range n {
 		s.slots <- struct{}{}
 	}
@@ -135,9 +139,12 @@ func (s *Scheduler) Stats() Stats {
 	}
 }
 
-func probeSandbox() sandboxKind {
+func probeSandbox(containerImage string) sandboxKind {
 	if probeBwrap() {
 		return sandboxBwrap
+	}
+	if containerImage != "" && probeDocker(containerImage) {
+		return sandboxDocker
 	}
 	return sandboxNone
 }
@@ -267,12 +274,18 @@ func (c *schedulerCounters) recordError(err error) {
 }
 
 func (s *Scheduler) runSandboxed(ctx context.Context, live, command, envID string) (env.ExecResult, error) {
-	if s.sandbox != sandboxBwrap {
+	switch s.sandbox {
+	case sandboxBwrap:
+		return runBwrap(ctx, live, command, s.outputCap, func(pgid int) {
+			s.track(envID, pgid)
+		})
+	case sandboxDocker:
+		return runDocker(ctx, live, command, s.image, s.outputCap, func(pgid int) {
+			s.track(envID, pgid)
+		})
+	default:
 		return env.ExecResult{}, ErrSandboxUnavailable
 	}
-	return runBwrap(ctx, live, command, s.outputCap, func(pgid int) {
-		s.track(envID, pgid)
-	})
 }
 
 func (s *Scheduler) track(envID string, pgid int) {

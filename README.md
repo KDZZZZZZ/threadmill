@@ -25,6 +25,17 @@ chmod 700 ~/.threadmill
 chmod 600 ~/.threadmill/credentials.yaml
 ```
 
+## 命令隔离
+
+Threadmill 默认只在可用的 `bwrap` 沙箱中执行 Agent 命令，不会静默降级到宿主执行。如果宿主不能创建所需 namespace，可以为项目显式选择一个本地已有的 Docker 镜像：
+
+```yaml
+exec:
+  container_image: golang:1.26.5-alpine
+```
+
+Docker 后端不会自动拉取镜像；容器禁用网络、使用只读根文件系统，并且只把当前 task 的 live workspace 挂载为可写目录。
+
 ## 提示词结构
 
 `threadmill.yaml` 目前有 10 份可配置提示词。角色提示词只描述职责、授权边界、工作方式和输出契约；工具参数与行为由 `tools` 的 description/schema 负责，避免重复。
