@@ -264,3 +264,25 @@ func TestStoreForkDoesNotOverwriteExistingChild(t *testing.T) {
 		t.Fatal("fork overwrote an existing child snapshot")
 	}
 }
+
+func TestStoreStatsExposeMemoryGraphInventory(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	graph := Graph{
+		Subgraphs: []Subgraph{{ID: "sg-1"}},
+		Nodes:     []Node{{ID: "n-1", Statement: "fact", SubgraphIDs: []string{"sg-1"}}},
+		Edges:     []Edge{{FromRef: "subgraph:sg-1", ToNodeID: "n-1", Kind: EdgeKindDerivesFromSubgraph}},
+	}
+	if err := store.Save("parent", graph); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Fork("parent", "child"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := store.Stats()
+	if got.Environments != 2 || got.Baselines != 1 || got.Subgraphs != 2 || got.Nodes != 2 || got.Edges != 2 {
+		t.Fatalf("stats = %#v", got)
+	}
+}

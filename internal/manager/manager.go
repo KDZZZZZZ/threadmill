@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -39,17 +40,22 @@ type Manager struct {
 	assemble    coordination.AssembleFunc
 	loop        *agent.Loop
 	tokens      *tokenCounter
+	metrics     *event.Collector
+	events      *event.Bus
 	output      func(string)
 	modelName   string
+	startedAt   time.Time
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
 	mu          sync.Mutex
 	pending     int
 	idle        *sync.Cond
 	err         error
+	settling    bool
 	cancelRun   context.CancelFunc
 	taskRunning bool
 	logFile     io.Closer
+	logger      *slog.Logger
 }
 
 // Open 接线存储、装配经理并启动常驻 Run。
@@ -106,8 +112,10 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 	s := &Manager{
 		graph:     graph,
 		tokens:    newTokenCounter(),
+		metrics:   event.NewCollector(),
 		output:    opt.Output,
 		modelName: file.LLM.Model,
+		startedAt: time.Now(),
 	}
 	s.idle = sync.NewCond(&s.mu)
 	s.stores = coordination.Stores{
@@ -133,7 +141,9 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 		logger = logging.New(logging.Config{Output: f})
 		s.logFile = f
 	}
-	bus := event.NewBus(s.onEvent, event.Monitor(logger), opt.OnEvent)
+	s.logger = logger
+	bus := event.NewBus(s.onEvent, s.metrics.Handle, event.Monitor(logger), opt.OnEvent)
+	s.events = bus
 	overlay := agent.FileOverlay{
 		Tools:   file.Tools,
 		Prompts: file.Prompts,
@@ -230,7 +240,7 @@ func (s *Manager) WaitIdle(ctx context.Context) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for (s.pending > 0 || s.taskRunning) && s.err == nil && ctx.Err() == nil {
+	for (((s.pending > 0 || s.taskRunning) && s.err == nil) || s.settling) && ctx.Err() == nil {
 		s.idle.Wait()
 	}
 	if s.err != nil && !errors.Is(s.err, context.Canceled) {
@@ -265,7 +275,56 @@ func (s *Manager) ModelName() string {
 func (s *Manager) Busy() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.pending > 0 || s.taskRunning
+	return s.pending > 0 || s.taskRunning || s.settling
+}
+
+// Metrics 返回 manager、事件、调度器、VFS、记忆图和 Go runtime 的一致近照。
+func (s *Manager) Metrics() Metrics {
+	s.mu.Lock()
+	pending := s.pending
+	taskRunning := s.taskRunning
+	startedAt := s.startedAt
+	s.mu.Unlock()
+
+	var memoryStats runtime.MemStats
+	runtime.ReadMemStats(&memoryStats)
+	metrics := Metrics{
+		Time:        time.Now(),
+		Uptime:      time.Since(startedAt),
+		Pending:     pending,
+		TaskRunning: taskRunning,
+		Events:      s.metrics.Snapshot(),
+		Runtime: RuntimeMetrics{
+			Goroutines:   runtime.NumGoroutine(),
+			HeapAlloc:    memoryStats.HeapAlloc,
+			HeapObjects:  memoryStats.HeapObjects,
+			GCCount:      memoryStats.NumGC,
+			GCPauseTotal: time.Duration(memoryStats.PauseTotalNs),
+		},
+	}
+	if s.stores.Exec != nil {
+		metrics.Exec = s.stores.Exec.Stats()
+	}
+	if s.stores.Files != nil {
+		metrics.VFS = s.stores.Files.Stats()
+	}
+	if s.stores.Memory != nil {
+		metrics.Memory = s.stores.Memory.Stats()
+	}
+	for _, task := range s.graph.Snapshot().Tasks {
+		metrics.Tasks.Total++
+		switch task.Outcome {
+		case coordination.OutcomeActive:
+			metrics.Tasks.Active++
+		case coordination.OutcomeDone:
+			metrics.Tasks.Done++
+		case coordination.OutcomeFailed:
+			metrics.Tasks.Failed++
+		case coordination.OutcomeCanceled:
+			metrics.Tasks.Canceled++
+		}
+	}
+	return metrics
 }
 
 // Close 停掉经理循环。
@@ -291,10 +350,18 @@ func (s *Manager) hooks() agent.Hooks {
 			},
 		},
 		AfterTurn: []agent.AfterTurnHook{
-			func(ctx context.Context, _ agent.UserMessage, _ agent.TurnResult) error {
+			func(ctx context.Context, _ agent.UserMessage, result agent.TurnResult) error {
+				if result.Err != nil && !errors.Is(result.Err, context.Canceled) {
+					s.setErr(result.Err)
+					return nil
+				}
 				err := s.runReady(ctx)
+				if err != nil {
+					s.setErr(err)
+					return err
+				}
 				s.turnDone()
-				return err
+				return nil
 			},
 		},
 	}
@@ -341,6 +408,7 @@ func (s *Manager) runReady(ctx context.Context) error {
 func (s *Manager) runRoot(ctx context.Context, cancel context.CancelFunc, task coordination.Task) {
 	defer cancel()
 	started := time.Now()
+	s.events.Publish(ctx, event.TaskStart(task.ID))
 	before := s.tokens.sumPrefix(task.ID + ":")
 	var report string
 	reported := false
@@ -357,6 +425,7 @@ func (s *Manager) runRoot(ctx context.Context, cancel context.CancelFunc, task c
 		},
 	)
 	latest, _ := s.graph.Task(task.ID)
+	s.events.Publish(ctx, event.TaskEnd(task.ID, latest.Outcome, started, runErr))
 	if latest.Outcome == coordination.OutcomeActive || !reported {
 		s.mu.Lock()
 		s.taskRunning = false
@@ -391,26 +460,89 @@ func (s *Manager) addPending(n int) {
 func (s *Manager) turnDone() {
 	s.mu.Lock()
 	s.pending--
+	idle := false
 	if s.pending <= 0 {
 		s.pending = 0
-		s.idle.Broadcast()
+		idle = !s.taskRunning
+		if idle {
+			s.settling = true
+		}
 	}
 	s.mu.Unlock()
+	if !idle {
+		return
+	}
+	s.logSnapshot()
+	s.mu.Lock()
+	s.settling = false
+	s.idle.Broadcast()
+	s.mu.Unlock()
+}
+
+func (s *Manager) logSnapshot() {
+	if s.logger == nil {
+		return
+	}
+	snapshot := s.Metrics()
+	s.logger.Info("runtime snapshot",
+		"uptime", snapshot.Uptime,
+		"pending", snapshot.Pending,
+		"task_running", snapshot.TaskRunning,
+		"tasks_active", snapshot.Tasks.Active,
+		"tasks_done", snapshot.Tasks.Done,
+		"tasks_failed", snapshot.Tasks.Failed,
+		"tasks_canceled", snapshot.Tasks.Canceled,
+		"model_completed", snapshot.Events.Model.Completed,
+		"model_errors", snapshot.Events.Model.Errors,
+		"model_p95", snapshot.Events.Model.Duration.P95,
+		"model_ttft_p95", snapshot.Events.Model.TTFT.P95,
+		"tokens", snapshot.Events.Tokens,
+		"tool_completed", snapshot.Events.Tool.Completed,
+		"tool_errors", snapshot.Events.Tool.Errors,
+		"tool_p95", snapshot.Events.Tool.Duration.P95,
+		"memory_ops_completed", snapshot.Events.Memory.Completed,
+		"memory_ops_errors", snapshot.Events.Memory.Errors,
+		"memory_ops_p95", snapshot.Events.Memory.Duration.P95,
+		"exec_queued", snapshot.Exec.Queued,
+		"exec_active", snapshot.Exec.Active,
+		"exec_peak_active", snapshot.Exec.PeakActive,
+		"exec_completed", snapshot.Exec.Completed,
+		"exec_errors", snapshot.Exec.Errors,
+		"vfs_environments", snapshot.VFS.Environments,
+		"vfs_live_dirs", snapshot.VFS.LiveDirs,
+		"vfs_overlay_bytes", snapshot.VFS.OverlayBytes,
+		"memory_environments", snapshot.Memory.Environments,
+		"memory_nodes", snapshot.Memory.Nodes,
+		"memory_edges", snapshot.Memory.Edges,
+		"goroutines", snapshot.Runtime.Goroutines,
+		"heap_alloc", snapshot.Runtime.HeapAlloc,
+		"gc_count", snapshot.Runtime.GCCount,
+	)
 }
 
 func (s *Manager) setErr(err error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err == nil || errors.Is(err, context.Canceled) {
 		s.pending = 0
 		s.idle.Broadcast()
+		s.mu.Unlock()
 		return
 	}
-	if s.err == nil {
-		s.err = err
+	if s.err != nil {
+		s.pending = 0
+		s.idle.Broadcast()
+		s.mu.Unlock()
+		return
 	}
+	s.err = err
 	s.pending = 0
+	s.settling = true
+	s.mu.Unlock()
+	s.logSnapshot()
+	s.mu.Lock()
+	s.settling = false
 	s.idle.Broadcast()
+	s.mu.Unlock()
 }
 
 func (s *Manager) onEvent(_ context.Context, ev event.RuntimeEvent) {

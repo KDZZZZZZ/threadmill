@@ -38,13 +38,48 @@ type Config struct {
 // Scheduler 用信号量限制并发，并把命令跑进某个 env 的 live 目录。
 type Scheduler struct {
 	slots     chan struct{}
+	capacity  int
 	timeout   time.Duration
 	outputCap int
 	sandbox   sandboxKind
 	run       func(context.Context, string, env.Cmd) (env.ExecResult, error)
 
-	mu     sync.Mutex
-	groups map[string][]int
+	mu       sync.Mutex
+	groups   map[string][]int
+	counters schedulerCounters
+}
+
+type schedulerCounters struct {
+	requests     uint64
+	started      uint64
+	completed    uint64
+	errors       uint64
+	canceled     uint64
+	timedOut     uint64
+	queued       int
+	active       int
+	peakQueued   int
+	peakActive   int
+	waitDuration time.Duration
+	runDuration  time.Duration
+}
+
+// Stats 是执行槽位、排队和完成情况的并发一致快照。
+type Stats struct {
+	Capacity             int           `json:"capacity"`
+	Queued               int           `json:"queued"`
+	Active               int           `json:"active"`
+	PeakQueued           int           `json:"peak_queued"`
+	PeakActive           int           `json:"peak_active"`
+	Requests             uint64        `json:"requests"`
+	Started              uint64        `json:"started"`
+	Completed            uint64        `json:"completed"`
+	Errors               uint64        `json:"errors"`
+	Canceled             uint64        `json:"canceled"`
+	TimedOut             uint64        `json:"timed_out"`
+	WaitDuration         time.Duration `json:"wait_duration"`
+	RunDuration          time.Duration `json:"run_duration"`
+	TrackedProcessGroups int           `json:"tracked_process_groups"`
 }
 
 // New 创建调度器。Slots <= 0 时用 runtime.NumCPU()。
@@ -59,6 +94,7 @@ func New(cfg Config) *Scheduler {
 	}
 	s := &Scheduler{
 		slots:     make(chan struct{}, n),
+		capacity:  n,
 		timeout:   cfg.Timeout,
 		outputCap: capBytes,
 		sandbox:   probeSandbox(),
@@ -67,6 +103,36 @@ func New(cfg Config) *Scheduler {
 		s.slots <- struct{}{}
 	}
 	return s
+}
+
+// Stats 返回调度器当前状态和进程生命周期累计值。
+func (s *Scheduler) Stats() Stats {
+	if s == nil {
+		return Stats{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tracked := 0
+	for _, groups := range s.groups {
+		tracked += len(groups)
+	}
+	c := s.counters
+	return Stats{
+		Capacity:             s.capacity,
+		Queued:               c.queued,
+		Active:               c.active,
+		PeakQueued:           c.peakQueued,
+		PeakActive:           c.peakActive,
+		Requests:             c.requests,
+		Started:              c.started,
+		Completed:            c.completed,
+		Errors:               c.errors,
+		Canceled:             c.canceled,
+		TimedOut:             c.timedOut,
+		WaitDuration:         c.waitDuration,
+		RunDuration:          c.runDuration,
+		TrackedProcessGroups: tracked,
+	}
 }
 
 func probeSandbox() sandboxKind {
@@ -87,19 +153,38 @@ type execView struct {
 	files *vfs.Store
 }
 
-func (v execView) Run(ctx context.Context, spec env.Cmd) (env.ExecResult, error) {
+func (v execView) Run(ctx context.Context, spec env.Cmd) (result env.ExecResult, runErr error) {
 	if ctx == nil {
 		panic("nil context")
 	}
 	if v.files == nil {
 		return env.ExecResult{}, fmt.Errorf("exec: nil files")
 	}
+	requested := time.Now()
+	v.sched.requestReceived()
+	if err := ctx.Err(); err != nil {
+		v.sched.requestRejected(0, false, err)
+		return env.ExecResult{}, err
+	}
+	queued := false
 	select {
 	case <-v.sched.slots:
-	case <-ctx.Done():
-		return env.ExecResult{}, ctx.Err()
+	default:
+		queued = true
+		v.sched.requestQueued()
+		select {
+		case <-v.sched.slots:
+		case <-ctx.Done():
+			v.sched.requestRejected(time.Since(requested), true, ctx.Err())
+			return env.ExecResult{}, ctx.Err()
+		}
 	}
 	defer func() { v.sched.slots <- struct{}{} }()
+	v.sched.requestStarted(time.Since(requested), queued)
+	started := time.Now()
+	defer func() {
+		v.sched.requestCompleted(time.Since(started), runErr)
+	}()
 
 	live, err := v.files.Materialize(v.envID)
 	if err != nil {
@@ -121,6 +206,64 @@ func (v execView) Run(ctx context.Context, spec env.Cmd) (env.ExecResult, error)
 		return v.sched.run(ctx, live, spec)
 	}
 	return v.sched.runSandboxed(ctx, live, spec.Command, v.envID)
+}
+
+func (s *Scheduler) requestReceived() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.counters.requests++
+}
+
+func (s *Scheduler) requestQueued() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.counters.queued++
+	s.counters.peakQueued = max(s.counters.peakQueued, s.counters.queued)
+}
+
+func (s *Scheduler) requestStarted(wait time.Duration, queued bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if queued {
+		s.counters.queued--
+		s.counters.waitDuration += wait
+	}
+	s.counters.active++
+	s.counters.started++
+	s.counters.peakActive = max(s.counters.peakActive, s.counters.active)
+}
+
+func (s *Scheduler) requestRejected(wait time.Duration, queued bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if queued {
+		s.counters.queued--
+		s.counters.waitDuration += wait
+	}
+	s.counters.completed++
+	s.counters.recordError(err)
+}
+
+func (s *Scheduler) requestCompleted(took time.Duration, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.counters.active--
+	s.counters.completed++
+	s.counters.runDuration += took
+	s.counters.recordError(err)
+}
+
+func (c *schedulerCounters) recordError(err error) {
+	if err == nil {
+		return
+	}
+	c.errors++
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		c.timedOut++
+	case errors.Is(err, context.Canceled):
+		c.canceled++
+	}
 }
 
 func (s *Scheduler) runSandboxed(ctx context.Context, live, command, envID string) (env.ExecResult, error) {

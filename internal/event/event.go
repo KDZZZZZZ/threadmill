@@ -1,4 +1,4 @@
-// Package event 把模型调用和工具调用归一成 RuntimeEvent，再分发给监控等消费者。
+// Package event 把运行时生命周期归一成 RuntimeEvent，再分发给监控等消费者。
 //
 // 生产者可以是业务代码（ReAct Loop）或日后的 Eino OnStart/OnEnd/OnError 回调。
 // 实时落库与 WebSocket 不在本包。
@@ -13,8 +13,10 @@ import (
 type Kind string
 
 const (
-	KindModel Kind = "model"
-	KindTool  Kind = "tool"
+	KindModel  Kind = "model"
+	KindTool   Kind = "tool"
+	KindTask   Kind = "task"
+	KindMemory Kind = "memory"
 )
 
 // Phase 是一次调用的时点，对应 Eino Timing OnStart / OnEnd；失败写在 End 的 Err 上。
@@ -127,6 +129,44 @@ func ToolEnd(agentID, name, callID string, started time.Time, isError bool, err 
 		CallID:  callID,
 		Started: started,
 		IsError: isError,
+		Err:     err,
+	}, PhaseEnd)
+}
+
+// TaskStart 归一化一次协调任务开始。
+func TaskStart(taskID string) RuntimeEvent {
+	return Normalize(Input{AgentID: taskID, Kind: KindTask}, PhaseStart)
+}
+
+// TaskEnd 归一化一次协调任务结束；name 是 done/failed/canceled 终态。
+func TaskEnd(taskID, name string, started time.Time, err error) RuntimeEvent {
+	return Normalize(Input{
+		AgentID: taskID,
+		Kind:    KindTask,
+		Name:    name,
+		Started: started,
+		Err:     err,
+	}, PhaseEnd)
+}
+
+// MemoryStart 归一化一次隐藏记忆操作开始。
+func MemoryStart(agentID, name, callID string) RuntimeEvent {
+	return Normalize(Input{
+		AgentID: agentID,
+		Kind:    KindMemory,
+		Name:    name,
+		CallID:  callID,
+	}, PhaseStart)
+}
+
+// MemoryEnd 归一化一次隐藏记忆操作结束。
+func MemoryEnd(agentID, name, callID string, started time.Time, err error) RuntimeEvent {
+	return Normalize(Input{
+		AgentID: agentID,
+		Kind:    KindMemory,
+		Name:    name,
+		CallID:  callID,
+		Started: started,
 		Err:     err,
 	}, PhaseEnd)
 }

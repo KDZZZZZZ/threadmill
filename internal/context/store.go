@@ -21,12 +21,40 @@ type Store struct {
 	path      string
 }
 
+// StoreStats 汇总内存图存储的规模。数量按环境快照求和。
+type StoreStats struct {
+	Environments int `json:"environments"`
+	Baselines    int `json:"baselines"`
+	Subgraphs    int `json:"subgraphs"`
+	Nodes        int `json:"nodes"`
+	Edges        int `json:"edges"`
+}
+
 // NewStore 返回空的按环境隔离存储。
 func NewStore() *Store {
 	return &Store{
 		graphs:    make(map[string]Graph),
 		baselines: make(map[string]Graph),
 	}
+}
+
+// Stats 返回全部环境图的并发一致规模快照。
+func (s *Store) Stats() StoreStats {
+	if s == nil {
+		return StoreStats{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stats := StoreStats{
+		Environments: len(s.graphs),
+		Baselines:    len(s.baselines),
+	}
+	for _, graph := range s.graphs {
+		stats.Subgraphs += len(graph.Subgraphs)
+		stats.Nodes += len(graph.Nodes)
+		stats.Edges += len(graph.Edges)
+	}
+	return stats
 }
 
 // OpenStore 打开持久化记忆图存储；文件不存在时创建空存储。

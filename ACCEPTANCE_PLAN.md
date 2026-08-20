@@ -258,7 +258,11 @@ go test -tags=integration -run '^TestLiveGraphRunMemoryOpsAndEnvVersions$' -v ./
 
 ## 11. 当前基线与待确认项
 
-2026-08-20 在 `feat/tui` 工作树执行 `go test ./...`：除 `internal/exec` 外其余包通过；`TestSchedulerDoesNotAbsorbOnRun` 连续复跑 10 次均失败，报错为 `Run absorbed a live file into overlay`。该项是进入真实验收前的 P0 阻断项，本计划不直接修改其实现。
+2026-08-20 在 `feat/tui` 工作树重新执行 `go build ./...`、`go vet ./...`、`go test -shuffle=on ./...` 和 `go test -race -shuffle=on ./...`，均通过。先前 `TestSchedulerDoesNotAbsorbOnRun` 与既定的 `Run -> Release -> Absorb` 生命周期矛盾，测试口径已修正，exec 阻断解除。
+
+本轮还用本地 OpenAI-compatible HTTP/SSE 服务跑通了真实二进制主链路，并完成 100 个进程、并发度 20 的突发测试；100/100 均得到 `done` 任务报告和唯一 marker。由于本机没有配置真实供应商凭据，这只能证明真实网络协议、调度、文件工具和持久化链路，不能代替 L01/L02 的外部模型质量、费用和网络尾延迟验收。
+
+当前已有空闲/错误快照，覆盖 model/tool/task/memory 生命周期、TTFT、时延桶、token、exec 排队和槽位、VFS/记忆规模以及 Go heap/goroutine/GC。监控层仍不算完备：Prometheus/OpenTelemetry 导出、run/trace 关联、周期性 CPU/RSS/FD/子进程采样、在线告警和异常自动 profile 仍待实现。
 
 首轮开始前还需确认两项产品语义：
 

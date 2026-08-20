@@ -61,6 +61,15 @@ type Store struct {
 	lives   map[string]string
 }
 
+// Stats 是 VFS 当前持有的有界资源清单。
+type Stats struct {
+	Environments int   `json:"environments"`
+	LiveDirs     int   `json:"live_dirs"`
+	OverlayFiles int   `json:"overlay_files"`
+	Tombstones   int   `json:"tombstones"`
+	OverlayBytes int64 `json:"overlay_bytes"`
+}
+
 // NewStore 以只读 host 树为 base。写入不会改 baseDir。
 func NewStore(baseDir string) *Store {
 	return &Store{
@@ -68,6 +77,36 @@ func NewStore(baseDir string) *Store {
 		envs:    make(map[string]*layer),
 		lives:   make(map[string]string),
 	}
+}
+
+// Stats 返回 overlay 和 live 目录的并发一致快照，不扫描宿主工作区。
+func (s *Store) Stats() Stats {
+	if s == nil {
+		return Stats{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stats := Stats{
+		Environments: len(s.envs),
+		LiveDirs:     len(s.lives),
+	}
+	for _, layer := range s.envs {
+		for _, item := range layer.files {
+			if item.tombstone {
+				stats.Tombstones++
+				continue
+			}
+			stats.OverlayFiles++
+			stats.OverlayBytes += int64(len(item.data))
+		}
+	}
+	for id := range s.lives {
+		if _, exists := s.envs[id]; !exists {
+			stats.Environments++
+		}
+	}
+	return stats
 }
 
 // Fork 先把 parent 的 live 收进 overlay，再给 child 挂上当时从父到根的 overlay 快照作基线。

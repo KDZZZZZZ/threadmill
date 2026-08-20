@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/KDZZZZZZ/threadmill/internal/env"
+	"github.com/KDZZZZZZ/threadmill/internal/event"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -215,13 +217,20 @@ func (l *Loop) withTranscript(ctx context.Context) context.Context {
 	return WithTranscript(ctx, l.snapshotTranscript())
 }
 
-func (l *Loop) execHidden(ctx context.Context, name string, args json.RawMessage) (agenttool.Output, error) {
+func (l *Loop) execHidden(ctx context.Context, name string, args json.RawMessage) (out agenttool.Output, err error) {
+	callID := "hidden-" + name
+	started := time.Now()
+	l.publish(ctx, event.MemoryStart(l.agentID, name, callID))
+	defer func() {
+		l.publish(ctx, event.MemoryEnd(l.agentID, name, callID, started, err))
+	}()
+
 	tool, ok := l.tools[name]
 	if !ok {
 		return agenttool.Output{}, fmt.Errorf("tool %q not found", name)
 	}
-	out, err := tool.Execute(l.withTranscript(ctx), agenttool.Call{
-		ID:        "hidden-" + name,
+	out, err = tool.Execute(l.withTranscript(ctx), agenttool.Call{
+		ID:        callID,
 		Name:      name,
 		Arguments: args,
 	})

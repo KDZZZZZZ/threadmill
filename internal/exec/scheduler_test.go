@@ -53,6 +53,105 @@ func TestSchedulerRespectsSlotLimit(t *testing.T) {
 	}
 }
 
+func TestSchedulerStatsExposeQueueSaturationAndCompletion(t *testing.T) {
+	t.Parallel()
+
+	s := New(Config{Slots: 1})
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	s.run = func(context.Context, string, env.Cmd) (env.ExecResult, error) {
+		once.Do(func() { close(entered) })
+		<-release
+		return env.ExecResult{}, nil
+	}
+	view := s.View("env-a", vfs.NewStore(t.TempDir()))
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = view.Run(context.Background(), env.Cmd{Command: "true"})
+	}()
+	<-entered
+	go func() {
+		defer wg.Done()
+		_, _ = view.Run(context.Background(), env.Cmd{Command: "true"})
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		stats := s.Stats()
+		if stats.Active == 1 && stats.Queued == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stats before release = %#v", stats)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	wg.Wait()
+
+	got := s.Stats()
+	if got.Capacity != 1 || got.Requests != 2 || got.Started != 2 || got.Completed != 2 {
+		t.Fatalf("stats = %#v", got)
+	}
+	if got.Active != 0 || got.Queued != 0 || got.PeakActive != 1 || got.PeakQueued < 1 {
+		t.Fatalf("saturation stats = %#v", got)
+	}
+	if got.WaitDuration <= 0 || got.RunDuration <= 0 {
+		t.Fatalf("durations = %#v", got)
+	}
+}
+
+func TestSchedulerStatsClassifyCanceledWait(t *testing.T) {
+	t.Parallel()
+
+	s := New(Config{Slots: 1})
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	s.run = func(context.Context, string, env.Cmd) (env.ExecResult, error) {
+		close(entered)
+		<-release
+		return env.ExecResult{}, nil
+	}
+	view := s.View("env-a", vfs.NewStore(t.TempDir()))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = view.Run(context.Background(), env.Cmd{Command: "true"})
+	}()
+	<-entered
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := view.Run(ctx, env.Cmd{Command: "true"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	close(release)
+	<-done
+	got := s.Stats()
+	if got.Requests != 2 || got.Completed != 2 || got.Canceled != 1 || got.Errors != 1 {
+		t.Fatalf("stats = %#v", got)
+	}
+}
+
+func TestSchedulerStatsDoNotCountImmediateSlotAsQueued(t *testing.T) {
+	t.Parallel()
+
+	s := New(Config{Slots: 1})
+	s.run = func(context.Context, string, env.Cmd) (env.ExecResult, error) {
+		return env.ExecResult{}, nil
+	}
+	view := s.View("env-a", vfs.NewStore(t.TempDir()))
+	if _, err := view.Run(context.Background(), env.Cmd{Command: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	got := s.Stats()
+	if got.Queued != 0 || got.PeakQueued != 0 || got.WaitDuration != 0 {
+		t.Fatalf("queue stats = %#v", got)
+	}
+}
+
 func TestSchedulerLeavesLiveWritesForRelease(t *testing.T) {
 	t.Parallel()
 
