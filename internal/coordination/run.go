@@ -76,26 +76,29 @@ func (g *Graph) run(
 		g.mu.Unlock()
 		return "", ErrGraphBusy
 	}
-	g.executing = true
 	progress := g.progress
 	help := g.help
+	r := &runner{
+		graph:       g,
+		stores:      stores,
+		assemble:    assemble,
+		progress:    progress,
+		cancel:      cancel,
+		childDone:   make(map[string]chan taskResult),
+		nodeDone:    make(map[string]chan struct{}),
+		nodeOutput:  make(map[string]string),
+		started:     map[string]struct{}{taskID: {}},
+		nodeStarted: make(map[string]struct{}),
+	}
+	g.executing = true
+	g.running = r
 	g.mu.Unlock()
 	defer func() {
 		g.mu.Lock()
 		g.executing = false
+		g.running = nil
 		g.mu.Unlock()
 	}()
-	r := &runner{
-		graph:      g,
-		stores:     stores,
-		assemble:   assemble,
-		progress:   progress,
-		cancel:     cancel,
-		childDone:  make(map[string]chan taskResult),
-		nodeDone:   make(map[string]chan struct{}),
-		nodeOutput: make(map[string]string),
-		started:    map[string]struct{}{taskID: {}},
-	}
 	if help != nil {
 		help.bind(r)
 		defer help.bind(nil)
@@ -171,20 +174,21 @@ type taskResult struct {
 	err    error
 }
 
-// runner 是单次 Run 的调度状态，不写回 Graph。
+// runner 是单次 Run 的调度状态；Graph 仅在执行期间引用它来保护已开始切片。
 type runner struct {
-	graph      *Graph
-	stores     Stores
-	assemble   AssembleFunc
-	progress   ProgressStore
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-	mu         sync.Mutex
-	err        error
-	childDone  map[string]chan taskResult
-	nodeDone   map[string]chan struct{}
-	nodeOutput map[string]string
-	started    map[string]struct{}
+	graph       *Graph
+	stores      Stores
+	assemble    AssembleFunc
+	progress    ProgressStore
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	mu          sync.Mutex
+	err         error
+	childDone   map[string]chan taskResult
+	nodeDone    map[string]chan struct{}
+	nodeOutput  map[string]string
+	started     map[string]struct{}
+	nodeStarted map[string]struct{}
 }
 
 // runTask 调度一个 task：先 fork 环境、再组装三个 agent，然后按 sequence 逐个 runRole。
@@ -267,6 +271,7 @@ func (r *runner) drainJoins(ctx context.Context, task Task, nodes []Node, output
 
 // runRole 执行图上的一个角色节点：join → Ask → spawn。
 func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input string, outputs map[string]string, merged map[string]bool) (string, error) {
+	r.markNodeStarted(node.ID)
 	asker := roles.asker(node.Role)
 	if asker == nil {
 		return "", fmt.Errorf("%w: %s", ErrNilAsker, node.Role)
@@ -302,6 +307,29 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 		}
 	}
 	return output, nil
+}
+
+func (r *runner) markNodeStarted(nodeID string) {
+	r.mu.Lock()
+	if r.nodeStarted == nil {
+		r.nodeStarted = make(map[string]struct{})
+	}
+	r.nodeStarted[nodeID] = struct{}{}
+	r.mu.Unlock()
+}
+
+func (r *runner) executionSnapshot() (map[string]struct{}, map[string]struct{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	tasks := make(map[string]struct{}, len(r.started))
+	for id := range r.started {
+		tasks[id] = struct{}{}
+	}
+	nodes := make(map[string]struct{}, len(r.nodeStarted))
+	for id := range r.nodeStarted {
+		nodes[id] = struct{}{}
+	}
+	return tasks, nodes
 }
 
 func (r *runner) runHelp(ctx context.Context, task Task, requestID string, children []helpChild) (string, error) {
@@ -385,9 +413,6 @@ func helpProgressID(requestID string) string {
 }
 
 func (r *runner) startChild(ctx context.Context, child Task, input string) error {
-	if err := r.stores.Fork(child.Env.ParentID, child.Env.ID); err != nil {
-		return err
-	}
 	r.mu.Lock()
 	if _, ok := r.started[child.ID]; ok {
 		r.mu.Unlock()
@@ -395,6 +420,9 @@ func (r *runner) startChild(ctx context.Context, child Task, input string) error
 	}
 	r.started[child.ID] = struct{}{}
 	r.mu.Unlock()
+	if err := r.stores.Fork(child.Env.ParentID, child.Env.ID); err != nil {
+		return err
+	}
 
 	done := r.childCh(child.ID)
 	r.wg.Add(1)

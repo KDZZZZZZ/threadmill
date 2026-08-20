@@ -826,6 +826,120 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 	}
 }
 
+func TestManagerUserCanAddFutureBranchWhileTaskRuns(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	plannerStarted := make(chan struct{})
+	plannerRelease := make(chan struct{})
+	graphChanged := make(chan struct{})
+	childStarted := make(chan struct{})
+	var plannerOnce sync.Once
+	var changedOnce sync.Once
+	var childOnce sync.Once
+	var mu sync.Mutex
+	rootCreated := false
+	dynamicSubmitted := false
+	provider := stubProvider(func(ctx context.Context, request agent.Request) (agent.AssistantMessage, error) {
+		sys := request.SystemPrompt
+		query := lastUser(request.Messages)
+		switch {
+		case strings.Contains(sys, "记忆整理器"):
+			return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
+		case strings.Contains(sys, "经理 Agent"):
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case strings.Contains(query, "[任务报告]"):
+				return agent.AssistantMessage{Content: "done"}, nil
+			case query == "start" && !rootCreated:
+				rootCreated = true
+				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+					ID:        "create-root",
+					Name:      "coordination_replacePending",
+					Arguments: json.RawMessage(`{"roots":[{"info":"root"}],"spawns":[]}`),
+				}}}, nil
+			case query == "add future" && !dynamicSubmitted:
+				dynamicSubmitted = true
+				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+					ID:   "add-future",
+					Name: "coordination_replacePending",
+					Arguments: json.RawMessage(`{
+						"roots":[{"info":"root"}],
+						"spawns":[{
+							"from":"task-1:executor",
+							"join":"task-1:verifier",
+							"info":"late child"
+						}]
+					}`),
+				}}}, nil
+			case query == "add future" && hasToolResult(request.Messages):
+				changedOnce.Do(func() { close(graphChanged) })
+				return agent.AssistantMessage{Content: "updated"}, nil
+			default:
+				return agent.AssistantMessage{Content: "started"}, nil
+			}
+		case strings.Contains(sys, "规划 Agent"):
+			if strings.Contains(query, "late child") {
+				childOnce.Do(func() { close(childStarted) })
+				return agent.AssistantMessage{Content: "child plan"}, nil
+			}
+			plannerOnce.Do(func() { close(plannerStarted) })
+			select {
+			case <-plannerRelease:
+				return agent.AssistantMessage{Content: "root plan"}, nil
+			case <-ctx.Done():
+				return agent.AssistantMessage{}, ctx.Err()
+			}
+		case strings.Contains(sys, "执行 Agent"):
+			return agent.AssistantMessage{Content: "executed"}, nil
+		default:
+			return agent.AssistantMessage{Content: "verified"}, nil
+		}
+	})
+
+	mgr, err := Open(ctx, Options{
+		Root:     t.TempDir(),
+		File:     loadRepoConfig(t),
+		Provider: provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+	mgr.Send("start")
+	select {
+	case <-plannerStarted:
+	case <-ctx.Done():
+		t.Fatal("root planner did not start")
+	}
+
+	mgr.Send("add future")
+	select {
+	case <-graphChanged:
+	case <-ctx.Done():
+		t.Fatal("manager did not apply the running graph change")
+	}
+	if got := len(mgr.Snapshot().Tasks); got != 2 {
+		t.Fatalf("tasks after running change = %d, want root and late child", got)
+	}
+	close(plannerRelease)
+	if err := mgr.WaitIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-childStarted:
+	default:
+		t.Fatal("late child was added but never executed")
+	}
+	for _, task := range mgr.Snapshot().Tasks {
+		if task.Outcome != coordination.OutcomeDone {
+			t.Fatalf("task %s outcome = %q, want done", task.ID, task.Outcome)
+		}
+	}
+}
+
 func TestManagerIdleWhenOnlyTalking(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -22,14 +22,15 @@ type PendingRoot struct {
 	Info string `json:"info"`
 }
 
-// PendingSubgraph 是尚未执行切片的完整期望状态。
+// PendingSubgraph 是尚未执行切片的完整期望状态；Run 中也可改尚未开始的节点。
 // 根按序号对齐：少于现有根数会失败，多出的新建；spawn 仍按 from/join 匹配。
 type PendingSubgraph struct {
 	Roots  []PendingRoot  `json:"roots,omitempty"`
 	Spawns []PendingSpawn `json:"spawns"`
 }
 
-// ReplacePending 用期望态替换尚未执行的切片。失败（含成环）时图不变。
+// ReplacePending 用期望态替换尚未执行的切片。Run 中已开始的 task info 和节点关联边不可变。
+// 失败（含成环）时图不变。
 func (g *Graph) ReplacePending(ctx context.Context, next PendingSubgraph) (Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
@@ -38,10 +39,6 @@ func (g *Graph) ReplacePending(ctx context.Context, next PendingSubgraph) (Snaps
 		return Snapshot{}, fmt.Errorf("replace pending: nil graph")
 	}
 	g.mu.Lock()
-	if g.executing {
-		g.mu.Unlock()
-		return Snapshot{}, ErrGraphBusy
-	}
 	nextGraph := &Graph{
 		tasks:     append([]Task(nil), g.tasks...),
 		edges:     append([]Edge(nil), g.edges...),
@@ -56,6 +53,12 @@ func (g *Graph) ReplacePending(ctx context.Context, next PendingSubgraph) (Snaps
 	if err := completedTasksUnchanged(g, nextGraph); err != nil {
 		g.mu.Unlock()
 		return Snapshot{}, err
+	}
+	if g.running != nil {
+		if err := runningSliceUnchanged(g, nextGraph, g.running); err != nil {
+			g.mu.Unlock()
+			return Snapshot{}, err
+		}
 	}
 	nextGraph.revision = g.revision + 1
 	if err := nextGraph.saveLocked(); err != nil {
@@ -75,6 +78,58 @@ func (g *Graph) ReplacePending(ctx context.Context, next PendingSubgraph) (Snaps
 	g.revision = nextGraph.revision
 	g.mu.Unlock()
 	return snap, nil
+}
+
+func runningSliceUnchanged(current, next *Graph, running *runner) error {
+	startedTasks, startedNodes := running.executionSnapshot()
+	for id := range startedTasks {
+		before, ok := current.taskByIDLocked(id)
+		if !ok {
+			continue
+		}
+		after, ok := next.taskByIDLocked(id)
+		if !ok {
+			return fmt.Errorf("%w: task %q already started", ErrGraphBusy, id)
+		}
+		if before.Info != after.Info {
+			return fmt.Errorf("%w: task %q info already in use", ErrGraphBusy, id)
+		}
+	}
+
+	beforeEdges := make(map[Edge]struct{}, len(current.edges))
+	for _, edge := range current.edges {
+		beforeEdges[edge] = struct{}{}
+	}
+	afterEdges := make(map[Edge]struct{}, len(next.edges))
+	for _, edge := range next.edges {
+		afterEdges[edge] = struct{}{}
+	}
+	for edge := range beforeEdges {
+		if _, unchanged := afterEdges[edge]; unchanged {
+			continue
+		}
+		if err := rejectStartedEdge(edge, startedNodes); err != nil {
+			return err
+		}
+	}
+	for edge := range afterEdges {
+		if _, unchanged := beforeEdges[edge]; unchanged {
+			continue
+		}
+		if err := rejectStartedEdge(edge, startedNodes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rejectStartedEdge(edge Edge, started map[string]struct{}) error {
+	for _, id := range []string{edge.From, edge.To} {
+		if _, ok := started[id]; ok {
+			return fmt.Errorf("%w: node %q already started", ErrGraphBusy, id)
+		}
+	}
+	return nil
 }
 
 func completedTasksUnchanged(current, next *Graph) error {

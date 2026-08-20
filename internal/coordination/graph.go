@@ -41,7 +41,7 @@ var ErrUnknownNode = errors.New("coordination: unknown node")
 // ErrJoinCycle 表示 spawn/join 会在 Ask 前形成开始依赖环，或 join 跨了任务树。
 var ErrJoinCycle = errors.New("coordination: join cycle")
 
-// ErrGraphBusy 表示图正在 Run，不能再改拓扑。
+// ErrGraphBusy 表示并发 Run，或改图触及已经开始执行的切片。
 var ErrGraphBusy = errors.New("coordination: graph is executing")
 
 // ErrUnspawnRoot 表示不能拆掉独立根 task。
@@ -121,6 +121,7 @@ type Graph struct {
 	taskSink  TaskSink
 	statePath string
 	executing bool
+	running   *runner
 	revision  int64
 }
 
@@ -169,6 +170,7 @@ func (g *Graph) reset() {
 	g.nextID = 0
 	g.helps = nil
 	g.executing = false
+	g.running = nil
 	g.revision = 0
 }
 

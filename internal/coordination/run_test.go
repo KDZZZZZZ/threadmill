@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1246,6 +1247,237 @@ func TestGraphSpawnRejectedWhileExecuting(t *testing.T) {
 	close(release)
 	if err := waitErr(t, done); err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestReplacePendingAddsFutureSpawnWhileExecuting(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "root"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := snap.Tasks[0]
+	plannerStarted := make(chan struct{})
+	plannerRelease := make(chan struct{})
+	childStarted := make(chan struct{})
+	var rootVerifierInput string
+	var inputMu sync.Mutex
+
+	done := runAsync(t, graph, func(task Task) (Roles, error) {
+		if task.ID != root.ID {
+			return Roles{
+				Planner:  gatedAsker(childStarted, nil),
+				Executor: instantAsker(),
+				Verifier: instantAsker(),
+			}, nil
+		}
+		return Roles{
+			Planner:  gatedAsker(plannerStarted, plannerRelease),
+			Executor: instantAsker(),
+			Verifier: askerFunc(func(_ context.Context, input string) (string, error) {
+				inputMu.Lock()
+				rootVerifierInput = input
+				inputMu.Unlock()
+				return input, nil
+			}),
+		}, nil
+	}, root.ID)
+	waitChan(t, plannerStarted)
+
+	changed, err := graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "root"}},
+		Spawns: []PendingSpawn{{
+			From: root.Executor.ID,
+			Join: root.Verifier.ID,
+			Info: "late child",
+		}},
+	})
+	if err != nil {
+		close(plannerRelease)
+		t.Fatalf("ReplacePending() while planner runs: %v", err)
+	}
+	if len(changed.Tasks) != 2 {
+		close(plannerRelease)
+		t.Fatalf("tasks = %d, want root and future child", len(changed.Tasks))
+	}
+
+	close(plannerRelease)
+	waitChan(t, childStarted)
+	if err := waitErr(t, done); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	inputMu.Lock()
+	gotInput := rootVerifierInput
+	inputMu.Unlock()
+	if !strings.Contains(gotInput, "[join] 子任务 "+changed.Tasks[1].ID) {
+		t.Fatalf("root verifier input = %q, want dynamically joined child", gotInput)
+	}
+}
+
+func TestReplacePendingRejectsStartedNodeChangeWhileExecuting(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "root"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := snap.Tasks[0]
+	plannerStarted := make(chan struct{})
+	plannerRelease := make(chan struct{})
+	done := runAsync(t, graph, func(Task) (Roles, error) {
+		return Roles{
+			Planner:  gatedAsker(plannerStarted, plannerRelease),
+			Executor: instantAsker(),
+			Verifier: instantAsker(),
+		}, nil
+	}, root.ID)
+	waitChan(t, plannerStarted)
+	before := graph.Snapshot()
+
+	_, err = graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "root"}},
+		Spawns: []PendingSpawn{{
+			From: root.Planner.ID,
+			Join: root.Executor.ID,
+			Info: "too late",
+		}},
+	})
+	if !errors.Is(err, ErrGraphBusy) {
+		close(plannerRelease)
+		t.Fatalf("ReplacePending() error = %v, want %v", err, ErrGraphBusy)
+	}
+	if after := graph.Snapshot(); !reflect.DeepEqual(after, before) {
+		close(plannerRelease)
+		t.Fatalf("graph changed after rejected mutation:\nafter  = %#v\nbefore = %#v", after, before)
+	}
+
+	_, err = graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "changed after start"}},
+	})
+	if !errors.Is(err, ErrGraphBusy) {
+		close(plannerRelease)
+		t.Fatalf("ReplacePending() task info error = %v, want %v", err, ErrGraphBusy)
+	}
+	if after := graph.Snapshot(); !reflect.DeepEqual(after, before) {
+		close(plannerRelease)
+		t.Fatalf("graph changed after rejected task info mutation:\nafter  = %#v\nbefore = %#v", after, before)
+	}
+
+	close(plannerRelease)
+	if err := waitErr(t, done); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestReplacePendingRemovesFutureSpawnWhileExecuting(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "root"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := snap.Tasks[0]
+	snap, err = graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "root"}},
+		Spawns: []PendingSpawn{{
+			From: root.Executor.ID,
+			Join: root.Verifier.ID,
+			Info: "remove me",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID := snap.Tasks[1].ID
+	plannerStarted := make(chan struct{})
+	plannerRelease := make(chan struct{})
+	childStarted := make(chan struct{})
+	done := runAsync(t, graph, func(task Task) (Roles, error) {
+		if task.ID == childID {
+			return Roles{
+				Planner:  gatedAsker(childStarted, nil),
+				Executor: instantAsker(),
+				Verifier: instantAsker(),
+			}, nil
+		}
+		return Roles{
+			Planner:  gatedAsker(plannerStarted, plannerRelease),
+			Executor: instantAsker(),
+			Verifier: instantAsker(),
+		}, nil
+	}, root.ID)
+	waitChan(t, plannerStarted)
+
+	changed, err := graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "root"}},
+	})
+	if err != nil {
+		close(plannerRelease)
+		t.Fatalf("ReplacePending() remove future child: %v", err)
+	}
+	if len(changed.Tasks) != 1 {
+		close(plannerRelease)
+		t.Fatalf("tasks = %d, want only root", len(changed.Tasks))
+	}
+
+	close(plannerRelease)
+	if err := waitErr(t, done); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertNotClosed(t, childStarted)
+}
+
+func TestReplacePendingQueuesNewRootWhileExecuting(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "running"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := snap.Tasks[0]
+	plannerStarted := make(chan struct{})
+	plannerRelease := make(chan struct{})
+	done := runAsync(t, graph, func(Task) (Roles, error) {
+		return Roles{
+			Planner:  gatedAsker(plannerStarted, plannerRelease),
+			Executor: instantAsker(),
+			Verifier: instantAsker(),
+		}, nil
+	}, root.ID)
+	waitChan(t, plannerStarted)
+
+	changed, err := graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "running"}, {Info: "queued"}},
+	})
+	if err != nil {
+		close(plannerRelease)
+		t.Fatalf("ReplacePending() queue root: %v", err)
+	}
+	if len(changed.Tasks) != 2 || changed.Tasks[1].Info != "queued" {
+		close(plannerRelease)
+		t.Fatalf("tasks = %#v, want queued second root", changed.Tasks)
+	}
+
+	close(plannerRelease)
+	if err := waitErr(t, done); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	queued, ok := graph.Task(changed.Tasks[1].ID)
+	if !ok || queued.Outcome != OutcomeActive {
+		t.Fatalf("queued task = %#v, %v; want active", queued, ok)
 	}
 }
 
