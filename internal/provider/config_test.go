@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
@@ -674,6 +675,15 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 	}
 	if got.Agents.Manager.SystemPrompt == "" {
 		t.Fatal("workspace manager system_prompt is empty")
+	}
+	for _, want := range []string{
+		"join 到 planner：子任务输出、记忆和实现进入一次性规划环境",
+		"join 到 executor：子任务输出、记忆和实现先进入 task 持久环境",
+		"join 到 verifier：子任务输出、记忆和实现先进入 task 持久环境，再 fork 一次性核验环境",
+	} {
+		if !strings.Contains(got.Agents.Manager.SystemPrompt, want) {
+			t.Errorf("workspace manager system_prompt missing %q", want)
+		}
 	}
 	if got.Tools["coordination_replacePending"].Description == "" {
 		t.Fatal("workspace tools.coordination_replacePending.description is empty")

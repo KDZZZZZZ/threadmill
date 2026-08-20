@@ -190,7 +190,7 @@ func TestGraphRunVerifierReadsExecutorLiveWrite(t *testing.T) {
 	}
 }
 
-func TestGraphRunJoinToVerifierDiscardsChildLiveWrites(t *testing.T) {
+func TestGraphRunJoinToVerifierMergesChildLiveWrites(t *testing.T) {
 	t.Parallel()
 
 	graph := newGraph()
@@ -217,8 +217,12 @@ func TestGraphRunJoinToVerifierDiscardsChildLiveWrites(t *testing.T) {
 				if task.ID != root.ID {
 					return query + "/verifier", nil
 				}
-				if _, err := files.View(root.Env.ID).Read("from-child-live.txt"); !errors.Is(err, os.ErrNotExist) {
-					return "", fmt.Errorf("verifier received child code: %v", err)
+				got, err := files.View(root.Env.ID).Read("from-child-live.txt")
+				if err != nil {
+					return "", fmt.Errorf("verifier missed child code: %w", err)
+				}
+				if string(got) != "from-live" {
+					return "", fmt.Errorf("from-child-live.txt = %q, want from-live", got)
 				}
 				return query + "/verifier", nil
 			}),
@@ -226,6 +230,9 @@ func TestGraphRunJoinToVerifierDiscardsChildLiveWrites(t *testing.T) {
 	}
 	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+	if _, err := files.View(child.Env.ID).Read("from-child-live.txt"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("joined child workspace was retained: %v", err)
 	}
 }
 

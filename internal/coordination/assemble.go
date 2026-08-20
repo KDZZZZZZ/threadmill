@@ -22,7 +22,12 @@ type Roles struct {
 	Planner  Asker
 	Executor Asker
 	Verifier Asker
-	prepare  func(string) (func(bool) error, error)
+	scope    func(string) (roleScope, error)
+}
+
+type roleScope struct {
+	joinFilesID string
+	prepare     func() (func(bool) error, error)
 }
 
 // AssembleFunc 按 task 组装三个角色。
@@ -63,40 +68,64 @@ func Assemble(
 			Planner:  team.Planner,
 			Executor: team.Executor,
 			Verifier: team.Verifier,
-			prepare: func(role string) (func(bool) error, error) {
+			scope: func(role string) (roleScope, error) {
 				workspaceID := task.Env.ID
-				disposable := stores.Files != nil && role != RoleExecutor
-				if disposable {
-					workspaceID = task.Env.ID + ":" + role
+				joinFilesID := task.Env.ID
+				disposable := false
+				if stores.Files != nil {
+					switch role {
+					case RolePlanner:
+						workspaceID = task.Env.ID + ":" + role
+						joinFilesID = workspaceID
+						disposable = true
+					case RoleExecutor:
+					case RoleVerifier:
+						workspaceID = task.Env.ID + ":" + role
+						disposable = true
+					default:
+						return roleScope{}, fmt.Errorf("%w: %s", ErrNilAsker, role)
+					}
+				}
+				if disposable && role == RolePlanner {
 					if err := stores.Files.Fork(task.Env.ID, workspaceID); err != nil {
-						return nil, err
+						return roleScope{}, err
 					}
 				}
-				e, err := openRoleEnv(stores, task.Env.ID, workspaceID)
-				if err != nil {
-					return nil, err
-				}
-				loop := roleLoop(team, role)
-				if loop == nil {
-					return nil, fmt.Errorf("%w: %s", ErrNilAsker, role)
-				}
-				if err := loop.Bind(e); err != nil {
-					if disposable {
-						_ = stores.DiscardFiles(workspaceID)
-					}
-					return nil, err
-				}
-				return func(completed bool) error {
-					if !disposable {
-						return nil
-					}
-					if stores.Exec != nil {
-						stores.Exec.Reap(workspaceID)
-					}
-					if completed {
-						return stores.Files.Discard(workspaceID)
-					}
-					return stores.Files.Release(workspaceID)
+				return roleScope{
+					joinFilesID: joinFilesID,
+					prepare: func() (func(bool) error, error) {
+						if disposable {
+							if err := stores.Files.Fork(task.Env.ID, workspaceID); err != nil {
+								return nil, err
+							}
+						}
+						e, err := openRoleEnv(stores, task.Env.ID, workspaceID)
+						if err != nil {
+							return nil, err
+						}
+						loop := roleLoop(team, role)
+						if loop == nil {
+							return nil, fmt.Errorf("%w: %s", ErrNilAsker, role)
+						}
+						if err := loop.Bind(e); err != nil {
+							if disposable {
+								_ = stores.DiscardFiles(workspaceID)
+							}
+							return nil, err
+						}
+						return func(completed bool) error {
+							if !disposable {
+								return nil
+							}
+							if stores.Exec != nil {
+								stores.Exec.Reap(workspaceID)
+							}
+							if completed {
+								return stores.Files.Discard(workspaceID)
+							}
+							return stores.Files.Release(workspaceID)
+						}, nil
+					},
 				}, nil
 			},
 		}, nil

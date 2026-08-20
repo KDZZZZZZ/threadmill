@@ -181,6 +181,73 @@ func TestGraphRunKeepsExecutorFilesButDiscardsPlannerAndVerifierFiles(t *testing
 	}
 }
 
+func TestGraphRunJoinToPlannerUsesDisposableWorkspace(t *testing.T) {
+	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
+	ctxgraph.Update(ctxgraph.Copy{})
+
+	graph := newGraph()
+	root := graph.AddTask()
+	target := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
+	writer := mustSpawn(t, graph, root.Planner.ID, target.Planner.ID)
+	setTaskInfo(t, graph, target.ID, "target task")
+	setTaskInfo(t, graph, writer.ID, "writer task")
+	files := vfs.NewStore(t.TempDir())
+	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
+		input := firstUserContent(request.Messages)
+		switch {
+		case strings.Contains(request.SystemPrompt, "plan role"):
+			switch {
+			case strings.Contains(input, "writer task"):
+				return agent.AssistantMessage{Content: "writer plan"}, nil
+			case strings.Contains(input, "target task"):
+				if !hasToolResult(request.Messages) {
+					return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+						ID:        "read-joined-code",
+						Name:      "read",
+						Arguments: json.RawMessage(`{"path":"joined.txt"}`),
+					}}}, nil
+				}
+				if !strings.Contains(lastToolContent(request.Messages), "from writer") {
+					return agent.AssistantMessage{}, errors.New("planner did not see joined code")
+				}
+				return agent.AssistantMessage{Content: "target plan"}, nil
+			default:
+				return agent.AssistantMessage{Content: "root plan"}, nil
+			}
+		case strings.Contains(request.SystemPrompt, "execute role"):
+			if input == "writer plan" && !hasToolResult(request.Messages) {
+				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+					ID:        "write-joined-code",
+					Name:      "write",
+					Arguments: json.RawMessage(`{"path":"joined.txt","content":"from writer"}`),
+				}}}, nil
+			}
+			return agent.AssistantMessage{Content: "executed"}, nil
+		default:
+			return agent.AssistantMessage{Content: "verified"}, nil
+		}
+	})
+	agents := agent.FileAgents{
+		Planner:  agent.FileAgent{SystemPrompt: "plan role", Tools: []string{"read"}},
+		Executor: agent.FileAgent{SystemPrompt: "execute role", Tools: []string{"write"}},
+		Verifier: agent.FileAgent{SystemPrompt: "verify role"},
+	}
+	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
+
+	if _, err := graph.Run(
+		context.Background(),
+		root.ID,
+		"request",
+		stores,
+		Assemble(stores, provider, agents, nil, 0, nil),
+	); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if _, err := files.View(root.Env.ID).Read("joined.txt"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("planner join leaked child implementation: %v", err)
+	}
+}
+
 func TestGraphRunKeepsPlannerWorkspaceAfterFailureAndDiscardsItAfterResume(t *testing.T) {
 	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
 	ctxgraph.Update(ctxgraph.Copy{})

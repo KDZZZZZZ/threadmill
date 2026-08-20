@@ -22,7 +22,7 @@ var (
 //
 // 每个角色节点顺序是 join → Ask → spawn：
 //   - join：Ask 前等 IncomingJoins 的子 task 结束，把子输出拼进本节点输入；
-//     记忆总会合入，文件只在目标节点是 executor 时合入。
+//     记忆合入 task 环境，文件合入该角色声明的 join 环境。
 //   - Ask：跑这个角色的 ReAct；ProgressStore 已有输出则跳过。
 //   - spawn：Ask 之后 Fork 子环境，用本角色输出当子输入，拉起即走，不等待。
 //
@@ -160,16 +160,25 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 		return "", fmt.Errorf("%w: %q", ErrUnknownTask, node.TaskID)
 	}
 
-	input, err := r.joinIncoming(ctx, node, task, input, outputs, merged)
+	output, completed := outputs[node.ID]
+	scope := roleScope{joinFilesID: task.Env.ID}
+	var err error
+	if !completed && roles.scope != nil {
+		scope, err = roles.scope(node.Role)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	input, err = r.joinIncoming(ctx, node, task, scope.joinFilesID, input, outputs, merged)
 	if err != nil {
 		return "", err
 	}
 
-	output, ok := outputs[node.ID]
-	if !ok {
+	if !completed {
 		var cleanup func(bool) error
-		if roles.prepare != nil {
-			cleanup, err = roles.prepare(node.Role)
+		if scope.prepare != nil {
+			cleanup, err = scope.prepare()
 			if err != nil {
 				return "", err
 			}
@@ -208,7 +217,7 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 	return output, nil
 }
 
-func (r *runner) joinIncoming(ctx context.Context, node Node, task Task, input string, outputs map[string]string, merged map[string]bool) (string, error) {
+func (r *runner) joinIncoming(ctx context.Context, node Node, task Task, filesInto, input string, outputs map[string]string, merged map[string]bool) (string, error) {
 	preds := r.graph.IncomingJoins(node.ID)
 	if len(preds) == 0 {
 		return input, nil
@@ -238,13 +247,7 @@ func (r *runner) joinIncoming(ctx context.Context, node Node, task Task, input s
 	}
 	if !already {
 		for _, item := range items {
-			var err error
-			if node.Role == RoleExecutor {
-				err = r.stores.Merge(item.child.Env.ID, task.Env.ID)
-			} else {
-				err = r.stores.MergeMemory(item.child.Env.ID, task.Env.ID)
-			}
-			if err != nil {
+			if err := r.stores.MergeInto(item.child.Env.ID, task.Env.ID, filesInto); err != nil {
 				return "", err
 			}
 		}
