@@ -53,12 +53,14 @@ func TestSchedulerRespectsSlotLimit(t *testing.T) {
 	}
 }
 
-func TestSchedulerDoesNotAbsorbOnRun(t *testing.T) {
+func TestSchedulerLeavesLiveWritesForRelease(t *testing.T) {
 	t.Parallel()
 
 	s := New(Config{Slots: 1})
-	s.run = func(_ context.Context, live string, _ env.Cmd) (env.ExecResult, error) {
-		if err := os.WriteFile(filepath.Join(live, "from-run.txt"), []byte("x"), 0o640); err != nil {
+	var live string
+	s.run = func(_ context.Context, dir string, _ env.Cmd) (env.ExecResult, error) {
+		live = dir
+		if err := os.WriteFile(filepath.Join(dir, "from-run.txt"), []byte("x"), 0o640); err != nil {
 			return env.ExecResult{}, err
 		}
 		return env.ExecResult{}, nil
@@ -70,11 +72,18 @@ func TestSchedulerDoesNotAbsorbOnRun(t *testing.T) {
 	if _, err := s.View("env-a", files).Run(context.Background(), env.Cmd{Command: "true"}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("live dir after Run: %v", err)
+	}
 	if err := files.Release("env-a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := files.View("env-a").Read("from-run.txt"); err == nil {
-		t.Fatal("Run absorbed a live file into overlay")
+	got, err := files.View("env-a").Read("from-run.txt")
+	if err != nil {
+		t.Fatalf("Release dropped live write: %v", err)
+	}
+	if string(got) != "x" {
+		t.Fatalf("from-run.txt = %q, want x", got)
 	}
 }
 
