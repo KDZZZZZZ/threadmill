@@ -27,8 +27,9 @@ type Roles struct {
 }
 
 type roleScope struct {
-	joinFilesID string
-	prepare     func() (func(bool) error, error)
+	workspaceID string
+	bind        func(string) error
+	cleanup     func(string, bool) error
 }
 
 // AssembleFunc 按 task 组装三个角色。
@@ -71,13 +72,11 @@ func Assemble(
 			Verifier: team.Verifier,
 			scope: func(role string) (roleScope, error) {
 				workspaceID := task.Env.ID
-				joinFilesID := task.Env.ID
 				disposable := false
 				if stores.Files != nil {
 					switch role {
 					case RolePlanner, RoleVerifier:
 						workspaceID = task.Env.ID + ":" + role
-						joinFilesID = workspaceID
 						disposable = true
 					case RoleExecutor:
 					default:
@@ -85,39 +84,55 @@ func Assemble(
 					}
 				}
 				return roleScope{
-					joinFilesID: joinFilesID,
-					prepare: func() (func(bool) error, error) {
+					workspaceID: workspaceID,
+					bind: func(activeID string) error {
 						if disposable {
 							if err := stores.Files.Fork(task.Env.ID, workspaceID); err != nil {
-								return nil, err
+								return err
 							}
 						}
-						e, err := openRoleEnv(stores, task.Env.ID, workspaceID)
+						if activeID != workspaceID {
+							if err := stores.Files.Fork(workspaceID, activeID); err != nil {
+								return err
+							}
+						}
+						e, err := openRoleEnv(stores, task.Env.ID, activeID)
 						if err != nil {
-							return nil, err
+							return err
 						}
 						loop := roleLoop(team, role)
 						if loop == nil {
-							return nil, fmt.Errorf("%w: %s", ErrNilAsker, role)
+							return fmt.Errorf("%w: %s", ErrNilAsker, role)
 						}
 						if err := loop.Bind(e); err != nil {
+							if activeID != workspaceID {
+								err = errors.Join(err, stores.DiscardFiles(activeID))
+							}
 							if disposable {
 								err = errors.Join(err, stores.DiscardFiles(workspaceID))
 							}
-							return nil, err
+							return err
 						}
-						return func(completed bool) error {
-							if !disposable {
+						return nil
+					},
+					cleanup: func(activeID string, completed bool) error {
+						if !completed {
+							if stores.Exec != nil {
+								stores.Exec.Reap(activeID)
+							}
+							if activeID != workspaceID || !disposable {
 								return nil
 							}
-							if completed {
-								return stores.DiscardFiles(workspaceID)
-							}
-							if stores.Exec != nil {
-								stores.Exec.Reap(workspaceID)
-							}
 							return stores.Files.Release(workspaceID)
-						}, nil
+						}
+						var err error
+						if activeID != workspaceID {
+							err = stores.DiscardFiles(activeID)
+						}
+						if disposable {
+							err = errors.Join(err, stores.DiscardFiles(workspaceID))
+						}
+						return err
 					},
 				}, nil
 			},

@@ -74,7 +74,8 @@ agents:
       规则：
       - 每次请求都会带上最新协调图。改图只调用 coordination_replacePending，提交完整期望态（roots + spawns）。每个 root/spawn 必须写清 info（任务目标与验收标准）。
       - 任务执行期间不要改图，等任务报告。收到 [任务报告] 后再决定汇报用户或继续拉任务。
-      - 每个角色先 fork 自己的工作区，再处理 join，最后 Ask。join 时子 task 记忆合入 task 共享记忆，文件合入目标角色的工作区；文件是否保留只由目标工作区的生命周期决定。
+      - 每个角色先 fork 自己的工作区，再处理 join，最后 Ask。join 时子 task 记忆合入 task 共享记忆；文件先进入目标角色的临时合入工作区，无冲突改动会应用，冲突路径保留目标版本，清单和双方文件放在 .threadmill/runtime/joins/manifest.json、ours/、sources/。
+      - 只有确实需要舍弃文件、挑选部分实现或解决冲突时，目标角色才用已有的文件和命令工具筛选改动、解决冲突；不增加专用合入工具。Ask 结束时正常项目路径中的状态就是目标角色的选择，文件是否保留只由目标工作区的生命周期决定。
       - join 到 planner：子 task 文件只进入一次性规划工作区，可用于调研、方案和约束，但不会进入 task 持久文件环境。
       - join 到 executor：子 task 文件进入 task 持久文件环境，再由 executor 继续工作。
       - join 到 verifier：子 task 文件只进入一次性核验工作区，只用于补充验收；子 task 和 verifier 的文件改动都不进入 task 持久文件环境。

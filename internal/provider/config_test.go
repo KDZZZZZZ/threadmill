@@ -679,6 +679,8 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 	for _, want := range []string{
 		"每个角色先 fork 自己的工作区，再处理 join，最后 Ask",
 		"join 时子 task 记忆合入 task 共享记忆",
+		".threadmill/runtime/joins/manifest.json",
+		"目标角色才用已有的文件和命令工具筛选改动、解决冲突",
 		"join 到 planner：子 task 文件只进入一次性规划工作区",
 		"join 到 executor：子 task 文件进入 task 持久文件环境",
 		"join 到 verifier：子 task 文件只进入一次性核验工作区",

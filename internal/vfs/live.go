@@ -127,6 +127,7 @@ func (s *Store) Discard(envID string) error {
 	s.mu.Lock()
 	delete(s.lives, envID)
 	delete(s.envs, envID)
+	delete(s.merges, envID)
 	s.mu.Unlock()
 	return nil
 }
@@ -173,6 +174,13 @@ func walkRegularFiles(root string) (map[string][]byte, error) {
 			return err
 		}
 		if rel == "." {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if isMergeRuntimePath(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if filepath.IsAbs(rel) || !filepath.IsLocal(rel) || escapesRoot(root, path) {
@@ -229,6 +237,13 @@ func (s *Store) visibleRegularFiles(envID string) (map[string][]byte, error) {
 		if rel == "." {
 			return nil
 		}
+		rel = filepath.ToSlash(rel)
+		if isMergeRuntimePath(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if filepath.IsAbs(rel) || !filepath.IsLocal(rel) || escapesRoot(base, path) {
 			return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
 		}
@@ -247,6 +262,9 @@ func (s *Store) visibleRegularFiles(envID string) (map[string][]byte, error) {
 	}
 	for _, files := range s.overlayMaps(envID) {
 		for path := range files {
+			if isMergeRuntimePath(path) {
+				continue
+			}
 			candidates[path] = struct{}{}
 		}
 	}
