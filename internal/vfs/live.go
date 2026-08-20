@@ -118,15 +118,16 @@ func (s *Store) Discard(envID string) error {
 	}
 	s.mu.Lock()
 	live := s.lives[envID]
+	s.mu.Unlock()
+	if live != "" {
+		if err := os.RemoveAll(live); err != nil {
+			return fmt.Errorf("vfs: discard: %w", err)
+		}
+	}
+	s.mu.Lock()
 	delete(s.lives, envID)
 	delete(s.envs, envID)
 	s.mu.Unlock()
-	if live == "" {
-		return nil
-	}
-	if err := os.RemoveAll(live); err != nil {
-		return fmt.Errorf("vfs: discard: %w", err)
-	}
 	return nil
 }
 

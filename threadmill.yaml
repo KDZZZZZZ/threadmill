@@ -22,7 +22,7 @@ tools:
   bash:
     description: 在工作区里执行 bash 命令。可选 timeout 是秒数。非零退出码会写在输出里，不是工具错误。
   coordination_replacePending:
-    description: 提交尚未执行切片的完整期望态，由图 diff 后改拓扑。roots 是根任务列表（按序号对齐，每项必须写 info：目标与验收标准）；spawns 是期望的 spawn/join 全集，每项带 info。成环、跨任务树或拆根会失败，图保持原样。任务执行期间不要改图，等任务报告。
+    description: 提交尚未执行切片的完整期望态，由图 diff 后改拓扑。roots 是按顺序执行的根任务列表（按序号对齐，每项必须写 info：目标与验收标准），新增 root 从前一个 root 的 task 持久环境（记忆和文件）fork；spawns 是期望的 spawn/join 全集，每项带 info。成环、跨任务树或拆根会失败，图保持原样。任务执行期间不要改图，等任务报告。
   memory_neighbors:
     description: 查看某记忆节点的上游（前）和下游（后）节点。before/after：负数从该方向列表最前取 |n| 个，正数从最后取 n 个；省略则返回该方向全部节点。只读本 Agent 的图副本。
   memory_subgraphs_of:
@@ -74,10 +74,11 @@ agents:
       规则：
       - 每次请求都会带上最新协调图。改图只调用 coordination_replacePending，提交完整期望态（roots + spawns）。每个 root/spawn 必须写清 info（任务目标与验收标准）。
       - 任务执行期间不要改图，等任务报告。收到 [任务报告] 后再决定汇报用户或继续拉任务。
-      - join 到 planner：子任务输出、记忆和实现进入一次性规划环境，planner 可以读取，但实现不会进入 task 持久环境；适合吸收调研、方案和约束。
-      - join 到 executor：子任务输出、记忆和实现先进入 task 持久环境，再由 executor 继续工作。
-      - join 到 verifier：子任务文件实现只进入一次性核验环境，verifier 可以读取并用于补充验收，但不会进入 task 持久环境；verifier 自己产生的文件改动也会丢弃。
-      - verifier 报告指出实现缺陷时，调用 coordination_replacePending 增量增加新的 task 继续修复和核验；不要回退或覆盖已完成 task 的实现，也不要把修复任务 join 到 verifier。
+      - 每个角色先 fork 自己的工作区，再处理 join，最后 Ask。join 时子 task 记忆合入 task 共享记忆，文件合入目标角色的工作区；文件是否保留只由目标工作区的生命周期决定。
+      - join 到 planner：子 task 文件只进入一次性规划工作区，可用于调研、方案和约束，但不会进入 task 持久文件环境。
+      - join 到 executor：子 task 文件进入 task 持久文件环境，再由 executor 继续工作。
+      - join 到 verifier：子 task 文件只进入一次性核验工作区，只用于补充验收；子 task 和 verifier 的文件改动都不进入 task 持久文件环境。
+      - verifier 报告指出实现缺陷时，调用 coordination_replacePending 在 roots 末尾增加新 task；新 root 会从前一个 root 的 task 持久环境（记忆和文件）fork，继续修复和核验。不要回退或覆盖已完成 task 的实现，也不要把修复任务 join 到 verifier。
       - 成环、跨任务树或拆根会失败，图保持原样。不要对象级 spawn/unspawn，不要自己跑图。
       - 不要自己去做规划、执行或核验工作。
       - 不要编造工具结果。

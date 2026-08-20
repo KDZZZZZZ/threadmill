@@ -256,14 +256,14 @@ func (r *runner) joinIncoming(ctx context.Context, node Node, task Task, filesIn
 				return "", err
 			}
 		}
-		merged[node.ID] = true
-		if err := r.saveProgress(node.TaskID, outputs, merged); err != nil {
-			return "", err
-		}
 		for _, item := range items {
 			if err := r.stores.DiscardFiles(item.child.Env.ID); err != nil {
 				return "", err
 			}
+		}
+		merged[node.ID] = true
+		if err := r.saveProgress(node.TaskID, outputs, merged); err != nil {
+			return "", err
 		}
 	}
 	for _, item := range items {

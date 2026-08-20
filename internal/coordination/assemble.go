@@ -2,6 +2,7 @@ package coordination
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
@@ -101,7 +102,7 @@ func Assemble(
 						}
 						if err := loop.Bind(e); err != nil {
 							if disposable {
-								_ = stores.DiscardFiles(workspaceID)
+								err = errors.Join(err, stores.DiscardFiles(workspaceID))
 							}
 							return nil, err
 						}
@@ -109,11 +110,11 @@ func Assemble(
 							if !disposable {
 								return nil
 							}
+							if completed {
+								return stores.DiscardFiles(workspaceID)
+							}
 							if stores.Exec != nil {
 								stores.Exec.Reap(workspaceID)
-							}
-							if completed {
-								return stores.Files.Discard(workspaceID)
 							}
 							return stores.Files.Release(workspaceID)
 						}, nil

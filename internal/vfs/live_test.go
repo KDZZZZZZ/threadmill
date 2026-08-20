@@ -428,6 +428,36 @@ func TestStoreDiscardDropsOverlayAndUnabsorbedLiveWrites(t *testing.T) {
 	}
 }
 
+func TestStoreDiscardKeepsTrackingWhenRemovalFails(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	mustFork(t, store, "", "scratch")
+	live, err := store.Materialize("scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidLive := string([]byte{0})
+	store.mu.Lock()
+	store.lives["scratch"] = invalidLive
+	store.mu.Unlock()
+
+	if err := store.Discard("scratch"); err == nil {
+		t.Fatal("Discard() succeeded for an invalid live path")
+	}
+	store.mu.Lock()
+	tracked := store.lives["scratch"] == invalidLive && store.envs["scratch"] != nil
+	store.lives["scratch"] = live
+	store.mu.Unlock()
+	if !tracked {
+		t.Fatal("Discard() forgot a workspace that still needs cleanup")
+	}
+
+	if err := store.Discard("scratch"); err != nil {
+		t.Fatalf("retry Discard() error = %v", err)
+	}
+}
+
 func TestAbsorbRejectsSpecialFiles(t *testing.T) {
 	t.Parallel()
 

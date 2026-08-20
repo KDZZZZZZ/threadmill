@@ -677,10 +677,12 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 		t.Fatal("workspace manager system_prompt is empty")
 	}
 	for _, want := range []string{
-		"join 到 planner：子任务输出、记忆和实现进入一次性规划环境",
-		"join 到 executor：子任务输出、记忆和实现先进入 task 持久环境",
-		"join 到 verifier：子任务文件实现只进入一次性核验环境",
-		"verifier 报告指出实现缺陷时，调用 coordination_replacePending 增量增加新的 task",
+		"每个角色先 fork 自己的工作区，再处理 join，最后 Ask",
+		"join 时子 task 记忆合入 task 共享记忆",
+		"join 到 planner：子 task 文件只进入一次性规划工作区",
+		"join 到 executor：子 task 文件进入 task 持久文件环境",
+		"join 到 verifier：子 task 文件只进入一次性核验工作区",
+		"新 root 会从前一个 root 的 task 持久环境（记忆和文件）fork",
 		"不要回退或覆盖已完成 task 的实现",
 	} {
 		if !strings.Contains(got.Agents.Manager.SystemPrompt, want) {

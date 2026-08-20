@@ -116,6 +116,102 @@ func TestSessionRunsRootTaskAndWakesManagerWithReport(t *testing.T) {
 	}
 }
 
+func TestSessionAppendedRootContinuesPreviousImplementation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var mu sync.Mutex
+	managerStep := 0
+	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
+		systemPrompt := request.SystemPrompt
+		input := lastUser(request.Messages)
+		switch {
+		case strings.Contains(systemPrompt, "记忆整理器"):
+			return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
+		case strings.Contains(systemPrompt, "经理 Agent"):
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case managerStep == 0:
+				managerStep = 1
+				return replacePendingCall("initial-root", []coordination.PendingRoot{{Info: "initial implementation"}})
+			case managerStep == 1 && strings.Contains(input, "[任务报告] task-1"):
+				managerStep = 2
+				return replacePendingCall("repair-root", []coordination.PendingRoot{
+					{Info: "initial implementation"},
+					{Info: "repair implementation"},
+				})
+			default:
+				return agent.AssistantMessage{Content: "scheduled"}, nil
+			}
+		case strings.Contains(systemPrompt, "规划 Agent"):
+			if strings.Contains(input, "repair implementation") {
+				return agent.AssistantMessage{Content: "repair plan"}, nil
+			}
+			return agent.AssistantMessage{Content: "initial plan"}, nil
+		case strings.Contains(systemPrompt, "执行 Agent"):
+			switch input {
+			case "initial plan":
+				if !hasToolResult(request.Messages) {
+					return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+						ID:        "write-initial",
+						Name:      "write",
+						Arguments: json.RawMessage(`{"path":"implementation.txt","content":"initial"}`),
+					}}}, nil
+				}
+				return agent.AssistantMessage{Content: "initial executed"}, nil
+			case "repair plan":
+				if !hasToolResult(request.Messages) {
+					return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+						ID:        "read-initial",
+						Name:      "read",
+						Arguments: json.RawMessage(`{"path":"implementation.txt"}`),
+					}}}, nil
+				}
+				for _, message := range request.Messages {
+					if message.Role == agent.RoleTool && strings.Contains(message.Content, "initial") {
+						return agent.AssistantMessage{Content: "repair executed"}, nil
+					}
+				}
+				return agent.AssistantMessage{}, errors.New("repair task did not inherit initial implementation")
+			default:
+				return agent.AssistantMessage{}, errors.New("unexpected executor input")
+			}
+		default:
+			if strings.Contains(input, "initial executed") {
+				return agent.AssistantMessage{Content: "FAIL: needs repair"}, nil
+			}
+			return agent.AssistantMessage{Content: "PASS"}, nil
+		}
+	})
+
+	sess, err := Open(ctx, Options{
+		Root:     t.TempDir(),
+		File:     loadRepoConfig(t),
+		Provider: provider,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer sess.Close()
+
+	sess.Send("implement and repair")
+	if err := sess.WaitIdle(ctx); err != nil {
+		t.Fatalf("WaitIdle() error = %v", err)
+	}
+
+	tasks := sess.Snapshot().Tasks
+	if len(tasks) != 2 {
+		t.Fatalf("tasks = %d, want 2", len(tasks))
+	}
+	if tasks[1].Outcome != coordination.OutcomeDone {
+		t.Fatalf("repair outcome = %q, want done", tasks[1].Outcome)
+	}
+	if tasks[1].Env.ParentID != tasks[0].Env.ID {
+		t.Fatalf("repair env parent = %q, want %q", tasks[1].Env.ParentID, tasks[0].Env.ID)
+	}
+}
+
 func TestSessionIdleWhenManagerOnlyTalks(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -205,6 +301,18 @@ func hasToolResult(messages []agent.Message) bool {
 		}
 	}
 	return false
+}
+
+func replacePendingCall(id string, roots []coordination.PendingRoot) (agent.AssistantMessage, error) {
+	arguments, err := json.Marshal(coordination.PendingSubgraph{Roots: roots})
+	if err != nil {
+		return agent.AssistantMessage{}, err
+	}
+	return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+		ID:        id,
+		Name:      "coordination_replacePending",
+		Arguments: arguments,
+	}}}, nil
 }
 
 func TestFormatReport(t *testing.T) {
