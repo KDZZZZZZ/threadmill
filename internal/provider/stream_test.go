@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 	"github.com/KDZZZZZZ/threadmill/internal/event"
@@ -94,6 +96,43 @@ func TestResponsesGenerateStreamFailed(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "response.failed") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResponsesGenerateStreamRetriesBeforeSSEStarts(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"try again"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		writeSSE(w, flusher, "response.completed", `{
+  "type":"response.completed",
+  "response":{
+    "status":"completed",
+    "output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+  }
+}`)
+	}))
+	defer server.Close()
+
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.retryInterval = time.Millisecond
+	ctx := event.WithDeltaSink(context.Background(), func(string) {})
+	got, err := model.Generate(ctx, agent.Request{
+		Messages: []agent.Message{{Role: agent.RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Content != "ok" || requests.Load() != 2 {
+		t.Fatalf("Generate() = %#v, requests = %d", got, requests.Load())
 	}
 }
 

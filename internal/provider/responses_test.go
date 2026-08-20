@@ -6,7 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
@@ -250,5 +253,89 @@ func TestResponsesGenerateReturnsRefusal(t *testing.T) {
 	}
 	if got.StopReason != agent.StopReasonStop {
 		t.Fatalf("Generate().StopReason = %q, want %q", got.StopReason, agent.StopReasonStop)
+	}
+}
+
+func TestResponsesGenerateRetriesFiveTimesBeforeSuccess(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) <= 5 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"message":"temporarily unavailable"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{
+  "status":"completed",
+  "output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+}`))
+	}))
+	defer server.Close()
+
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.retryInterval = time.Millisecond
+	got, err := model.Generate(context.Background(), agent.Request{
+		Messages: []agent.Message{{Role: agent.RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Content != "ok" {
+		t.Fatalf("Generate().Content = %q, want ok", got.Content)
+	}
+	if got := requests.Load(); got != 6 {
+		t.Fatalf("requests = %d, want one initial request plus five retries", got)
+	}
+}
+
+func TestResponsesGenerateDoesNotRetryBadRequest(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad input"}}`))
+	}))
+	defer server.Close()
+
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.retryInterval = time.Millisecond
+	_, err = model.Generate(context.Background(), agent.Request{
+		Messages: []agent.Message{{Role: agent.RoleUser, Content: "hi"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "bad input") {
+		t.Fatalf("Generate() error = %v, want bad input", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("requests = %d, want 1", got)
+	}
+}
+
+func TestResponsesGenerateStopsAfterFiveRetries(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"message":"still unavailable"}}`))
+	}))
+	defer server.Close()
+
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.retryInterval = time.Millisecond
+	_, err = model.Generate(context.Background(), agent.Request{
+		Messages: []agent.Message{{Role: agent.RoleUser, Content: "hi"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "still unavailable") {
+		t.Fatalf("Generate() error = %v, want final provider error", err)
+	}
+	if got := requests.Load(); got != 6 {
+		t.Fatalf("requests = %d, want one initial request plus five retries", got)
 	}
 }

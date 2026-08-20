@@ -2,13 +2,11 @@ package provider
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"sort"
 	"strings"
 
@@ -23,31 +21,11 @@ func (transport transport) postStream(ctx context.Context, payload any, sink fun
 		return createResponseResponse{}, fmt.Errorf("encode provider request: %w", err)
 	}
 
-	request, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodPost,
-		transport.endpoint,
-		bytes.NewReader(body),
-	)
+	response, err := transport.do(ctx, body, "text/event-stream")
 	if err != nil {
-		return createResponseResponse{}, fmt.Errorf("create provider request: %w", err)
-	}
-	request.Header.Set("Authorization", "Bearer "+transport.apiKey)
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "text/event-stream")
-
-	response, err := transport.client.Do(request)
-	if err != nil {
-		return createResponseResponse{}, fmt.Errorf("send provider request: %w", err)
+		return createResponseResponse{}, err
 	}
 	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBody+1))
-		if err != nil {
-			return createResponseResponse{}, fmt.Errorf("read provider response: %w", err)
-		}
-		return createResponseResponse{}, decodeHTTPError(response.Status, responseBody)
-	}
 	return readResponseStream(response.Body, sink)
 }
 
