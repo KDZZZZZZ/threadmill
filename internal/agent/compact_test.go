@@ -166,6 +166,16 @@ func TestCompactHistoryAssignsMembershipFromModelAndSourcesFromSubscriptions(t *
 			modelIDs:   []string{},
 			wantMember: []string{},
 		},
+		{
+			name:       "system membership is rejected",
+			modelIDs:   []string{"sg-system"},
+			wantMember: []string{},
+		},
+		{
+			name:       "package membership is rejected",
+			modelIDs:   []string{"task-package"},
+			wantMember: []string{},
+		},
 	}
 
 	subscribed := []string{"sg-a", "sg-q"}
@@ -174,6 +184,8 @@ func TestCompactHistoryAssignsMembershipFromModelAndSourcesFromSubscriptions(t *
 			{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask},
 			{ID: "sg-b", Kind: ctxgraph.SubgraphKindGeneral},
 			{ID: "sg-q", Kind: ctxgraph.SubgraphKindTask},
+			{ID: "sg-system", Kind: ctxgraph.SubgraphKindSystem},
+			{ID: "task-package", Kind: ctxgraph.SubgraphKindPackage},
 		},
 	}
 
@@ -348,6 +360,8 @@ func TestCompactHistoryPromptListsAllSubgraphsAndOnlySubscribedMemory(t *testing
 		Subgraphs: []ctxgraph.Subgraph{
 			{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask, Name: "mine"},
 			{ID: "sg-b", Kind: ctxgraph.SubgraphKindGeneral, Name: "other"},
+			{ID: "sg-system", Kind: ctxgraph.SubgraphKindSystem, Name: "managed"},
+			{ID: "task-package", Kind: ctxgraph.SubgraphKindPackage, Name: "startup"},
 		},
 		Nodes: []ctxgraph.Node{
 			{ID: "keep", Statement: "visible fact", SubgraphIDs: []string{"sg-a"}},
@@ -373,11 +387,65 @@ func TestCompactHistoryPromptListsAllSubgraphsAndOnlySubscribedMemory(t *testing
 	if !strings.Contains(payload, "sg-b") {
 		t.Fatalf("payload = %q, want all subgraphs in catalog", payload)
 	}
+	if strings.Contains(payload, "sg-system") {
+		t.Fatalf("payload = %q, system subgraph must not be model-selectable", payload)
+	}
+	if strings.Contains(payload, "task-package") {
+		t.Fatalf("payload = %q, package subgraph must not be model-selectable", payload)
+	}
 	if !strings.Contains(payload, "visible fact") {
 		t.Fatalf("payload = %q, want subscribed memory", payload)
 	}
 	if strings.Contains(payload, "secret other") {
 		t.Fatal("organize prompt leaked unsubscribed node statement")
+	}
+}
+
+func TestCompactHistoryLeavesDuplicateJudgmentToModel(t *testing.T) {
+	t.Parallel()
+
+	provider := &stubProvider{response: `{"nodes":[
+		{"kind":"fact","statement":" visible   fact ","status":"accepted","subgraph_ids":["sg-a"]},
+		{"kind":"fact","statement":"secret other","status":"accepted","subgraph_ids":["sg-a"]},
+		{"kind":"fact","statement":"new fact","status":"accepted","subgraph_ids":["sg-a"]},
+		{"kind":"fact","statement":" new   fact ","status":"accepted","subgraph_ids":["sg-a"]}
+	]}`}
+	graph := ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{
+			{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask},
+			{ID: "sg-b", Kind: ctxgraph.SubgraphKindGeneral},
+		},
+		Nodes: []ctxgraph.Node{
+			{ID: "visible", Statement: "visible fact", SubgraphIDs: []string{"sg-a"}},
+			{ID: "hidden", Statement: "secret other", SubgraphIDs: []string{"sg-b"}},
+		},
+	}
+
+	gotGraph, _, err := CompactHistory(
+		context.Background(),
+		provider,
+		graph,
+		[]Message{{Role: RoleUser, Content: "old work"}},
+		[]string{"sg-a"},
+		0,
+		"agent-a",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	counts := make(map[string]int)
+	for _, node := range gotGraph.Nodes {
+		counts[strings.Join(strings.Fields(node.Statement), " ")]++
+	}
+	if counts["visible fact"] != 2 {
+		t.Fatalf("visible statement count = %d, want original plus model output", counts["visible fact"])
+	}
+	if counts["secret other"] != 2 {
+		t.Fatalf("hidden statement count = %d, want hidden original plus one visible node", counts["secret other"])
+	}
+	if counts["new fact"] != 2 {
+		t.Fatalf("new draft count = %d, want both model outputs", counts["new fact"])
 	}
 }
 
@@ -536,5 +604,56 @@ func TestSerializeConversationIncludesThinking(t *testing.T) {
 	}
 	if strings.Contains(got, "secret") {
 		t.Fatal("serialized conversation leaked tool details")
+	}
+}
+
+func TestCompactHistoryDoesNotCompressMemoryToolTraffic(t *testing.T) {
+	t.Parallel()
+
+	provider := &stubProvider{response: `{"nodes":[]}`}
+	_, _, err := CompactHistory(
+		context.Background(),
+		provider,
+		ctxgraph.Graph{},
+		[]Message{
+			{Role: RoleUser, Content: "old work"},
+			{
+				Role: RoleAssistant,
+				ToolCalls: []agenttool.Call{
+					{Name: memoryNodesInToolName, Arguments: json.RawMessage(`{"subgraph_ids":["sg-a"]}`)},
+					{Name: "echo", Arguments: json.RawMessage(`{"text":"keep"}`)},
+				},
+			},
+			{
+				Role:    RoleTool,
+				Content: "MEMORY_NODE_SHOULD_NOT_BE_COMPACTED",
+				ToolResult: &agenttool.Result{
+					Name:    memoryNodesInToolName,
+					Content: "MEMORY_NODE_SHOULD_NOT_BE_COMPACTED",
+				},
+			},
+			{
+				Role:    RoleTool,
+				Content: "keep result",
+				ToolResult: &agenttool.Result{
+					Name:    "echo",
+					Content: "keep result",
+				},
+			},
+		},
+		nil,
+		0,
+		"agent-a",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	payload := provider.last.Messages[0].Content
+	if strings.Contains(payload, memoryNodesInToolName) || strings.Contains(payload, "MEMORY_NODE_SHOULD_NOT_BE_COMPACTED") {
+		t.Fatalf("payload included memory tool traffic: %q", payload)
+	}
+	if !strings.Contains(payload, `echo({"text":"keep"})`) || !strings.Contains(payload, "keep result") {
+		t.Fatalf("payload lost ordinary tool traffic: %q", payload)
 	}
 }

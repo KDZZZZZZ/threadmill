@@ -69,7 +69,10 @@ func TestBindReplacesGlobalMemoryTools(t *testing.T) {
 
 	leaking := MemoryTools(func() ctxgraph.Copy {
 		return ctxgraph.Clone("leak")
-	}, ctxgraph.Update)
+	}, func(copy ctxgraph.Copy) error {
+		ctxgraph.Update(copy)
+		return nil
+	})
 	tools := Bind(store, "env-1", leaking)
 
 	if _, err := executeNamed(t, tools, memoryAddToSubgraphName, `{"subgraph_id":"bound","node_ids":["n1"]}`); err != nil {
@@ -283,8 +286,9 @@ func (v *memView) Snapshot() ctxgraph.Graph {
 	return v.graph.Clone()
 }
 
-func (v *memView) Commit(graph ctxgraph.Graph) {
+func (v *memView) Commit(graph ctxgraph.Graph) error {
 	v.graph = graph.Clone()
+	return nil
 }
 
 func (s spyTool) Definition() Definition {

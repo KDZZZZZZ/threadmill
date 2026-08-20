@@ -912,6 +912,28 @@ func TestStoreMergeEmptyIntoIsNoop(t *testing.T) {
 	}
 }
 
+func TestStoreStatsExposeBoundedResourceInventory(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	mustFork(t, store, "parent", "child")
+	if err := store.View("child").Write("created.txt", []byte("abc")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.View("child").Delete("hello.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Materialize("parent"); err != nil {
+		t.Fatal(err)
+	}
+	defer store.Release("parent")
+
+	got := store.Stats()
+	if got.Environments != 2 || got.LiveDirs != 1 || got.OverlayFiles != 1 || got.Tombstones != 1 || got.OverlayBytes != 3 {
+		t.Fatalf("stats = %#v", got)
+	}
+}
+
 func TestViewReadReturnsCopiedBlob(t *testing.T) {
 	t.Parallel()
 

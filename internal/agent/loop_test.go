@@ -657,6 +657,15 @@ func TestMemoryCompactDoesNotPublishModelEvents(t *testing.T) {
 	if len(phases) != 3 {
 		t.Fatalf("model events = %#v, want one chat generate", *got)
 	}
+	var compactPhases []event.Phase
+	for _, ev := range *got {
+		if ev.Kind == event.KindMemory && ev.Name == compactMemoryToolName {
+			compactPhases = append(compactPhases, ev.Phase)
+		}
+	}
+	if !reflect.DeepEqual(compactPhases, []event.Phase{event.PhaseStart, event.PhaseEnd}) {
+		t.Fatalf("compact events = %#v, want start/end", compactPhases)
+	}
 }
 
 func TestLoopPublishesModelError(t *testing.T) {

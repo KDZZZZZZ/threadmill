@@ -1,15 +1,33 @@
 package context
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 )
+
+type storeState struct {
+	Graphs    map[string]Graph `json:"graphs"`
+	Baselines map[string]Graph `json:"baselines"`
+}
 
 // Store 按环境 ID 保存记忆图快照。Spawn 用 Fork 复制父快照并记下合入基线；之后各环境独立写入。
 type Store struct {
 	mu        sync.Mutex
 	graphs    map[string]Graph
 	baselines map[string]Graph // childID → Fork 瞬间的父快照
+	path      string
+}
+
+// StoreStats 汇总内存图存储的规模。数量按环境快照求和。
+type StoreStats struct {
+	Environments int `json:"environments"`
+	Baselines    int `json:"baselines"`
+	Subgraphs    int `json:"subgraphs"`
+	Nodes        int `json:"nodes"`
+	Edges        int `json:"edges"`
 }
 
 // NewStore 返回空的按环境隔离存储。
@@ -18,6 +36,54 @@ func NewStore() *Store {
 		graphs:    make(map[string]Graph),
 		baselines: make(map[string]Graph),
 	}
+}
+
+// Stats 返回全部环境图的并发一致规模快照。
+func (s *Store) Stats() StoreStats {
+	if s == nil {
+		return StoreStats{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stats := StoreStats{
+		Environments: len(s.graphs),
+		Baselines:    len(s.baselines),
+	}
+	for _, graph := range s.graphs {
+		stats.Subgraphs += len(graph.Subgraphs)
+		stats.Nodes += len(graph.Nodes)
+		stats.Edges += len(graph.Edges)
+	}
+	return stats
+}
+
+// OpenStore 打开持久化记忆图存储；文件不存在时创建空存储。
+func OpenStore(path string) (*Store, error) {
+	if path == "" {
+		return nil, fmt.Errorf("context: store path is required")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("create memory store directory: %w", err)
+	}
+	store := NewStore()
+	store.path = path
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("read memory store %q: %w", path, err)
+		}
+		if err := store.persistLocked(); err != nil {
+			return nil, err
+		}
+		return store, nil
+	}
+	var state storeState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("decode memory store %q: %w", path, err)
+	}
+	store.graphs = cloneGraphMap(state.Graphs)
+	store.baselines = cloneGraphMap(state.Baselines)
+	return store, nil
 }
 
 // Load 返回该环境的图拷贝；不存在时返回空图。
@@ -32,13 +98,64 @@ func (s *Store) Load(envID string) Graph {
 }
 
 // Save 用拷贝替换该环境的图快照。
-func (s *Store) Save(envID string, graph Graph) {
+func (s *Store) Save(envID string, graph Graph) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.graphs == nil {
-		s.graphs = make(map[string]Graph)
+	graph = s.graphs[envID].preservingManaged(graph)
+	return s.commitGraphLocked(envID, graph)
+}
+
+// EnsureSubgraph 保证环境中存在由运行时管理的子图。
+func (s *Store) EnsureSubgraph(envID string, subgraph Subgraph) error {
+	if envID == "" || subgraph.ID == "" {
+		return fmt.Errorf("context: env and subgraph IDs are required")
 	}
-	s.graphs[envID] = graph.Clone()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	graph := s.graphs[envID]
+	if hasSubgraphID(graph, subgraph.ID) {
+		return nil
+	}
+	return s.commitGraphLocked(envID, graph.WithSubgraph(subgraph))
+}
+
+// AppendNode 把节点原子提交到指定运行时子图；空 ID 分配新节点，显式 ID 更新同一节点。
+func (s *Store) AppendNode(envID string, subgraph Subgraph, node Node) error {
+	return s.AppendNodes(envID, subgraph, []Node{node})
+}
+
+// AppendNodes 把一组节点一次性提交到指定运行时子图。
+func (s *Store) AppendNodes(envID string, subgraph Subgraph, nodes []Node) error {
+	if envID == "" || subgraph.ID == "" {
+		return fmt.Errorf("context: env, subgraph and statement are required")
+	}
+	if len(nodes) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	graph := s.graphs[envID]
+	for _, node := range nodes {
+		if node.Statement == "" {
+			return fmt.Errorf("context: env, subgraph and statement are required")
+		}
+		var err error
+		graph, err = graph.withRuntimeNode(subgraph, node)
+		if err != nil {
+			return err
+		}
+	}
+	return s.commitGraphLocked(envID, graph)
+}
+
+// DropSubgraph 删除子图及其全部节点；多重归属节点也删除，避免专属内容从别的归属泄漏。
+func (s *Store) DropSubgraph(envID, subgraphID string) error {
+	if envID == "" || subgraphID == "" {
+		return fmt.Errorf("context: env and subgraph IDs are required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commitGraphLocked(envID, s.graphs[envID].withoutSubgraph(subgraphID))
 }
 
 // View 返回该环境的记忆图视图。Snapshot 读 Load，Commit 写 Save。
@@ -58,15 +175,15 @@ func (v *EnvView) Snapshot() Graph {
 }
 
 // Commit 用拷贝替换该环境的图快照。
-func (v *EnvView) Commit(graph Graph) {
-	v.store.Save(v.envID, graph)
+func (v *EnvView) Commit(graph Graph) error {
+	return v.store.Save(v.envID, graph)
 }
 
 // Fork 把父环境快照复制到子环境，并记下当时的父快照作为合入基线。
 // 子环境已存在时不覆盖，也不改基线。
-func (s *Store) Fork(parentID, childID string) {
+func (s *Store) Fork(parentID, childID string) error {
 	if childID == "" {
-		return
+		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -74,7 +191,7 @@ func (s *Store) Fork(parentID, childID string) {
 		s.graphs = make(map[string]Graph)
 	}
 	if _, exists := s.graphs[childID]; exists {
-		return
+		return nil
 	}
 	parent := Graph{}
 	if parentID != "" {
@@ -84,11 +201,22 @@ func (s *Store) Fork(parentID, childID string) {
 	if s.baselines == nil {
 		s.baselines = make(map[string]Graph)
 	}
+	previousBaseline, hadBaseline := s.baselines[childID]
 	s.baselines[childID] = parent.Clone()
+	if err := s.persistLocked(); err != nil {
+		delete(s.graphs, childID)
+		if hadBaseline {
+			s.baselines[childID] = previousBaseline
+		} else {
+			delete(s.baselines, childID)
+		}
+		return err
+	}
+	return nil
 }
 
 // Merge 把 from 相对其 Fork 基线的增量并入 into。同 ID 同陈述则并集 SubgraphIDs
-//（加入 A 与加入 B 互不影响）；同 ID 不同陈述则保留 into、给 from 换新 ID 并重写边。
+// （加入 A 与加入 B 互不影响）；同 ID 不同陈述则保留 into、给 from 换新 ID 并重写边。
 // 缺图当空图。
 func (s *Store) Merge(from, into string) error {
 	if into == "" {
@@ -105,145 +233,52 @@ func (s *Store) Merge(from, into string) error {
 	}
 	ours := s.graphs[into].Clone()
 	theirs := s.graphs[from].Clone()
-	s.graphs[into] = mergeAdditive(from, base, ours, theirs)
+	return s.commitGraphLocked(into, ours.mergeAdditive(from, base, theirs))
+}
+
+func (s *Store) persistLocked() error {
+	if s.path == "" {
+		return nil
+	}
+	data, err := json.Marshal(storeState{
+		Graphs:    s.graphs,
+		Baselines: s.baselines,
+	})
+	if err != nil {
+		return fmt.Errorf("encode memory store: %w", err)
+	}
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write memory store %q: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, s.path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("commit memory store %q: %w", s.path, err)
+	}
 	return nil
 }
 
-// mergeAdditive 以 ours 为底，并入 theirs 相对 base 的节点/子图/边，Revision 加一。
-func mergeAdditive(fromID string, base, ours, theirs Graph) Graph {
-	result := ours.Clone()
-	remap := make(map[string]string)
-	used := make(map[string]struct{})
-	for _, node := range result.Nodes {
-		if node.ID != "" {
-			used[node.ID] = struct{}{}
-		}
+func (s *Store) commitGraphLocked(envID string, graph Graph) error {
+	if s.graphs == nil {
+		s.graphs = make(map[string]Graph)
 	}
-	for _, node := range theirs.Nodes {
-		if node.ID != "" {
-			used[node.ID] = struct{}{}
-		}
-	}
-
-	seen := make(map[string]struct{})
-	for _, node := range theirs.Nodes {
-		if node.ID == "" {
-			continue
-		}
-		if _, dup := seen[node.ID]; dup {
-			continue
-		}
-		seen[node.ID] = struct{}{}
-
-		oursNode, oursOK := result.nodeByID(node.ID)
-		if oursOK && oursNode.Statement == node.Statement {
-			for i := range result.Nodes {
-				if result.Nodes[i].ID != node.ID {
-					continue
-				}
-				result.Nodes[i].SubgraphIDs = unionIDs(result.Nodes[i].SubgraphIDs, node.SubgraphIDs)
-				break
-			}
-			continue
-		}
-		if baseNode, ok := base.nodeByID(node.ID); ok && baseNode.Statement == node.Statement {
-			continue
-		}
-		if oursOK {
-			newID, existed := collisionNodeID(fromID, node, result, used)
-			remap[node.ID] = newID
-			if existed {
-				continue
-			}
-			cloned := cloneNode(node)
-			cloned.ID = newID
-			result.Nodes = append(result.Nodes, cloned)
-			used[newID] = struct{}{}
-			continue
-		}
-		result.Nodes = append(result.Nodes, cloneNode(node))
-		used[node.ID] = struct{}{}
-	}
-
-	for _, subgraph := range theirs.Subgraphs {
-		if subgraph.ID == "" || hasSubgraphID(result, subgraph.ID) {
-			continue
-		}
-		result.Subgraphs = append(result.Subgraphs, subgraph)
-	}
-
-	for _, edge := range theirs.Edges {
-		if hasEdge(base, edge) {
-			continue
-		}
-		edge = rewriteEdge(edge, remap)
-		if hasEdge(result, edge) {
-			continue
-		}
-		result.Edges = append(result.Edges, edge)
-	}
-
-	result.Revision = ours.Revision + 1
-	return result
-}
-
-func collisionNodeID(fromID string, node Node, result Graph, used map[string]struct{}) (string, bool) {
-	preferred := fromID + "-" + node.ID
-	if preferred != node.ID {
-		if existing, ok := result.nodeByID(preferred); ok {
-			if existing.Statement == node.Statement {
-				return preferred, true
-			}
+	previous, existed := s.graphs[envID]
+	s.graphs[envID] = graph.Clone()
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.graphs[envID] = previous
 		} else {
-			return preferred, false
+			delete(s.graphs, envID)
 		}
+		return err
 	}
-	for i := 1; ; i++ {
-		id := fmt.Sprintf("mem-%d", i)
-		if _, taken := used[id]; taken {
-			continue
-		}
-		return id, false
-	}
+	return nil
 }
 
-func unionIDs(dst, extra []string) []string {
-	out := append([]string(nil), dst...)
-	for _, id := range extra {
-		if id == "" || containsID(out, id) {
-			continue
-		}
-		out = append(out, id)
+func cloneGraphMap(src map[string]Graph) map[string]Graph {
+	dst := make(map[string]Graph, len(src))
+	for id, graph := range src {
+		dst[id] = graph.Clone()
 	}
-	return out
-}
-
-func rewriteEdge(edge Edge, remap map[string]string) Edge {
-	if newID, ok := remap[edge.ToNodeID]; ok {
-		edge.ToNodeID = newID
-	}
-	if oldID, ok := parseRef(edge.FromRef, nodeRefPrefix); ok {
-		if newID, ok := remap[oldID]; ok {
-			edge.FromRef = NodeRef(newID)
-		}
-	}
-	return edge
-}
-
-func hasSubgraphID(g Graph, id string) bool {
-	for _, subgraph := range g.Subgraphs {
-		if subgraph.ID == id {
-			return true
-		}
-	}
-	return false
-}
-
-func hasEdge(g Graph, want Edge) bool {
-	for _, edge := range g.Edges {
-		if edge == want {
-			return true
-		}
-	}
-	return false
+	return dst
 }

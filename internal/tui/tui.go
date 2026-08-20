@@ -19,7 +19,7 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/event"
 )
 
-// Chat 是 TUI 需要的会话能力。
+// Chat 是 TUI 需要的 manager 能力。
 type Chat interface {
 	Send(string)
 	Cancel() bool
@@ -100,7 +100,7 @@ func newModel(chat Chat, info Info) model {
 	}
 }
 
-// NewProgram 构造全屏 TUI。调用方应在 Run 前把 Program.Send 接到会话事件上。
+// NewProgram 构造全屏 TUI。调用方应在 Run 前把 Program.Send 接到 manager 事件上。
 func NewProgram(ctx context.Context, chat Chat, info Info) *tea.Program {
 	opts := []tea.ProgramOption{tea.WithAltScreen()}
 	if ctx != nil {

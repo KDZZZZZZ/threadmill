@@ -27,10 +27,12 @@ const (
 	EdgeKindDerivesFromSubgraph = "derives_from_subgraph" // 在某个子图上下文中产生的节点
 )
 
-// 子图 Kind 区分通用知识与 Task 专属上下文。
+// 子图 Kind 区分通用知识、Task 上下文与运行时管理视图。
 const (
 	SubgraphKindGeneral = "general"
 	SubgraphKindTask    = "task"
+	SubgraphKindPackage = "package"
+	SubgraphKindSystem  = "system"
 )
 
 // Node 是上下文图中的一条知识陈述。
@@ -57,7 +59,7 @@ type Subgraph struct {
 	Name     string `json:"name"`     // 面向 Agent 的名称
 	Summary  string `json:"summary"`  // 用于列表和检索的简要说明
 	Revision int64  `json:"revision"` // 子图内容版本
-	Kind     string `json:"kind"`     // general 或 task
+	Kind     string `json:"kind"`     // general、task、package 或 system
 }
 
 // Graph 是某一 revision 下的上下文图快照。

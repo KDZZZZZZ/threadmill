@@ -17,6 +17,19 @@ var (
 	ErrInvalidCall = errors.New("tool: invalid call")
 )
 
+type agentIDKey struct{}
+
+// WithAgentID 标记当前工具调用来自哪个 Agent。
+func WithAgentID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, agentIDKey{}, id)
+}
+
+// AgentID 返回发起当前工具调用的 Agent ID。
+func AgentID(ctx context.Context) string {
+	id, _ := ctx.Value(agentIDKey{}).(string)
+	return id
+}
+
 // OpenAI function name：a-z A-Z 0-9 _ -，最长 64。
 // 来源：https://developers.openai.com/api/docs/guides/function-calling
 var functionName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)

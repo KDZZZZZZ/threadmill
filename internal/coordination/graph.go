@@ -41,7 +41,7 @@ var ErrUnknownNode = errors.New("coordination: unknown node")
 // ErrJoinCycle 表示 spawn/join 会在 Ask 前形成开始依赖环，或 join 跨了任务树。
 var ErrJoinCycle = errors.New("coordination: join cycle")
 
-// ErrGraphBusy 表示图正在 Run，不能再改拓扑。
+// ErrGraphBusy 表示并发 Run，或改图触及已经开始执行的切片。
 var ErrGraphBusy = errors.New("coordination: graph is executing")
 
 // ErrUnspawnRoot 表示不能拆掉独立根 task。
@@ -94,6 +94,9 @@ type Task struct {
 	JoinedBy    []string // 合入本 task 的 task
 }
 
+// TaskSink 原子接收协调图中全部 task info 的自动投影。
+type TaskSink func([]Task) error
+
 // Sequence 按固定顺序返回三个角色节点。
 func (t Task) Sequence() []Node {
 	return []Node{t.Planner, t.Executor, t.Verifier}
@@ -112,8 +115,13 @@ type Graph struct {
 	tasks     []Task
 	edges     []Edge
 	nextID    uint64
+	helps     []helpState
 	progress  ProgressStore
+	help      *helpCoordinator
+	taskSink  TaskSink
+	statePath string
 	executing bool
+	running   *runner
 	revision  int64
 }
 
@@ -128,13 +136,41 @@ func (g *Graph) SetProgressStore(store ProgressStore) {
 	g.mu.Unlock()
 }
 
+// SetTaskSink 注册 task info 的唯一投影入口，并立即提交已有 task。
+func (g *Graph) SetTaskSink(sink TaskSink) error {
+	if g == nil {
+		return fmt.Errorf("coordination: nil graph")
+	}
+	g.mu.Lock()
+	g.taskSink = sink
+	tasks := g.snapshotLocked().Tasks
+	g.mu.Unlock()
+	return emitTasks(sink, tasks)
+}
+
+func (g *Graph) emitTaskSink(tasks []Task) error {
+	g.mu.Lock()
+	sink := g.taskSink
+	g.mu.Unlock()
+	return emitTasks(sink, tasks)
+}
+
+func emitTasks(sink TaskSink, tasks []Task) error {
+	if sink == nil || len(tasks) == 0 {
+		return nil
+	}
+	return sink(tasks)
+}
+
 func (g *Graph) reset() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.tasks = []Task{}
 	g.edges = []Edge{}
 	g.nextID = 0
+	g.helps = nil
 	g.executing = false
+	g.running = nil
 	g.revision = 0
 }
 
@@ -156,11 +192,15 @@ func (g *Graph) Spawn(from, join string) (Task, error) {
 	if g.executing {
 		return Task{}, ErrGraphBusy
 	}
+	before := g.stateLocked()
 	child, err := g.spawnLocked(from, join)
 	if err != nil {
 		return Task{}, err
 	}
 	g.revision++
+	if err := g.saveOrRestoreLocked(before); err != nil {
+		return Task{}, err
+	}
 	return child, nil
 }
 
@@ -241,11 +281,15 @@ func (g *Graph) Unspawn(taskID string) ([]string, error) {
 	if g.executing {
 		return nil, ErrGraphBusy
 	}
+	before := g.stateLocked()
 	removed, err := g.unspawnLocked(taskID)
 	if err != nil {
 		return nil, err
 	}
 	g.revision++
+	if err := g.saveOrRestoreLocked(before); err != nil {
+		return nil, err
+	}
 	return removed, nil
 }
 

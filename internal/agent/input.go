@@ -34,6 +34,13 @@ func (l *Loop) SetSubscribedSubgraphs(ids []string) {
 	l.subscribedSubgraphs = append([]string(nil), ids...)
 }
 
+// SetFixedSubscribedSubgraphs 设置运行时固定订阅；普通订阅和 checkpoint 不会覆盖它。
+func (l *Loop) SetFixedSubscribedSubgraphs(ids []string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.fixedSubscribedSubgraphs = uniqueIDs(ids)
+}
+
 func (l *Loop) subscribeSubgraph(id string) {
 	if id == "" {
 		return

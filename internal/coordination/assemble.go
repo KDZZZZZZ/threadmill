@@ -4,12 +4,36 @@ import (
 	"context"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
+	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	"github.com/KDZZZZZZ/threadmill/internal/env"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
-const managerEnvID = "manager"
+const (
+	ManagerEnvID            = "manager"
+	ManagerMemorySubgraphID = "system-manager"
+)
+
+// ManagerMemorySubgraph 是 manager 独占的用户消息、task info 和报告视图。
+func ManagerMemorySubgraph() ctxgraph.Subgraph {
+	return ctxgraph.Subgraph{
+		ID:      ManagerMemorySubgraphID,
+		Name:    "manager context",
+		Summary: "用户消息、task info 与 task 报告",
+		Kind:    ctxgraph.SubgraphKindSystem,
+	}
+}
+
+// TaskPackageSubgraph 是 task 的初始记忆与所有 join 报告组成的固定启动包。
+func TaskPackageSubgraph(taskID string) ctxgraph.Subgraph {
+	return ctxgraph.Subgraph{
+		ID:      taskID + "-package",
+		Name:    "task startup package",
+		Summary: "执行任务所需的最小初始记忆与所有 join 报告",
+		Kind:    ctxgraph.SubgraphKindPackage,
+	}
+}
 
 // Asker 执行一个角色的 ReAct 循环。
 type Asker interface {
@@ -21,6 +45,7 @@ type Roles struct {
 	Planner  Asker
 	Executor Asker
 	Verifier Asker
+	Prepare  func(context.Context) error
 }
 
 // AssembleFunc 按 task 组装三个角色；工具必须绑到 task.Env。
@@ -38,6 +63,13 @@ func Assemble(
 	overlay ...agent.FileOverlay,
 ) AssembleFunc {
 	return func(task Task) (Roles, error) {
+		if stores.Memory == nil {
+			return Roles{}, ErrNilStore
+		}
+		pack := TaskPackageSubgraph(task.ID)
+		if err := stores.Memory.EnsureSubgraph(task.Env.ID, pack); err != nil {
+			return Roles{}, err
+		}
 		e, err := openEnv(stores, task.Env.ID)
 		if err != nil {
 			return Roles{}, err
@@ -53,6 +85,9 @@ func Assemble(
 			return Roles{}, err
 		}
 		team.BindCheckpoints(checkpoints, task.ID)
+		for _, loop := range []*agent.Loop{team.Planner, team.Executor, team.Verifier} {
+			loop.SetFixedSubscribedSubgraphs([]string{pack.ID})
+		}
 		if err := team.Bind(e); err != nil {
 			return Roles{}, err
 		}
@@ -60,6 +95,9 @@ func Assemble(
 			Planner:  team.Planner,
 			Executor: team.Executor,
 			Verifier: team.Verifier,
+			Prepare: func(ctx context.Context) error {
+				return team.PrepareTaskContext(ctx, e.Memory, task.Info, pack.ID)
+			},
 		}, nil
 	}
 }
@@ -74,7 +112,15 @@ func NewManagerLoop(
 	contextWindow int,
 	overlay agent.FileOverlay,
 ) (*agent.Loop, error) {
-	overlay.NamedTools = GraphToolMap(graph)
+	if stores.Memory == nil {
+		return nil, ErrNilStore
+	}
+	if overlay.NamedTools == nil {
+		overlay.NamedTools = make(map[string]agenttool.Tool)
+	}
+	for name, tool := range GraphToolMap(graph) {
+		overlay.NamedTools[name] = tool
+	}
 	loop, err := agent.NewManager(provider, contextWindow, agents, extra, overlay)
 	if err != nil {
 		return nil, err
@@ -82,7 +128,12 @@ func NewManagerLoop(
 	if err := loop.AddHooks(InjectCoordinationGraph(graph)); err != nil {
 		return nil, err
 	}
-	e, err := openEnv(stores, managerEnvID)
+	memory := ManagerMemorySubgraph()
+	if err := stores.Memory.EnsureSubgraph(ManagerEnvID, memory); err != nil {
+		return nil, err
+	}
+	loop.SetFixedSubscribedSubgraphs([]string{memory.ID})
+	e, err := openEnv(stores, ManagerEnvID)
 	if err != nil {
 		return nil, err
 	}

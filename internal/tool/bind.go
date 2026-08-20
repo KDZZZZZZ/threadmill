@@ -63,10 +63,11 @@ func (v storeView) Snapshot() ctxgraph.Graph {
 	return v.store.Load(v.envID)
 }
 
-func (v storeView) Commit(graph ctxgraph.Graph) {
-	if v.store != nil {
-		v.store.Save(v.envID, graph)
+func (v storeView) Commit(graph ctxgraph.Graph) error {
+	if v.store == nil {
+		return nil
 	}
+	return v.store.Save(v.envID, graph)
 }
 
 // BindEnv 把工具绑到工作区：实现 EnvBinder 的换后端，其余工具在 Execute 的 context 里带上 env ID。

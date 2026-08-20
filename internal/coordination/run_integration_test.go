@@ -22,10 +22,6 @@ import (
 const liveMemoryMarker = "THREADMILL_GRAPH_MEM_7f3a"
 
 func TestLiveGraphRunMemoryOpsAndEnvVersions(t *testing.T) {
-	if os.Getenv("OPENCODE_API_KEY") == "" {
-		t.Skip("OPENCODE_API_KEY is required for the live integration test")
-	}
-
 	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
 	ctxgraph.Update(ctxgraph.Copy{})
 

@@ -6,17 +6,34 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 )
+
+func testLLMConfig(t *testing.T, baseURL string) LLMConfig {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".threadmill")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "credentials.yaml"), []byte("test: test-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return LLMConfig{
+		Provider: OpenAIResponses, BaseURL: baseURL, Credential: "test", Model: "gpt-5",
+	}
+}
 
 func TestLoadConfigReadsRootYAML(t *testing.T) {
 	root := t.TempDir()
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: TEST_OPENAI_API_KEY
+  credential: test
   model: gpt-5
   context_window: 128000
 `)
@@ -32,7 +49,7 @@ func TestLoadConfigReadsRootYAML(t *testing.T) {
 		LLM: LLMConfig{
 			Provider:      "openai-responses",
 			BaseURL:       "https://api.openai.com/v1",
-			APIKeyEnv:     "TEST_OPENAI_API_KEY",
+			Credential:    "test",
 			Model:         "gpt-5",
 			ContextWindow: 128000,
 		},
@@ -43,7 +60,7 @@ func TestLoadConfigReadsRootYAML(t *testing.T) {
 	}
 }
 
-func TestLoadConfigReadsAPIKey(t *testing.T) {
+func TestLoadConfigRejectsProjectAPIKey(t *testing.T) {
 	root := t.TempDir()
 	content := []byte(`llm:
   provider: openai-responses
@@ -55,16 +72,12 @@ func TestLoadConfigReadsAPIKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := LoadConfig(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.LLM.APIKey != "sk-test-literal" {
-		t.Fatalf("APIKey = %q, want sk-test-literal", got.LLM.APIKey)
+	if _, err := LoadConfig(root); err == nil {
+		t.Fatal("LoadConfig() error = nil, want unknown field api_key")
 	}
 }
 
-func TestLoadConfigRejectsMissingAPIKey(t *testing.T) {
+func TestLoadConfigRejectsMissingCredential(t *testing.T) {
 	root := t.TempDir()
 	content := []byte(`llm:
   provider: openai-responses
@@ -81,18 +94,85 @@ func TestLoadConfigRejectsMissingAPIKey(t *testing.T) {
 	}
 }
 
-func TestNewTransportUsesYAMLAPIKeyWithoutEnv(t *testing.T) {
+func TestNewTransportUsesUserCredentialFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".threadmill")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "credentials.yaml"), []byte("opencode: sk-from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	got, err := newTransport(LLMConfig{
-		Provider: OpenAIResponses,
-		BaseURL:  "https://api.openai.com/v1",
-		APIKey:   "sk-from-yaml",
-		Model:    "gpt-5",
+		Provider:   OpenAIResponses,
+		BaseURL:    "https://api.openai.com/v1",
+		Credential: "opencode",
+		Model:      "gpt-5",
 	}, OpenAIResponses, "/responses", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.apiKey != "sk-from-yaml" {
+	if got.apiKey != "sk-from-file" {
 		t.Fatalf("apiKey = %q", got.apiKey)
+	}
+}
+
+func TestNewTransportRejectsInsecureCredentialFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes are not available")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".threadmill")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "credentials.yaml")
+	if err := os.WriteFile(path, []byte("opencode: sk-must-not-leak\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := newTransport(LLMConfig{
+		Provider:   OpenAIResponses,
+		BaseURL:    "https://api.openai.com/v1",
+		Credential: "opencode",
+		Model:      "gpt-5",
+	}, OpenAIResponses, "/responses", nil)
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("newTransport() error = %v, want ErrInvalidConfig", err)
+	}
+	if strings.Contains(err.Error(), "sk-must-not-leak") {
+		t.Fatalf("newTransport() error leaks credential: %v", err)
+	}
+}
+
+func TestCredentialDecodeErrorDoesNotExposeFileContent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".threadmill")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "credentials.yaml"), []byte("sk-must-not-leak\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := newTransport(LLMConfig{
+		Provider:   OpenAIResponses,
+		BaseURL:    "https://api.openai.com/v1",
+		Credential: "opencode",
+		Model:      "gpt-5",
+	}, OpenAIResponses, "/responses", nil)
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("newTransport() error = %v, want ErrInvalidConfig", err)
+	}
+	if strings.Contains(err.Error(), "sk-must-not-leak") {
+		t.Fatalf("newTransport() error leaks credential: %v", err)
 	}
 }
 
@@ -101,7 +181,7 @@ func TestLoadConfigReadsAgents(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: TEST_OPENAI_API_KEY
+  credential: test
   model: gpt-5
   context_window: 128000
 agents:
@@ -174,7 +254,7 @@ agents:
 		LLM: LLMConfig{
 			Provider:      "openai-responses",
 			BaseURL:       "https://api.openai.com/v1",
-			APIKeyEnv:     "TEST_OPENAI_API_KEY",
+			Credential:    "test",
 			Model:         "gpt-5",
 			ContextWindow: 128000,
 		},
@@ -246,7 +326,7 @@ func TestLoadConfigRejectsNegativeAgentMaxSteps(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: OPENAI_API_KEY
+  credential: test
   model: gpt-5
 agents:
   planner:
@@ -266,7 +346,7 @@ func TestLoadConfigAcceptsFileTools(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: TEST_OPENAI_API_KEY
+  credential: test
   model: gpt-5
 agents:
   planner:
@@ -311,7 +391,7 @@ func TestLoadConfigReadsToolCatalog(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: TEST_OPENAI_API_KEY
+  credential: test
   model: gpt-5
 tools:
   read:
@@ -341,7 +421,7 @@ func TestLoadConfigReadsPrompts(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: TEST_OPENAI_API_KEY
+  credential: test
   model: gpt-5
 prompts:
   default: generic agent
@@ -375,7 +455,7 @@ func TestLoadConfigRejectsUnknownCatalogTool(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: OPENAI_API_KEY
+  credential: test
   model: gpt-5
 tools:
   not_a_tool:
@@ -395,7 +475,7 @@ func TestLoadConfigRejectsUnknownAgentTool(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: OPENAI_API_KEY
+  credential: test
   model: gpt-5
 agents:
   planner:
@@ -416,7 +496,7 @@ func TestLoadConfigRejectsPlannerGraphTool(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: OPENAI_API_KEY
+  credential: test
   model: gpt-5
 agents:
   planner:
@@ -437,7 +517,7 @@ func TestLoadConfigRejectsUnknownAgentHook(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: OPENAI_API_KEY
+  credential: test
   model: gpt-5
 agents:
   planner:
@@ -458,7 +538,7 @@ func TestLoadConfigRejectsDuplicateAgentTool(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: OPENAI_API_KEY
+  credential: test
   model: gpt-5
 agents:
   planner:
@@ -480,7 +560,7 @@ func TestLoadConfigRejectsAgentContextWindow(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: OPENAI_API_KEY
+  credential: test
   model: gpt-5
   context_window: 128000
 agents:
@@ -501,7 +581,7 @@ func TestLoadConfigRejectsRemoteHTTP(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: http://example.com/v1
-  api_key_env: OPENAI_API_KEY
+  credential: test
   model: gpt-5
 `)
 	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
@@ -519,7 +599,7 @@ func TestLoadConfigDefaultsExecSlotsToNumCPU(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: OPENAI_API_KEY
+  credential: test
   model: gpt-5
 `)
 	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
@@ -540,10 +620,52 @@ func TestLoadConfigRejectsNegativeExecSlots(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: OPENAI_API_KEY
+  credential: test
   model: gpt-5
 exec:
   slots: -1
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadConfig(root); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig() error = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestLoadConfigAcceptsExecContainerImage(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  credential: test
+  model: gpt-5
+exec:
+  container_image: golang:1.26.5-alpine
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Exec.ContainerImage != "golang:1.26.5-alpine" {
+		t.Fatalf("Exec.ContainerImage = %q", got.Exec.ContainerImage)
+	}
+}
+
+func TestLoadConfigRejectsPaddedExecContainerImage(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  credential: test
+  model: gpt-5
+exec:
+  container_image: " golang:1.26.5-alpine "
 `)
 	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
 		t.Fatal(err)
@@ -559,7 +681,7 @@ func TestLoadConfigAcceptsBashTool(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: TEST_OPENAI_API_KEY
+  credential: test
   model: gpt-5
 agents:
   executor:
@@ -584,7 +706,7 @@ func TestLoadConfigRejectsNegativeContextWindow(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: OPENAI_API_KEY
+  credential: test
   model: gpt-5
   context_window: -1
 `)
@@ -602,7 +724,7 @@ func TestLoadConfigRejectsCatalogToolMissingDescription(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: OPENAI_API_KEY
+  credential: test
   model: gpt-5
 tools:
   read: {}
@@ -621,7 +743,7 @@ func TestLoadConfigRejectsPaddedPrompt(t *testing.T) {
 	content := []byte(`llm:
   provider: openai-responses
   base_url: https://api.openai.com/v1
-  api_key_env: OPENAI_API_KEY
+  credential: test
   model: gpt-5
 prompts:
   compact: " padded "
