@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
+	"github.com/KDZZZZZZ/threadmill/internal/event"
 	"github.com/KDZZZZZZ/threadmill/internal/logging"
 )
 
@@ -21,9 +22,15 @@ func TestManagerMetricsAndIdleSnapshotCoverRuntimeAndSubsystems(t *testing.T) {
 	mgr, err := Open(ctx, Options{
 		Root: t.TempDir(),
 		File: loadRepoConfig(t),
-		Provider: stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
+		Provider: stubProvider(func(ctx context.Context, request agent.Request) (agent.AssistantMessage, error) {
 			if strings.Contains(request.SystemPrompt, "记忆整理器") {
-				return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
+				if sink := event.RetrySink(ctx); sink != nil {
+					sink("transport")
+				}
+				return agent.AssistantMessage{
+					Content: `{"nodes":[]}`,
+					Usage:   &agent.Usage{TotalTokens: 5},
+				}, nil
 			}
 			return agent.AssistantMessage{
 				Content: "hello",
@@ -46,14 +53,106 @@ func TestManagerMetricsAndIdleSnapshotCoverRuntimeAndSubsystems(t *testing.T) {
 	if got.Pending != 0 || got.TaskRunning || got.Events.Model.Completed != 1 || got.Events.Tokens != 7 {
 		t.Fatalf("metrics = %#v", got)
 	}
+	if got.Events.MemoryTokens != 5 || got.Events.MemoryRetries != 1 {
+		t.Fatalf("memory model cost = %#v", got.Events)
+	}
 	if got.Runtime.Goroutines <= 0 || got.Runtime.HeapAlloc == 0 {
 		t.Fatalf("runtime metrics = %#v", got.Runtime)
 	}
 	if got.Exec.Capacity <= 0 || got.VFS.LiveDirs != 0 || got.Memory.Environments == 0 {
 		t.Fatalf("subsystem metrics = %#v", got)
 	}
+	for _, field := range []string{
+		`"msg":"runtime snapshot"`,
+		`"model_active":0`,
+		`"model_p50":`,
+		`"model_max":`,
+		`"model_ttft_max":`,
+		`"model_delta_chunks":`,
+		`"model_delta_bytes":`,
+		`"model_stream_chunks":`,
+		`"model_stream_idle":`,
+		`"tool_max":`,
+		`"tool_active":0`,
+		`"task_max":`,
+		`"memory_ops_max":`,
+		`"memory_ops_active":0`,
+		`"memory_ops_tokens":5`,
+		`"memory_ops_retries":1`,
+		`"memory_stream_chunks":`,
+		`"memory_stream_idle":`,
+		`"memory_ttft_max":`,
+		`"memory_organizer_tokens":`,
+		`"memory_organizer_p95":`,
+		`"total_tokens":12`,
+		`"tasks_total":0`,
+		`"exec_capacity":`,
+		`"exec_sandbox_backend":`,
+		`"exec_network_isolation":`,
+		`"exec_peak_queued":0`,
+		`"exec_wait_duration":`,
+		`"exec_run_duration":`,
+		`"exec_canceled":0`,
+		`"exec_timed_out":0`,
+		`"exec_tracked_process_groups":0`,
+		`"exec_runtime_dirs":0`,
+		`"vfs_overlay_files":0`,
+		`"vfs_tombstones":0`,
+		`"vfs_materialize_copies":`,
+		`"vfs_materialize_copy_errors":`,
+		`"vfs_materialize_copy_duration":`,
+		`"vfs_handoffs":`,
+		`"memory_baselines":0`,
+		`"memory_subgraphs":`,
+		`"heap_objects":`,
+		`"gc_pause_total":`,
+	} {
+		if !strings.Contains(logs.String(), field) {
+			t.Fatalf("logs = %s, want field %s", logs.String(), field)
+		}
+	}
+}
+
+func TestManagerLogsPeriodicSnapshotWhileBusy(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var logs bytes.Buffer
+	mgr, err := Open(ctx, Options{
+		Root: t.TempDir(),
+		File: loadRepoConfig(t),
+		Provider: stubProvider(func(context.Context, agent.Request) (agent.AssistantMessage, error) {
+			return agent.AssistantMessage{Content: "ok"}, nil
+		}),
+		Logger: logging.New(logging.Config{Output: &logs, JSON: true}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	mgr.mu.Lock()
+	mgr.pending = 1
+	mgr.mu.Unlock()
+	ticks := make(chan time.Time, 1)
+	ticks <- time.Now()
+	close(ticks)
+	mgr.monitorSnapshots(context.Background(), ticks)
 	if !strings.Contains(logs.String(), `"msg":"runtime snapshot"`) {
-		t.Fatalf("logs = %s, want runtime snapshot", logs.String())
+		t.Fatalf("logs = %s, want periodic snapshot", logs.String())
+	}
+
+	mgr.mu.Lock()
+	mgr.pending = 0
+	mgr.mu.Unlock()
+	before := logs.Len()
+	ticks = make(chan time.Time, 1)
+	ticks <- time.Now()
+	close(ticks)
+	mgr.monitorSnapshots(context.Background(), ticks)
+	if logs.Len() != before {
+		t.Fatalf("idle tick wrote %d bytes", logs.Len()-before)
 	}
 }
 

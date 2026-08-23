@@ -27,7 +27,7 @@ func InjectCoordinationGraph(graph *Graph) agent.Hooks {
 				if err != nil {
 					return request, fmt.Errorf("encode coordination graph: %w", err)
 				}
-				extra := "当前协调图：\n" + string(payload)
+				extra := "当前协调图（JSON：tasks[].id/info/outcome/sequence，edges[].from/to 为节点关联，helps 为拆分请求）：\n" + string(payload)
 				if request.SystemPrompt == "" {
 					request.SystemPrompt = extra
 				} else {

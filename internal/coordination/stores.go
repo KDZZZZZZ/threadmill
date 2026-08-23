@@ -1,7 +1,9 @@
 package coordination
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	tmexec "github.com/KDZZZZZZ/threadmill/internal/exec"
@@ -48,8 +50,11 @@ func (s Stores) ProjectManagerTaskInfos(tasks []Task) error {
 }
 
 // ProjectManagerTaskReport 把 task 报告投影到 manager 固定子图。
+// 无命令证据的 PASS 按 disputed 投影，避免假阳性结论以已成立事实身份进入记忆。
 func (s Stores) ProjectManagerTaskReport(task Task, statement string) error {
-	return s.projectManagerNode(taskReportNode(task, "task-report-"+task.ID, statement))
+	node := taskReportNode(task, "task-report-"+task.ID, statement)
+	node.Status = reportNodeStatus(statement)
+	return s.projectManagerNodeKeepingStatus(node)
 }
 
 // ProjectJoinedTaskReport 把 join 报告同时投影到父 task 启动包和 manager 固定子图。
@@ -58,14 +63,59 @@ func (s Stores) ProjectJoinedTaskReport(parent, child Task, output string) error
 		return ErrNilStore
 	}
 	statement := fmt.Sprintf("[Task Report] %s:\n%s", child.ID, output)
+	node := taskReportNode(child, "joined-report-"+child.ID, statement)
+	node.Status = reportNodeStatus(output)
 	if err := s.Memory.AppendNode(
 		parent.Env.ID,
 		TaskPackageSubgraph(parent.ID),
-		taskReportNode(child, "joined-report-"+child.ID, statement),
+		node,
 	); err != nil {
 		return err
 	}
 	return s.ProjectManagerTaskReport(child, statement)
+}
+
+func (s Stores) projectManagerNodeKeepingStatus(node ctxgraph.Node) error {
+	if s.Memory == nil {
+		return ErrNilStore
+	}
+	return s.Memory.AppendNode(ManagerEnvID, ManagerMemorySubgraph(), node)
+}
+
+// reportNodeStatus 依据报告正文给出投影状态：FAIL/INCONCLUSIVE 或带命令证据的 PASS 记 accepted；
+// 无命令证据的 PASS 记 disputed。命令证据按 verifier 输出格式约定（命令与退出码）识别。
+func reportNodeStatus(output string) string {
+	if reportVerdict(output) != "PASS" || hasCommandEvidence(output) {
+		return ctxgraph.NodeStatusAccepted
+	}
+	return ctxgraph.NodeStatusDisputed
+}
+
+func reportVerdict(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		for _, prefix := range []string{"结论:", "结论："} {
+			verdict, ok := strings.CutPrefix(trimmed, prefix)
+			if !ok {
+				continue
+			}
+			verdict = strings.TrimSpace(verdict)
+			switch verdict {
+			case "PASS", "FAIL", "INCONCLUSIVE":
+				return verdict
+			}
+		}
+	}
+	return ""
+}
+
+func hasCommandEvidence(output string) bool {
+	for _, marker := range []string{"退出码", "exit code", "exit_code", "exitCode", "Exit Code", "exit status"} {
+		if strings.Contains(output, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s Stores) projectManagerNode(node ctxgraph.Node) error {
@@ -123,11 +173,12 @@ func (s Stores) MergeInto(from, memoryInto, filesInto string) error {
 
 // DiscardFiles 删除一次性文件环境及其仍在运行的命令。
 func (s Stores) DiscardFiles(envID string) error {
+	var err error
 	if s.Exec != nil {
-		s.Exec.Reap(envID)
+		err = s.Exec.Reap(envID)
 	}
 	if s.Files == nil {
-		return nil
+		return err
 	}
-	return s.Files.Discard(envID)
+	return errors.Join(err, s.Files.Discard(envID))
 }

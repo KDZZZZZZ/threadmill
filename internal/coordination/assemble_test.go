@@ -599,7 +599,7 @@ func TestNewManagerLoopReplacePendingMutatesGraph(t *testing.T) {
 	if !strings.HasPrefix(request.SystemPrompt, "yaml manager") {
 		t.Fatalf("system prompt = %q, want prefix yaml manager", request.SystemPrompt)
 	}
-	if !strings.Contains(request.SystemPrompt, "当前协调图：") {
+	if !strings.Contains(request.SystemPrompt, "当前协调图（JSON：") {
 		t.Fatalf("system prompt = %q, want injected graph", request.SystemPrompt)
 	}
 	if !hasTool(request.Tools, coordReplacePendingName) {

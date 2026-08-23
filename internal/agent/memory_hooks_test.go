@@ -9,8 +9,36 @@ import (
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	"github.com/KDZZZZZZ/threadmill/internal/env"
+	"github.com/KDZZZZZZ/threadmill/internal/event"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
+
+func TestHiddenCostProviderForwardsStreamActivity(t *testing.T) {
+	t.Parallel()
+
+	var got []bool
+	provider := hiddenCostProvider{
+		inner: modelFunc(func(ctx context.Context, _ Request) (AssistantMessage, error) {
+			sink := event.DeltaActivitySink(ctx)
+			if sink == nil {
+				t.Fatal("missing stream activity sink")
+			}
+			sink(false)
+			sink(true)
+			return AssistantMessage{Usage: &Usage{TotalTokens: 7}}, nil
+		}),
+		activity: func(text bool) { got = append(got, text) },
+	}
+	if _, err := provider.Generate(context.Background(), Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] || !got[1] {
+		t.Fatalf("stream activity = %v, want [false true]", got)
+	}
+	if provider.tokens != 7 {
+		t.Fatalf("tokens = %d, want 7", provider.tokens)
+	}
+}
 
 func TestAssembleRequestOmitsSubscribedMemoryWithoutHook(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

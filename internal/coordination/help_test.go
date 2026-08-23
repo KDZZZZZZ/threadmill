@@ -198,6 +198,72 @@ func TestHelpRequestRestoresConfiguredChildren(t *testing.T) {
 	}
 }
 
+func TestDeclinedHelpRequestRestoresWithoutNotifyingManagerAgain(t *testing.T) {
+	path := t.TempDir() + "/graph.json"
+	first, err := OpenGraph(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := first.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "root"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := snap.Tasks[0]
+	notified := make(chan string, 1)
+	tools := first.HelpTools(func(message string) { notified <- message })
+	first.help.bind(helpTestRunner(first, nil))
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result := make(chan agenttool.Output, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		out, err := tools[coordRequestHelpName].Execute(
+			agenttool.WithAgentID(ctx, task.Planner.ID),
+			agenttool.Call{ID: "call-1", Name: coordRequestHelpName, Arguments: json.RawMessage(`{"reason":"need evidence"}`)},
+		)
+		result <- out
+		errCh <- err
+	}()
+	message := <-notified
+	requestID, ok := ParseHelpRequestID(message)
+	if !ok {
+		t.Fatalf("ParseHelpRequestID(%q) did not find request", message)
+	}
+	if err := first.DeclineHelp(requestID); err != nil {
+		t.Fatal(err)
+	}
+	out := <-result
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Content, "未提供帮助") {
+		t.Fatalf("declined request output = %q", out.Content)
+	}
+
+	second, err := OpenGraph(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTools := second.HelpTools(func(string) { t.Fatal("declined request notified manager again") })
+	second.help.bind(helpTestRunner(second, nil))
+	out, err = secondTools[coordRequestHelpName].Execute(
+		agenttool.WithAgentID(ctx, task.Planner.ID),
+		agenttool.Call{ID: "call-1", Name: coordRequestHelpName, Arguments: json.RawMessage(`{"reason":"need evidence"}`)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Content, "未提供帮助") {
+		t.Fatalf("restored declined request output = %q", out.Content)
+	}
+	if got := len(second.Snapshot().Tasks); got != 1 {
+		t.Fatalf("restored tasks = %d, want no helper task", got)
+	}
+}
+
 func TestRegularJoinLeavesConfiguredHelpForRequestTool(t *testing.T) {
 	t.Parallel()
 

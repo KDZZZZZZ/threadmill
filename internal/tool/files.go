@@ -91,13 +91,13 @@ func (t fileTool) Definition() Definition {
 	case fileGrepName:
 		return Definition{
 			Name:        fileGrepName,
-			Description: "在工作区文件中搜索模式。进程内走 FileView 的 List/Read，不调用 rg。",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string","description":"搜索模式（正则或字面量）"},"path":{"type":"string","description":"搜索的文件或目录，默认当前目录"},"glob":{"type":"string","description":"按 glob 过滤文件"},"ignoreCase":{"type":"boolean","description":"忽略大小写"},"literal":{"type":"boolean","description":"把 pattern 当字面量"},"context":{"type":"integer","description":"匹配行前后各显示的行数"},"limit":{"type":"integer","description":"最多返回的匹配数，默认 100"}},"required":["pattern"],"additionalProperties":false}`),
+			Description: "在工作区文件中搜索。path 只接受一个文件或目录，不能用空格、竖线或 glob 拼多个路径；需要搜索多个位置时省略 path 从根目录搜索并用 glob 过滤，或分次调用。默认跳过 .git 和 node_modules，显式把 path 指到其中时仍可搜索。pattern 默认是 Go 正则；搜索包含括号、方括号等代码文本时优先设 literal=true，只有确实需要正则时才省略。进程内走 FileView 的 List/Read，不调用 rg。",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string","description":"搜索模式，默认按 Go 正则解释"},"path":{"type":"string","description":"单个搜索文件或目录，默认当前目录；不接受多路径或 glob"},"glob":{"type":"string","description":"按 glob 过滤文件"},"ignoreCase":{"type":"boolean","description":"忽略大小写"},"literal":{"type":"boolean","description":"把 pattern 当字面量；搜索代码片段时优先使用"},"context":{"type":"integer","description":"匹配行前后各显示的行数"},"limit":{"type":"integer","description":"最多返回的匹配数，默认 100"}},"required":["pattern"],"additionalProperties":false}`),
 		}
 	default:
 		return Definition{
 			Name:        fileFindName,
-			Description: "按 glob 查找文件。进程内走 FileView，不调用 fd。匹配相对搜索根的路径。",
+			Description: "按 glob 查找文件。默认跳过 .git 和 node_modules，显式把 path 指到其中时仍可查找。进程内走 FileView，不调用 fd。匹配相对搜索根的路径。",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string","description":"glob 模式，例如 *.go"},"path":{"type":"string","description":"搜索目录，默认当前目录"},"limit":{"type":"integer","description":"最多返回的路径数，默认 1000"}},"required":["pattern"],"additionalProperties":false}`),
 		}
 	}
@@ -515,6 +515,9 @@ func walkDir(ctx context.Context, files env.FileView, root, dir string, contents
 		}
 		full := joinFilePath(dir, ent.Name)
 		if ent.IsDir {
+			if skipSearchDir(root, full) {
+				continue
+			}
 			if err := walkDir(ctx, files, root, full, contents, fn); err != nil {
 				return err
 			}
@@ -535,6 +538,23 @@ func walkDir(ctx context.Context, files env.FileView, root, dir string, contents
 		}
 	}
 	return nil
+}
+
+func skipSearchDir(root, dir string) bool {
+	if hasDependencyDir(root) {
+		return false
+	}
+	base := path.Base(strings.ReplaceAll(dir, "\\", "/"))
+	return base == ".git" || base == "node_modules"
+}
+
+func hasDependencyDir(name string) bool {
+	for part := range strings.SplitSeq(strings.ReplaceAll(name, "\\", "/"), "/") {
+		if part == ".git" || part == "node_modules" {
+			return true
+		}
+	}
+	return false
 }
 
 func appendBoundedLine(hits []string, line string, used int) ([]string, bool, bool) {

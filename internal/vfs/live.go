@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Materialize 把 env 的可见树落到 live 目录。已物化则原样返回。
@@ -43,9 +45,18 @@ func (s *Store) Materialize(envID string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("vfs: materialize: %w", err)
 	}
-	if err := copyTree(base, live); err != nil {
+	copyStarted := time.Now()
+	copyErr := copyTree(base, live)
+	s.mu.Lock()
+	s.materializeCopies++
+	s.materializeCopyDuration += time.Since(copyStarted)
+	if copyErr != nil {
+		s.materializeCopyErrors++
+	}
+	s.mu.Unlock()
+	if copyErr != nil {
 		os.RemoveAll(live)
-		return "", err
+		return "", copyErr
 	}
 	for _, item := range blobs {
 		if err := applyLive(live, item.path, item.b); err != nil {
@@ -90,7 +101,17 @@ func (s *Store) Absorb(envID string) error {
 		return nil
 	}
 
-	liveFiles, err := walkRegularFiles(live)
+	s.mu.Lock()
+	if _, ok := s.lives[envID]; !ok {
+		s.mu.Unlock()
+		return nil
+	}
+	before, err := s.visibleRegularFiles(envID)
+	s.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("vfs: absorb: %w", err)
+	}
+	liveFiles, err := walkRegularFiles(live, before)
 	if err != nil {
 		return fmt.Errorf("vfs: absorb: %w", err)
 	}
@@ -100,22 +121,21 @@ func (s *Store) Absorb(envID string) error {
 	if _, ok := s.lives[envID]; !ok {
 		return nil
 	}
-	before, err := s.visibleRegularFiles(envID)
-	if err != nil {
-		return fmt.Errorf("vfs: absorb: %w", err)
-	}
 	dst := s.ensure(envID)
 	for path := range before {
 		if _, ok := liveFiles[path]; !ok {
 			applyBlob(dst, path, blob{tombstone: true})
 		}
 	}
-	for path, data := range liveFiles {
+	for path, current := range liveFiles {
 		old, existed := before[path]
-		if existed && bytes.Equal(old, data) {
+		if existed && snapshotsEqual(old, current) {
 			continue
 		}
-		applyBlob(dst, path, blob{data: data})
+		applyBlob(dst, path, blob{
+			data:       current.data,
+			executable: current.executable,
+		})
 	}
 	return nil
 }
@@ -194,14 +214,23 @@ func (s *Store) overlayBlobs(envID string) []overlayFile {
 	return out
 }
 
-// walkRegularFiles 扫 live 树并读出每个文件的内容。
+type fileSnapshot struct {
+	data       []byte
+	source     string
+	executable bool
+}
+
+// walkRegularFiles 扫 live 树并读出每个变更候选的内容。
 // overlay 只存路径到字节（和删除标记），不跟踪 live inode。Absorb 用这份
 // 内容和 overlay+host 的可见树做比对，只把增删改写回 overlay，所以必须读字节，
 // 不能只看文件名。
-// 仅允许常规普通文件；发现 FIFO、socket、设备等特殊文件或文件/总大小超限时返回错误。
-func walkRegularFiles(root string) (map[string][]byte, error) {
-	out := map[string][]byte{}
+// 未改变的大型 base 文件通过内容摘要确认，不进入 overlay 限额。
+func walkRegularFiles(root string, before map[string]fileSnapshot) (map[string]fileSnapshot, error) {
+	out := map[string]fileSnapshot{}
 	var totalSize int64
+	compareA := make([]byte, 32*1024)
+	compareB := make([]byte, len(compareA))
+	ignored := gitIgnoredPaths(root)
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -224,6 +253,13 @@ func walkRegularFiles(root string) (map[string][]byte, error) {
 		if filepath.IsAbs(rel) || !filepath.IsLocal(rel) || escapesRoot(root, path) {
 			return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
 		}
+		if directory, ok := ignored[rel]; ok {
+			retainIgnoredBase(out, before, rel)
+			if directory && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		mode := d.Type()
 		if mode&os.ModeSymlink != 0 || d.IsDir() {
 			return nil
@@ -237,19 +273,49 @@ func walkRegularFiles(root string) (map[string][]byte, error) {
 		if err != nil {
 			return err
 		}
+		executable := info.Mode().Perm()&0o111 != 0
+		old, existed := before[rel]
+		if existed && old.source != "" {
+			sourceInfo, err := os.Stat(old.source)
+			if err != nil {
+				return err
+			}
+			old.executable = sourceInfo.Mode().Perm()&0o111 != 0
+			if old.executable == executable {
+				equal, err := equalFileContents(
+					path,
+					info,
+					old.source,
+					sourceInfo,
+					compareA,
+					compareB,
+				)
+				if err != nil {
+					return err
+				}
+				if equal {
+					out[rel] = old
+					return nil
+				}
+			}
+		}
 		if info.Size() > MaxFileSize {
 			return fmt.Errorf("%w: %q (%d > %d)", ErrFileTooLarge, rel, info.Size(), MaxFileSize)
-		}
-		totalSize += info.Size()
-		if totalSize > MaxTotalSize {
-			return fmt.Errorf("%w: limit %d", ErrTotalSizeExceeded, MaxTotalSize)
 		}
 
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		out[filepath.ToSlash(rel)] = cloneBytes(data)
+		current := fileSnapshot{data: data, executable: executable}
+		out[rel] = current
+		if existed && snapshotsEqual(old, current) {
+			return nil
+		}
+		totalSize += info.Size()
+		if totalSize > MaxTotalSize {
+			return fmt.Errorf("%w: limit %d", ErrTotalSizeExceeded, MaxTotalSize)
+		}
 		return nil
 	})
 	if err != nil {
@@ -258,12 +324,54 @@ func walkRegularFiles(root string) (map[string][]byte, error) {
 	return out, nil
 }
 
-func (s *Store) visibleRegularFiles(envID string) (map[string][]byte, error) {
-	candidates := map[string]struct{}{}
+func gitIgnoredPaths(root string) map[string]bool {
+	cmd := osexec.Command(
+		"git",
+		"-c", "core.fsmonitor=false",
+		"-c", "core.excludesFile="+os.DevNull,
+		"-C", root,
+		"ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory",
+	)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	ignored := make(map[string]bool)
+	for _, item := range bytes.Split(output, []byte{0}) {
+		if len(item) == 0 {
+			continue
+		}
+		directory := item[len(item)-1] == '/'
+		rel := filepath.ToSlash(strings.TrimSuffix(string(item), "/"))
+		if rel == "" || filepath.IsAbs(rel) || !filepath.IsLocal(rel) {
+			continue
+		}
+		ignored[rel] = directory
+	}
+	return ignored
+}
+
+func retainIgnoredBase(
+	out, before map[string]fileSnapshot,
+	rel string,
+) {
+	if old, ok := before[rel]; ok && old.source != "" {
+		out[rel] = old
+	}
+	prefix := rel + "/"
+	for path, old := range before {
+		if old.source != "" && strings.HasPrefix(path, prefix) {
+			out[path] = old
+		}
+	}
+}
+
+func (s *Store) visibleRegularFiles(envID string) (map[string]fileSnapshot, error) {
 	base, err := confinedRoot(s.baseDir)
 	if err != nil {
 		return nil, err
 	}
+	out := map[string]fileSnapshot{}
 	err = filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -292,61 +400,152 @@ func (s *Store) visibleRegularFiles(envID string) (map[string][]byte, error) {
 		if mode.Type() != 0 {
 			return fmt.Errorf("%w: %q (mode %s)", ErrSpecialFile, rel, mode.String())
 		}
-		candidates[filepath.ToSlash(rel)] = struct{}{}
+		out[rel] = fileSnapshot{source: path}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+
+	// Most paths come straight from the read-only base. Only paths touched or
+	// masked by an overlay need the full overlay lookup and content clone.
+	overlayPaths := map[string]struct{}{}
+	overlayParents := map[string]struct{}{}
 	for _, files := range s.overlayMaps(envID) {
 		for path := range files {
 			if isMergeRuntimePath(path) {
 				continue
 			}
-			candidates[path] = struct{}{}
+			overlayPaths[path] = struct{}{}
+			for parent := path; ; {
+				i := strings.LastIndex(parent, "/")
+				if i <= 0 {
+					break
+				}
+				parent = parent[:i]
+				overlayParents[parent] = struct{}{}
+			}
 		}
 	}
-	out := make(map[string][]byte, len(candidates))
+	candidates := make(map[string]struct{}, len(overlayPaths))
+	for path := range overlayPaths {
+		candidates[path] = struct{}{}
+	}
+	for path := range out {
+		_, exact := overlayPaths[path]
+		_, replacedByDir := overlayParents[path]
+		if !exact && !replacedByDir && !hasPathAncestor(overlayPaths, path) {
+			continue
+		}
+		delete(out, path)
+		candidates[path] = struct{}{}
+	}
 	for path := range candidates {
-		data, ok := s.regularFileContent(envID, path)
+		snapshot, ok := s.regularFileSnapshot(envID, path)
 		if ok {
-			out[path] = data
+			out[path] = snapshot
 		}
 	}
 	return out, nil
 }
 
-func (s *Store) regularFileContent(envID, rel string) ([]byte, bool) {
-	data, tombstone, found := s.lookupBlob(envID, rel)
-	if found {
-		if tombstone {
-			return nil, false
+func hasPathAncestor(paths map[string]struct{}, rel string) bool {
+	for {
+		i := strings.LastIndex(rel, "/")
+		if i <= 0 {
+			return false
 		}
-		return cloneBytes(data), true
+		rel = rel[:i]
+		if _, ok := paths[rel]; ok {
+			return true
+		}
+	}
+}
+
+func (s *Store) regularFileSnapshot(envID, rel string) (fileSnapshot, bool) {
+	b, found := s.lookupBlobValue(envID, rel)
+	if found {
+		if b.tombstone {
+			return fileSnapshot{}, false
+		}
+		return fileSnapshot{
+			data:       cloneBytes(b.data),
+			executable: b.executable,
+		}, true
 	}
 	if s.hasOverlayChildren(envID, rel) {
-		return nil, false
+		return fileSnapshot{}, false
 	}
 	host, err := s.resolveHost(rel)
 	if err != nil {
-		return nil, false
+		return fileSnapshot{}, false
 	}
 	fi, err := os.Stat(host)
-	if err != nil || fi.IsDir() || fi.Mode().Type() != 0 || fi.Size() > MaxFileSize {
-		return nil, false
+	if err != nil || fi.IsDir() || fi.Mode().Type() != 0 {
+		return fileSnapshot{}, false
 	}
-	b, err := os.ReadFile(host)
+	return fileSnapshot{
+		source:     host,
+		executable: fi.Mode().Perm()&0o111 != 0,
+	}, true
+}
+
+func snapshotsEqual(a, b fileSnapshot) bool {
+	if a.executable != b.executable {
+		return false
+	}
+	if a.source != "" || b.source != "" {
+		return a.source != "" && b.source != ""
+	}
+	return bytes.Equal(a.data, b.data)
+}
+
+func equalFileContents(
+	a string,
+	aInfo fs.FileInfo,
+	b string,
+	bInfo fs.FileInfo,
+	aBuf, bBuf []byte,
+) (equal bool, err error) {
+	if aInfo.Size() != bInfo.Size() {
+		return false, nil
+	}
+	aFile, err := os.Open(a)
 	if err != nil {
-		return nil, false
+		return false, err
 	}
-	return b, true
+	defer func() {
+		err = errors.Join(err, aFile.Close())
+	}()
+	bFile, err := os.Open(b)
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		err = errors.Join(err, bFile.Close())
+	}()
+	for {
+		aRead, aErr := io.ReadFull(aFile, aBuf)
+		bRead, bErr := io.ReadFull(bFile, bBuf)
+		if aRead != bRead || !bytes.Equal(aBuf[:aRead], bBuf[:bRead]) {
+			return false, nil
+		}
+		if aErr == nil && bErr == nil {
+			continue
+		}
+		if (errors.Is(aErr, io.EOF) || errors.Is(aErr, io.ErrUnexpectedEOF)) &&
+			(errors.Is(bErr, io.EOF) || errors.Is(bErr, io.ErrUnexpectedEOF)) {
+			return true, nil
+		}
+		return false, errors.Join(aErr, bErr)
+	}
 }
 
 func applyLive(live, rel string, b blob) error {
 	if b.tombstone {
 		return deleteLive(live, rel)
 	}
-	return writeLive(live, rel, b.data)
+	return writeLiveMode(live, rel, b.data, b.executable)
 }
 
 func readLive(live, rel string) ([]byte, error) {
@@ -376,13 +575,38 @@ func writeLive(live, rel string, data []byte) error {
 	if err != nil {
 		return err
 	}
+	executable := false
+	if info, statErr := os.Lstat(dest); statErr == nil {
+		executable = info.Mode().Type() == 0 && info.Mode().Perm()&0o111 != 0
+	} else if !os.IsNotExist(statErr) {
+		return statErr
+	}
+	return writeLiveModeAt(dest, data, executable)
+}
+
+func writeLiveMode(live, rel string, data []byte, executable bool) error {
+	dest, err := createLivePath(live, rel)
+	if err != nil {
+		return err
+	}
+	return writeLiveModeAt(dest, data, executable)
+}
+
+func writeLiveModeAt(dest string, data []byte, executable bool) error {
 	if err := os.RemoveAll(dest); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
 		return err
 	}
-	return os.WriteFile(dest, data, 0o640)
+	return os.WriteFile(dest, data, regularMode(executable))
+}
+
+func regularMode(executable bool) fs.FileMode {
+	if executable {
+		return 0o750
+	}
+	return 0o640
 }
 
 func deleteLive(live, rel string) error {
@@ -578,6 +802,10 @@ func copyWalk(src, dst string) error {
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o750)
 		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
@@ -585,6 +813,10 @@ func copyWalk(src, dst string) error {
 		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 			return err
 		}
-		return os.WriteFile(target, data, 0o640)
+		return os.WriteFile(
+			target,
+			data,
+			regularMode(info.Mode().Perm()&0o111 != 0),
+		)
 	})
 }

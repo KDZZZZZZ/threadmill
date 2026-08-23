@@ -25,13 +25,17 @@ func probeBwrap() bool {
 		"bwrap",
 		"--unshare-user",
 		"--unshare-pid",
-		"--unshare-net",
 		"--die-with-parent",
 		"--bind", dir, "/",
 		"--ro-bind-try", "/usr", "/usr",
 		"--ro-bind-try", "/bin", "/bin",
 		"--ro-bind-try", "/lib", "/lib",
 		"--ro-bind-try", "/lib64", "/lib64",
+		"--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf",
+		"--ro-bind-try", "/etc/hosts", "/etc/hosts",
+		"--ro-bind-try", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
+		"--ro-bind-try", "/etc/ssl/certs", "/etc/ssl/certs",
+		"--ro-bind-try", "/etc/pki", "/etc/pki",
 		"--dev", "/dev",
 		"--proc", "/proc",
 		"--chdir", "/",
@@ -41,26 +45,31 @@ func probeBwrap() bool {
 	return cmd.Run() == nil
 }
 
-func runBwrap(ctx context.Context, live, command string, capBytes int, track func(int)) (env.ExecResult, error) {
+func runBwrap(ctx context.Context, live, tempDir, command string, capBytes int, track func(int)) (env.ExecResult, error) {
 	args := bashArgs(command)
 	cmd := osexec.CommandContext(
 		ctx,
 		"bwrap",
 		"--unshare-user",
 		"--unshare-pid",
-		"--unshare-net",
 		"--die-with-parent",
 		"--bind", live, "/",
+		"--bind", tempDir, "/tmp",
 		"--ro-bind-try", "/usr", "/usr",
 		"--ro-bind-try", "/bin", "/bin",
 		"--ro-bind-try", "/lib", "/lib",
 		"--ro-bind-try", "/lib64", "/lib64",
+		"--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf",
+		"--ro-bind-try", "/etc/hosts", "/etc/hosts",
+		"--ro-bind-try", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
+		"--ro-bind-try", "/etc/ssl/certs", "/etc/ssl/certs",
+		"--ro-bind-try", "/etc/pki", "/etc/pki",
 		"--dev", "/dev",
 		"--proc", "/proc",
 		"--chdir", "/",
 		"--",
 		args[0], args[1], args[2],
 	)
-	cmd.Env = sandboxEnv("/", "/tmp")
+	cmd.Env = networkSandboxEnv("/tmp", "/tmp")
 	return collect(ctx, cmd, capBytes, track)
 }

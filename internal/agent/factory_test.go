@@ -9,6 +9,7 @@ import (
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	"github.com/KDZZZZZZ/threadmill/internal/env"
+	"github.com/KDZZZZZZ/threadmill/internal/event"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -117,7 +118,10 @@ func TestOrganizeSubgraphToolAsksOrganizer(t *testing.T) {
 	resetDefaultStore(t)
 
 	var query string
+	collector := event.NewCollector()
+	events := event.NewBus(collector.Handle)
 	organizer, err := NewSubgraphOrganizer(Config{
+		Events: events,
 		Provider: ignoreOrganize(func(_ context.Context, request Request) (AssistantMessage, error) {
 			if len(request.Messages) > 0 {
 				query = request.Messages[0].Content
@@ -189,6 +193,12 @@ func TestOrganizeSubgraphToolAsksOrganizer(t *testing.T) {
 	}
 	if got, want := requester.subscribedSubgraphs, []string{"sg-old", subgraph.ID}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("subscriptions = %v, want %v", got, want)
+	}
+	metrics := collector.Snapshot()
+	if metrics.MemoryOrganizerRuns != 1 ||
+		metrics.MemoryOrganizerCandidates != 1 ||
+		metrics.MemoryOrganizerSelected != 0 {
+		t.Fatalf("organizer metrics = %#v", metrics)
 	}
 }
 

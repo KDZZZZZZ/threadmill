@@ -45,6 +45,14 @@ func TestNormalizeModelEndError(t *testing.T) {
 	}
 }
 
+func TestModelRetry(t *testing.T) {
+	got := ModelRetry("planner", 2, "stream_server_error")
+	if got.Kind != KindModel || got.Phase != PhaseRetry || got.AgentID != "planner" ||
+		got.Retries != 2 || got.RetryReason != "stream_server_error" {
+		t.Fatalf("got %#v", got)
+	}
+}
+
 func TestNormalizeToolPair(t *testing.T) {
 	start := ToolStart("executor", "bash", "call-1")
 	if start.Kind != KindTool || start.Phase != PhaseStart || start.Name != "bash" || start.CallID != "call-1" {
@@ -82,6 +90,44 @@ func TestDeltaSinkRoundTrip(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 	if DeltaSink(context.Background()) != nil {
+		t.Fatal("empty context should have no sink")
+	}
+}
+
+func TestDeltaActivitySinkRoundTrip(t *testing.T) {
+	var activities []bool
+	ctx := WithDeltaActivitySink(context.Background(), func(text bool) {
+		activities = append(activities, text)
+	})
+	sink := DeltaActivitySink(ctx)
+	if sink == nil {
+		t.Fatal("missing activity sink")
+	}
+	sink(false)
+	sink(true)
+	if len(activities) != 2 || activities[0] || !activities[1] {
+		t.Fatalf("activities = %#v", activities)
+	}
+	if DeltaActivitySink(context.Background()) != nil {
+		t.Fatal("empty context should have no activity sink")
+	}
+}
+
+func TestRetrySinkRoundTrip(t *testing.T) {
+	var reasons []string
+	ctx := WithRetrySink(context.Background(), func(reason string) {
+		reasons = append(reasons, reason)
+	})
+	sink := RetrySink(ctx)
+	if sink == nil {
+		t.Fatal("missing sink")
+	}
+	sink("transport")
+	sink("stream_server_error")
+	if len(reasons) != 2 || reasons[0] != "transport" || reasons[1] != "stream_server_error" {
+		t.Fatalf("reasons = %q", reasons)
+	}
+	if RetrySink(context.Background()) != nil {
 		t.Fatal("empty context should have no sink")
 	}
 }

@@ -27,6 +27,7 @@ const (
 	sandboxNone sandboxKind = iota
 	sandboxBwrap
 	sandboxDocker
+	sandboxExternal
 )
 
 // Config 是执行调度器的槽位、超时和输出上限。
@@ -35,6 +36,8 @@ type Config struct {
 	Timeout        time.Duration
 	OutputCapKB    int
 	ContainerImage string
+	// ExternalSandbox trusts the caller's process boundary for isolation.
+	ExternalSandbox bool
 }
 
 // Scheduler 用信号量限制并发，并把命令跑进某个 env 的 live 目录。
@@ -49,6 +52,7 @@ type Scheduler struct {
 
 	mu       sync.Mutex
 	groups   map[string][]int
+	runtimes map[string]string
 	counters schedulerCounters
 }
 
@@ -70,6 +74,8 @@ type schedulerCounters struct {
 // Stats 是执行槽位、排队和完成情况的并发一致快照。
 type Stats struct {
 	Capacity             int           `json:"capacity"`
+	SandboxBackend       string        `json:"sandbox_backend"`
+	NetworkIsolation     string        `json:"network_isolation"`
 	Queued               int           `json:"queued"`
 	Active               int           `json:"active"`
 	PeakQueued           int           `json:"peak_queued"`
@@ -83,6 +89,7 @@ type Stats struct {
 	WaitDuration         time.Duration `json:"wait_duration"`
 	RunDuration          time.Duration `json:"run_duration"`
 	TrackedProcessGroups int           `json:"tracked_process_groups"`
+	RuntimeDirs          int           `json:"runtime_dirs"`
 }
 
 // New 创建调度器。Slots <= 0 时用 runtime.NumCPU()。
@@ -102,7 +109,11 @@ func New(cfg Config) *Scheduler {
 		outputCap: capBytes,
 		image:     cfg.ContainerImage,
 	}
-	s.sandbox = probeSandbox(cfg.ContainerImage)
+	if cfg.ExternalSandbox {
+		s.sandbox = sandboxExternal
+	} else {
+		s.sandbox = probeSandbox(cfg.ContainerImage)
+	}
 	for range n {
 		s.slots <- struct{}{}
 	}
@@ -121,8 +132,11 @@ func (s *Scheduler) Stats() Stats {
 		tracked += len(groups)
 	}
 	c := s.counters
+	backend, network := s.isolationBoundary()
 	return Stats{
 		Capacity:             s.capacity,
+		SandboxBackend:       backend,
+		NetworkIsolation:     network,
 		Queued:               c.queued,
 		Active:               c.active,
 		PeakQueued:           c.peakQueued,
@@ -136,6 +150,20 @@ func (s *Scheduler) Stats() Stats {
 		WaitDuration:         c.waitDuration,
 		RunDuration:          c.runDuration,
 		TrackedProcessGroups: tracked,
+		RuntimeDirs:          len(s.runtimes),
+	}
+}
+
+func (s *Scheduler) isolationBoundary() (backend, network string) {
+	switch s.sandbox {
+	case sandboxBwrap:
+		return "bwrap", "shared"
+	case sandboxDocker:
+		return "docker", "disabled"
+	case sandboxExternal:
+		return "external", "external"
+	default:
+		return "unavailable", "unavailable"
 	}
 }
 
@@ -195,9 +223,6 @@ func (v execView) Run(ctx context.Context, spec env.Cmd) (result env.ExecResult,
 
 	live, err := v.files.Materialize(v.envID)
 	if err != nil {
-		return env.ExecResult{}, err
-	}
-	if err := os.MkdirAll(filepath.Join(live, "tmp"), 0o750); err != nil {
 		return env.ExecResult{}, err
 	}
 	timeout := spec.Timeout
@@ -274,18 +299,48 @@ func (c *schedulerCounters) recordError(err error) {
 }
 
 func (s *Scheduler) runSandboxed(ctx context.Context, live, command, envID string) (env.ExecResult, error) {
+	defer s.pruneDeadProcessGroups(envID)
 	switch s.sandbox {
 	case sandboxBwrap:
-		return runBwrap(ctx, live, command, s.outputCap, func(pgid int) {
+		runtimeDir, err := s.runtimeDir(envID, live)
+		if err != nil {
+			return env.ExecResult{}, err
+		}
+		return runBwrap(ctx, live, runtimeDir, command, s.outputCap, func(pgid int) {
 			s.track(envID, pgid)
 		})
 	case sandboxDocker:
 		return runDocker(ctx, live, command, s.image, s.outputCap, func(pgid int) {
 			s.track(envID, pgid)
 		})
+	case sandboxExternal:
+		runtimeDir, err := s.runtimeDir(envID, live)
+		if err != nil {
+			return env.ExecResult{}, err
+		}
+		return runExternalSandbox(ctx, live, runtimeDir, command, s.outputCap, func(pgid int) {
+			s.track(envID, pgid)
+		})
 	default:
 		return env.ExecResult{}, ErrSandboxUnavailable
 	}
+}
+
+func (s *Scheduler) runtimeDir(envID, live string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if dir := s.runtimes[envID]; dir != "" {
+		return dir, nil
+	}
+	dir, err := os.MkdirTemp(filepath.Dir(live), ".threadmill-exec-")
+	if err != nil {
+		return "", fmt.Errorf("exec: create runtime dir: %w", err)
+	}
+	if s.runtimes == nil {
+		s.runtimes = make(map[string]string)
+	}
+	s.runtimes[envID] = dir
+	return dir, nil
 }
 
 func (s *Scheduler) track(envID string, pgid int) {
@@ -297,15 +352,43 @@ func (s *Scheduler) track(envID string, pgid int) {
 	s.groups[envID] = append(s.groups[envID], pgid)
 }
 
-// Reap 杀掉该 env 里仍活着的命令进程组。在 task 结束时调用。
-func (s *Scheduler) Reap(envID string) {
+func (s *Scheduler) pruneDeadProcessGroups(envID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	groups := s.groups[envID]
+	live := groups[:0]
+	for _, pgid := range groups {
+		if err := syscall.Kill(-pgid, 0); !errors.Is(err, syscall.ESRCH) {
+			live = append(live, pgid)
+		}
+	}
+	if len(live) == 0 {
+		delete(s.groups, envID)
+		return
+	}
+	s.groups[envID] = live
+}
+
+// Reap 杀掉该 env 里仍活着的命令进程组并删除运行时目录。在 task 结束时调用。
+func (s *Scheduler) Reap(envID string) error {
 	s.mu.Lock()
 	pgids := s.groups[envID]
 	delete(s.groups, envID)
+	runtimeDir := s.runtimes[envID]
+	delete(s.runtimes, envID)
 	s.mu.Unlock()
+	var err error
 	for _, pgid := range pgids {
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		if killErr := syscall.Kill(-pgid, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+			err = errors.Join(err, fmt.Errorf("exec: reap process group %d: %w", pgid, killErr))
+		}
 	}
+	if runtimeDir != "" {
+		if removeErr := os.RemoveAll(runtimeDir); removeErr != nil {
+			err = errors.Join(err, fmt.Errorf("exec: remove runtime dir: %w", removeErr))
+		}
+	}
+	return err
 }
 
 type capBuffer struct {

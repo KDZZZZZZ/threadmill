@@ -29,10 +29,22 @@ func TestShouldCompact(t *testing.T) {
 			expected:      false,
 		},
 		{
+			name:          "below pressure threshold",
+			usage:         &Usage{TotalTokens: 74},
+			contextWindow: 100,
+			expected:      false,
+		},
+		{
+			name:          "at pressure threshold",
+			usage:         &Usage{TotalTokens: 75},
+			contextWindow: 100,
+			expected:      true,
+		},
+		{
 			name:          "at window",
 			usage:         &Usage{TotalTokens: 100},
 			contextWindow: 100,
-			expected:      false,
+			expected:      true,
 		},
 		{
 			name:          "over window",

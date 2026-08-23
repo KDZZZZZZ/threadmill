@@ -33,6 +33,28 @@ func BenchmarkMaterialize50000Files(b *testing.B) {
 	benchmarkMaterializeFiles(b, 50000)
 }
 
+func BenchmarkAbsorbUnchanged32MiB(b *testing.B) {
+	base := b.TempDir()
+	payload := make([]byte, 1<<20)
+	for i := range 32 {
+		if err := os.WriteFile(filepath.Join(base, fmt.Sprintf("file-%02d.bin", i)), payload, 0o640); err != nil {
+			b.Fatal(err)
+		}
+	}
+	store := NewStore(base)
+	if _, err := store.Materialize("env"); err != nil {
+		b.Fatal(err)
+	}
+	b.SetBytes(32 * int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if err := store.Absorb("env"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func benchmarkMaterializeFiles(b *testing.B, count int) {
 	base := b.TempDir()
 	for i := range count {

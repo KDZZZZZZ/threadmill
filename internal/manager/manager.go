@@ -23,14 +23,17 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
+const metricsSnapshotInterval = 30 * time.Second
+
 // Options 启动 manager 所需的工作区、配置和可选依赖。
 type Options struct {
-	Root     string
-	File     provider.FileConfig
-	Provider agent.Provider
-	Output   func(string)
-	OnEvent  event.Handler
-	Logger   *slog.Logger
+	Root       string
+	ConfigPath string
+	File       provider.FileConfig
+	Provider   agent.Provider
+	Output     func(string)
+	OnEvent    event.Handler
+	Logger     *slog.Logger
 }
 
 // Manager 是长命经理加串行任务调度。
@@ -73,7 +76,7 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 	opt.Root = paths.ProjectRoot
 	file := opt.File
 	if file.LLM.Provider == "" {
-		loaded, err := provider.LoadConfig(opt.Root)
+		loaded, err := provider.LoadRuntimeConfig(opt.Root, opt.ConfigPath)
 		if err != nil {
 			return nil, err
 		}
@@ -126,10 +129,11 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 		Memory: memory,
 		Files:  files,
 		Exec: tmexec.New(tmexec.Config{
-			Slots:          file.Exec.Slots,
-			Timeout:        time.Duration(file.Exec.Timeout) * time.Second,
-			OutputCapKB:    file.Exec.OutputCapKB,
-			ContainerImage: file.Exec.ContainerImage,
+			Slots:           file.Exec.Slots,
+			Timeout:         time.Duration(file.Exec.Timeout) * time.Second,
+			OutputCapKB:     file.Exec.OutputCapKB,
+			ContainerImage:  file.Exec.ContainerImage,
+			ExternalSandbox: file.Exec.ExternalSandbox,
 		}),
 	}
 	s.graph.SetProgressStore(progress)
@@ -150,9 +154,10 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 	bus := event.NewBus(s.onEvent, s.metrics.Handle, event.Monitor(logger), opt.OnEvent)
 	s.events = bus
 	overlay := agent.FileOverlay{
-		Tools:   file.Tools,
-		Prompts: file.Prompts,
-		Events:  bus,
+		Tools:    file.Tools,
+		Prompts:  file.Prompts,
+		Events:   bus,
+		Curation: file.Memory.Curation,
 	}
 	overlay.NamedTools = s.graph.HelpTools(s.enqueueManager)
 	s.assemble = coordination.Assemble(
@@ -221,6 +226,13 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 		s.wg.Wait()
 		return nil, err
 	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ticker := time.NewTicker(metricsSnapshotInterval)
+		defer ticker.Stop()
+		s.monitorSnapshots(ctx, ticker.C)
+	}()
 	return s, nil
 }
 
@@ -358,10 +370,16 @@ func (s *Manager) hooks() agent.Hooks {
 			},
 		},
 		AfterTurn: []agent.AfterTurnHook{
-			func(ctx context.Context, _ agent.UserMessage, result agent.TurnResult) error {
+			func(ctx context.Context, user agent.UserMessage, result agent.TurnResult) error {
 				if result.Err != nil && !errors.Is(result.Err, context.Canceled) {
 					s.setErr(result.Err)
 					return nil
+				}
+				if requestID, ok := coordination.ParseHelpRequestID(user.Content); ok {
+					if err := s.graph.DeclineHelp(requestID); err != nil {
+						s.setErr(err)
+						return err
+					}
 				}
 				err := s.runReady(ctx)
 				if err != nil {
@@ -496,36 +514,110 @@ func (s *Manager) logSnapshot() {
 		"uptime", snapshot.Uptime,
 		"pending", snapshot.Pending,
 		"task_running", snapshot.TaskRunning,
+		"tasks_total", snapshot.Tasks.Total,
 		"tasks_active", snapshot.Tasks.Active,
 		"tasks_done", snapshot.Tasks.Done,
 		"tasks_failed", snapshot.Tasks.Failed,
 		"tasks_canceled", snapshot.Tasks.Canceled,
 		"model_completed", snapshot.Events.Model.Completed,
 		"model_errors", snapshot.Events.Model.Errors,
+		"model_active", snapshot.Events.Model.Active,
+		"model_p50", snapshot.Events.Model.Duration.P50,
 		"model_p95", snapshot.Events.Model.Duration.P95,
+		"model_max", snapshot.Events.Model.Duration.Max,
+		"model_ttft_p50", snapshot.Events.Model.TTFT.P50,
 		"model_ttft_p95", snapshot.Events.Model.TTFT.P95,
+		"model_ttft_max", snapshot.Events.Model.TTFT.Max,
+		"model_delta_chunks", snapshot.Events.DeltaChunks,
+		"model_delta_bytes", snapshot.Events.DeltaBytes,
+		"model_stream_chunks", snapshot.Events.StreamChunks,
+		"model_stream_idle", snapshot.Events.ModelStreamIdle,
+		"model_retries", snapshot.Events.ModelRetries,
 		"tokens", snapshot.Events.Tokens,
+		"total_tokens", snapshot.Events.Tokens+snapshot.Events.MemoryTokens,
 		"tool_completed", snapshot.Events.Tool.Completed,
 		"tool_errors", snapshot.Events.Tool.Errors,
+		"tool_active", snapshot.Events.Tool.Active,
+		"tool_p50", snapshot.Events.Tool.Duration.P50,
 		"tool_p95", snapshot.Events.Tool.Duration.P95,
+		"tool_max", snapshot.Events.Tool.Duration.Max,
+		"task_p50", snapshot.Events.Task.Duration.P50,
+		"task_p95", snapshot.Events.Task.Duration.P95,
+		"task_max", snapshot.Events.Task.Duration.Max,
 		"memory_ops_completed", snapshot.Events.Memory.Completed,
 		"memory_ops_errors", snapshot.Events.Memory.Errors,
+		"memory_ops_active", snapshot.Events.Memory.Active,
+		"memory_ops_tokens", snapshot.Events.MemoryTokens,
+		"memory_ops_retries", snapshot.Events.MemoryRetries,
+		"memory_stream_chunks", snapshot.Events.MemoryStreamChunks,
+		"memory_stream_idle", snapshot.Events.MemoryStreamIdle,
+		"memory_ttft_p50", snapshot.Events.Memory.TTFT.P50,
+		"memory_ttft_p95", snapshot.Events.Memory.TTFT.P95,
+		"memory_ttft_max", snapshot.Events.Memory.TTFT.Max,
+		"memory_organizer_runs", snapshot.Events.MemoryOrganizerRuns,
+		"memory_organizer_candidates", snapshot.Events.MemoryOrganizerCandidates,
+		"memory_organizer_selected", snapshot.Events.MemoryOrganizerSelected,
+		"memory_organizer_tokens", snapshot.Events.MemoryOrganizerTokens,
+		"memory_organizer_duration", snapshot.Events.MemoryOrganizerDuration.Total,
+		"memory_organizer_p50", snapshot.Events.MemoryOrganizerDuration.P50,
+		"memory_organizer_p95", snapshot.Events.MemoryOrganizerDuration.P95,
+		"memory_organizer_max", snapshot.Events.MemoryOrganizerDuration.Max,
+		"memory_ops_p50", snapshot.Events.Memory.Duration.P50,
 		"memory_ops_p95", snapshot.Events.Memory.Duration.P95,
+		"memory_ops_max", snapshot.Events.Memory.Duration.Max,
+		"exec_capacity", snapshot.Exec.Capacity,
+		"exec_sandbox_backend", snapshot.Exec.SandboxBackend,
+		"exec_network_isolation", snapshot.Exec.NetworkIsolation,
 		"exec_queued", snapshot.Exec.Queued,
 		"exec_active", snapshot.Exec.Active,
+		"exec_peak_queued", snapshot.Exec.PeakQueued,
 		"exec_peak_active", snapshot.Exec.PeakActive,
+		"exec_requests", snapshot.Exec.Requests,
+		"exec_started", snapshot.Exec.Started,
 		"exec_completed", snapshot.Exec.Completed,
 		"exec_errors", snapshot.Exec.Errors,
+		"exec_canceled", snapshot.Exec.Canceled,
+		"exec_timed_out", snapshot.Exec.TimedOut,
+		"exec_wait_duration", snapshot.Exec.WaitDuration,
+		"exec_run_duration", snapshot.Exec.RunDuration,
+		"exec_tracked_process_groups", snapshot.Exec.TrackedProcessGroups,
+		"exec_runtime_dirs", snapshot.Exec.RuntimeDirs,
 		"vfs_environments", snapshot.VFS.Environments,
 		"vfs_live_dirs", snapshot.VFS.LiveDirs,
+		"vfs_overlay_files", snapshot.VFS.OverlayFiles,
+		"vfs_tombstones", snapshot.VFS.Tombstones,
 		"vfs_overlay_bytes", snapshot.VFS.OverlayBytes,
+		"vfs_materialize_copies", snapshot.VFS.MaterializeCopies,
+		"vfs_materialize_copy_errors", snapshot.VFS.MaterializeCopyErrors,
+		"vfs_materialize_copy_duration", snapshot.VFS.MaterializeCopyDuration,
+		"vfs_handoffs", snapshot.VFS.Handoffs,
 		"memory_environments", snapshot.Memory.Environments,
+		"memory_baselines", snapshot.Memory.Baselines,
+		"memory_subgraphs", snapshot.Memory.Subgraphs,
 		"memory_nodes", snapshot.Memory.Nodes,
 		"memory_edges", snapshot.Memory.Edges,
 		"goroutines", snapshot.Runtime.Goroutines,
 		"heap_alloc", snapshot.Runtime.HeapAlloc,
+		"heap_objects", snapshot.Runtime.HeapObjects,
 		"gc_count", snapshot.Runtime.GCCount,
+		"gc_pause_total", snapshot.Runtime.GCPauseTotal,
 	)
+}
+
+func (s *Manager) monitorSnapshots(ctx context.Context, ticks <-chan time.Time) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-ticks:
+			if !ok {
+				return
+			}
+			if s.Busy() {
+				s.logSnapshot()
+			}
+		}
+	}
 }
 
 func (s *Manager) setErr(err error) {
@@ -561,8 +653,10 @@ func (s *Manager) onEvent(_ context.Context, ev event.RuntimeEvent) {
 
 func formatReport(task coordination.Task, output string, err error, took time.Duration, tokens int) string {
 	body := output
+	label := "verifier 输出"
 	if err != nil {
 		body = err.Error()
+		label = "流程错误"
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "[任务报告] %s · %s · 耗时 %s\n", task.ID, task.Outcome, took.Truncate(time.Second))
@@ -570,7 +664,7 @@ func formatReport(task coordination.Task, output string, err error, took time.Du
 	if tokens > 0 {
 		fmt.Fprintf(&b, "token: %d\n", tokens)
 	}
-	fmt.Fprintf(&b, "verifier 输出:\n%s", body)
+	fmt.Fprintf(&b, "%s:\n%s", label, body)
 	return b.String()
 }
 

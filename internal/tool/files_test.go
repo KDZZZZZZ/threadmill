@@ -260,6 +260,50 @@ func TestGrepMissingRootReturnsError(t *testing.T) {
 	}
 }
 
+func TestSearchSkipsDependenciesUnlessExplicit(t *testing.T) {
+	t.Parallel()
+
+	files := newFakeFiles(map[string]string{
+		"src/main.js":                  "needle",
+		"node_modules/pkg/index.js":    "needle",
+		"packages/x/node_modules/y.js": "needle",
+		".git/config":                  "needle",
+	})
+	tools := BindEnv(env.Open("env-1", nil).WithFiles(files), FileTools())
+
+	out, err := executeNamed(t, tools, "grep", `{"pattern":"needle","literal":true}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Content, "src/main.js") ||
+		strings.Contains(out.Content, "node_modules") ||
+		strings.Contains(out.Content, ".git") {
+		t.Fatalf("default grep = %q", out.Content)
+	}
+	out, err = executeNamed(t, tools, "grep", `{"pattern":"needle","path":"node_modules","literal":true}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Content, "pkg/index.js") {
+		t.Fatalf("explicit dependency grep = %q", out.Content)
+	}
+
+	out, err = executeNamed(t, tools, "find", `{"pattern":"*.js"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Content, "src/main.js") || strings.Contains(out.Content, "node_modules") {
+		t.Fatalf("default find = %q", out.Content)
+	}
+	out, err = executeNamed(t, tools, "find", `{"pattern":"*.js","path":"packages/x/node_modules"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Content, "y.js") {
+		t.Fatalf("explicit dependency find = %q", out.Content)
+	}
+}
+
 func TestFindDoesNotReadFileContents(t *testing.T) {
 	t.Parallel()
 

@@ -24,7 +24,7 @@ type PendingRoot struct {
 
 // PendingSubgraph 是尚未执行切片的完整期望状态；Run 中也可改尚未开始的节点。
 // 根按序号对齐：少于现有根数会失败，多出的从前一个根的 task 环境 fork；
-// spawn 仍按 from/join 匹配。
+// spawn 仍按 from/join 匹配，已完成的辅助分支自动保留。
 type PendingSubgraph struct {
 	Roots  []PendingRoot  `json:"roots,omitempty"`
 	Spawns []PendingSpawn `json:"spawns"`
@@ -196,11 +196,23 @@ func (g *Graph) applyPendingLocked(next PendingSubgraph) error {
 	if len(next.Roots) < len(roots) {
 		return fmt.Errorf("%w: cannot remove root tasks", ErrUnspawnRoot)
 	}
+	for i, want := range next.Roots {
+		if strings.TrimSpace(want.Info) != "" {
+			continue
+		}
+		if i < len(roots) && roots[i].Outcome != OutcomeActive {
+			continue
+		}
+		return fmt.Errorf("%w: root info is required", ErrInvalidPending)
+	}
 	for len(roots) < len(next.Roots) {
 		g.addRootLocked()
 		roots = g.rootTasksLocked()
 	}
 	for i, want := range next.Roots {
+		if roots[i].Outcome != OutcomeActive {
+			continue
+		}
 		g.setInfoLocked(roots[i].ID, want.Info)
 	}
 
@@ -216,6 +228,9 @@ func (g *Graph) applyPendingLocked(next PendingSubgraph) error {
 		if spawn.From == "" || spawn.Join == "" {
 			return fmt.Errorf("%w: spawn from and join are required", ErrInvalidPending)
 		}
+		if strings.TrimSpace(spawn.Info) == "" {
+			return fmt.Errorf("%w: spawn info is required", ErrInvalidPending)
+		}
 		desired[spawnKey{From: spawn.From, Join: spawn.Join, Info: spawn.Info}] = spawn
 	}
 
@@ -225,7 +240,11 @@ func (g *Graph) applyPendingLocked(next PendingSubgraph) error {
 		if !ok {
 			continue
 		}
-		have[spawnKey{From: pair.From, Join: pair.Join, Info: task.Info}] = task.ID
+		key := spawnKey{From: pair.From, Join: pair.Join, Info: task.Info}
+		have[key] = task.ID
+		if task.Outcome != OutcomeActive {
+			desired[key] = PendingSpawn{From: pair.From, Join: pair.Join, Info: task.Info}
+		}
 	}
 	for key, spawn := range desired {
 		if id, ok := have[key]; ok {

@@ -18,21 +18,23 @@ func InjectSubscribedMemory(loop *Loop) AssembleRequestHook {
 	}
 }
 
-// CompactOnOverflow 在用量超过上下文窗口时把旧消息整理进记忆图。
+// CompactOnOverflow 在用量接近上下文窗口时把旧消息整理进记忆图；
+// 整理后按 memory.curation 阈值触发全图深度整理。
 func CompactOnOverflow(loop *Loop) AfterAssistantHook {
 	return func(ctx context.Context, message AssistantMessage) error {
 		if !ShouldCompact(message.Usage, loop.contextWindow) {
 			return nil
 		}
 		keep := keepRecentBudget(loop.contextWindow)
-		return execHiddenErr(loop, ctx, compactMemoryToolName, keepRecentArgs(keep))
+		return compactAndMaybeCurate(ctx, loop, keep)
 	}
 }
 
-// CommitTailOnTurnEnd 在本轮结束时把剩余消息全部写入记忆图。
+// CommitTailOnTurnEnd 在本轮结束时把剩余消息全部写入记忆图；
+// 整理后按 memory.curation 阈值触发全图深度整理。
 func CommitTailOnTurnEnd(loop *Loop) CommitTurnHook {
 	return func(ctx context.Context) error {
-		return execHiddenErr(loop, ctx, compactMemoryToolName, keepRecentArgs(0))
+		return compactAndMaybeCurate(ctx, loop, 0)
 	}
 }
 

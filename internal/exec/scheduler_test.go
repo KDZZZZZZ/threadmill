@@ -202,6 +202,170 @@ func TestSchedulerUnavailableSandbox(t *testing.T) {
 	}
 }
 
+func TestSchedulerStatsReportIsolationBoundary(t *testing.T) {
+	t.Parallel()
+
+	got := New(Config{Slots: 1, ExternalSandbox: true}).Stats()
+	if got.SandboxBackend != "external" || got.NetworkIsolation != "external" {
+		t.Fatalf("Stats() = %#v", got)
+	}
+}
+
+func TestSchedulerBwrapSharesNetwork(t *testing.T) {
+	bin := t.TempDir()
+	bwrap := filepath.Join(bin, "bwrap")
+	script := `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--unshare-net) exit 64 ;;
+		--) shift; exec "$@" ;;
+	esac
+	shift
+done
+exit 65
+`
+	if err := os.WriteFile(bwrap, []byte(script), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("https_proxy", "http://127.0.0.1:43123")
+
+	files := vfs.NewStore(t.TempDir())
+	s := New(Config{Slots: 1})
+	t.Cleanup(func() {
+		if err := s.Reap("env-a"); err != nil {
+			t.Error(err)
+		}
+	})
+	stats := s.Stats()
+	if stats.SandboxBackend != "bwrap" || stats.NetworkIsolation != "shared" {
+		t.Fatalf("Stats() = %#v, want bwrap with shared network", stats)
+	}
+	result, err := s.View("env-a", files).Run(context.Background(), env.Cmd{
+		Command: `test "$https_proxy" = "http://127.0.0.1:43123"`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("Run() = %#v, want inherited network environment", result)
+	}
+}
+
+func TestSchedulerRunsInsideExternalSandbox(t *testing.T) {
+	t.Parallel()
+
+	files := vfs.NewStore(t.TempDir())
+	if err := files.View("env-a").Write("input.txt", []byte("inside")); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{Slots: 1, ExternalSandbox: true})
+	result, err := s.View("env-a", files).Run(
+		context.Background(),
+		env.Cmd{Command: `test "$HOME" != "$PWD" && cat input.txt > output.txt`},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit code = %d, output = %q", result.ExitCode, result.Output)
+	}
+	if got := s.Stats().TrackedProcessGroups; got != 0 {
+		t.Fatalf("tracked process groups after command exit = %d, want 0", got)
+	}
+	if err := s.Reap("env-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.Release("env-a"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := files.View("env-a").Read("output.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "inside" {
+		t.Fatalf("output.txt = %q, want inside", got)
+	}
+}
+
+func TestExternalSandboxUsesPerEnvironmentTemp(t *testing.T) {
+	t.Parallel()
+
+	marker := filepath.Base(t.TempDir())
+	defer os.Remove(filepath.Join(os.TempDir(), marker))
+	files := vfs.NewStore(t.TempDir())
+	s := New(Config{Slots: 1, ExternalSandbox: true})
+	t.Cleanup(func() {
+		if err := errors.Join(s.Reap("env-a"), s.Reap("env-b")); err != nil {
+			t.Error(err)
+		}
+	})
+	first, err := s.View("env-a", files).Run(context.Background(), env.Cmd{
+		Command: `touch "$TMPDIR/` + marker + `"`,
+	})
+	if err != nil || first.ExitCode != 0 {
+		t.Fatalf("first Run() = %#v, %v", first, err)
+	}
+	reused, err := s.View("env-a", files).Run(context.Background(), env.Cmd{
+		Command: `test -e "$TMPDIR/` + marker + `"`,
+	})
+	if err != nil || reused.ExitCode != 0 {
+		t.Fatalf("second Run() in same environment = %#v, %v; temp state was not reused", reused, err)
+	}
+	if err := files.Fork("env-a", "env-b"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.View("env-b", files).Run(context.Background(), env.Cmd{
+		Command: `test ! -e "$TMPDIR/` + marker + `"`,
+	})
+	if err != nil || second.ExitCode != 0 {
+		t.Fatalf("second Run() = %#v, %v; temp state crossed environments", second, err)
+	}
+}
+
+func TestExternalSandboxForwardsOnlyNetworkEnvironment(t *testing.T) {
+	networkEnvironment := map[string]string{
+		"all_proxy":           "socks5://127.0.0.1:43001",
+		"http_proxy":          "http://127.0.0.1:43002",
+		"https_proxy":         "http://127.0.0.1:43003",
+		"no_proxy":            "localhost,127.0.0.1",
+		"ALL_PROXY":           "socks5://127.0.0.1:43004",
+		"HTTP_PROXY":          "http://127.0.0.1:43005",
+		"HTTPS_PROXY":         "http://127.0.0.1:43006",
+		"NO_PROXY":            "example.test",
+		"CURL_CA_BUNDLE":      "/operator/curl-ca.pem",
+		"GIT_SSL_CAINFO":      "/operator/git-ca.pem",
+		"NODE_EXTRA_CA_CERTS": "/operator/node-ca.pem",
+		"REQUESTS_CA_BUNDLE":  "/operator/requests-ca.pem",
+		"SSL_CERT_DIR":        "/operator/certs",
+		"SSL_CERT_FILE":       "/operator/ca.pem",
+	}
+	checks := make([]string, 0, len(networkEnvironment)+1)
+	for name, value := range networkEnvironment {
+		t.Setenv(name, value)
+		checks = append(checks, `test "$`+name+`" = "`+value+`"`)
+	}
+	t.Setenv("THREADMILL_TEST_SECRET", "must-not-cross")
+	checks = append(checks, `test -z "$THREADMILL_TEST_SECRET"`)
+
+	files := vfs.NewStore(t.TempDir())
+	s := New(Config{Slots: 1, ExternalSandbox: true})
+	t.Cleanup(func() {
+		if err := s.Reap("env-a"); err != nil {
+			t.Error(err)
+		}
+	})
+	result, err := s.View("env-a", files).Run(context.Background(), env.Cmd{
+		Command: strings.Join(checks, " && "),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("Run() = %#v, want network environment without arbitrary host variables", result)
+	}
+}
+
 func TestSchedulerReapKillsTrackedProcessGroup(t *testing.T) {
 	t.Parallel()
 
@@ -213,12 +377,37 @@ func TestSchedulerReapKillsTrackedProcessGroup(t *testing.T) {
 	pgid := cmd.Process.Pid
 	s := New(Config{Slots: 1})
 	s.track("env-a", pgid)
-	s.Reap("env-a")
+	if err := s.Reap("env-a"); err != nil {
+		t.Fatal(err)
+	}
 	if err := cmd.Wait(); err == nil {
 		t.Fatal("sleep still running after Reap")
 	}
 	if err := syscall.Kill(-pgid, 0); err == nil {
 		t.Fatal("process group still alive after Reap")
+	}
+}
+
+func TestSchedulerKeepsLiveBackgroundProcessGroupForReap(t *testing.T) {
+	t.Parallel()
+
+	s := New(Config{Slots: 1, ExternalSandbox: true})
+	files := vfs.NewStore(t.TempDir())
+	result, err := s.View("env-a", files).Run(
+		context.Background(),
+		env.Cmd{Command: "sleep 30 &"},
+	)
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("Run() = %#v, %v", result, err)
+	}
+	if got := s.Stats().TrackedProcessGroups; got != 1 {
+		t.Fatalf("tracked process groups with background child = %d, want 1", got)
+	}
+	if err := s.Reap("env-a"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Stats().TrackedProcessGroups; got != 0 {
+		t.Fatalf("tracked process groups after Reap = %d, want 0", got)
 	}
 }
 

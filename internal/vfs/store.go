@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // ErrInvalidPath 表示路径越出工作区或不是相对路径。
@@ -71,8 +72,9 @@ type DirEnt struct {
 }
 
 type blob struct {
-	data      []byte
-	tombstone bool
+	data       []byte
+	tombstone  bool
+	executable bool
 }
 
 type layer struct {
@@ -89,6 +91,11 @@ type Store struct {
 	envs     map[string]*layer
 	lives    map[string]string
 	merges   map[string]MergeManifest
+
+	materializeCopies       uint64
+	materializeCopyErrors   uint64
+	materializeCopyDuration time.Duration
+	handoffs                uint64
 }
 
 // Stats 是 VFS 当前持有的有界资源清单。
@@ -98,6 +105,11 @@ type Stats struct {
 	OverlayFiles int   `json:"overlay_files"`
 	Tombstones   int   `json:"tombstones"`
 	OverlayBytes int64 `json:"overlay_bytes"`
+
+	MaterializeCopies       uint64        `json:"materialize_copies"`
+	MaterializeCopyErrors   uint64        `json:"materialize_copy_errors"`
+	MaterializeCopyDuration time.Duration `json:"materialize_copy_duration"`
+	Handoffs                uint64        `json:"handoffs"`
 }
 
 // NewStore 以只读 host 树为 base。写入不会改 baseDir。
@@ -137,8 +149,12 @@ func (s *Store) Stats() Stats {
 	defer s.mu.Unlock()
 
 	stats := Stats{
-		Environments: len(s.envs),
-		LiveDirs:     len(s.lives),
+		Environments:            len(s.envs),
+		LiveDirs:                len(s.lives),
+		MaterializeCopies:       s.materializeCopies,
+		MaterializeCopyErrors:   s.materializeCopyErrors,
+		MaterializeCopyDuration: s.materializeCopyDuration,
+		Handoffs:                s.handoffs,
 	}
 	for _, layer := range s.envs {
 		for _, item := range layer.files {
@@ -205,6 +221,68 @@ func (s *Store) Fork(parentID, childID string) error {
 		_, err := s.Materialize(childID)
 		return err
 	}
+	return nil
+}
+
+// Handoff forks parent into child by moving an existing materialized workspace.
+// It is for a single successor after parent has stopped running; when no live
+// workspace exists it falls back to an ordinary logical fork.
+func (s *Store) Handoff(parentID, childID string) error {
+	if childID == "" || childID == parentID {
+		return nil
+	}
+
+	s.mu.Lock()
+	if _, exists := s.envs[childID]; exists {
+		s.mu.Unlock()
+		return nil
+	}
+	if live, ok, err := s.persistedLive(childID); err != nil {
+		s.mu.Unlock()
+		return err
+	} else if ok {
+		s.envs[childID] = &layer{
+			parentID: parentID,
+			files:    make(map[string]blob),
+			baseline: s.snapshotOverlays(parentID),
+		}
+		s.lives[childID] = live
+		s.mu.Unlock()
+		return nil
+	}
+
+	live := s.lives[parentID]
+	if live == "" {
+		var ok bool
+		var err error
+		live, ok, err = s.persistedLive(parentID)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		if !ok {
+			s.mu.Unlock()
+			return s.Fork(parentID, childID)
+		}
+	}
+
+	childLive := live
+	if s.liveRoot != "" {
+		childLive = s.persistentLivePath(childID)
+		if err := os.Rename(live, childLive); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("vfs: handoff persistent environment: %w", err)
+		}
+	}
+	s.envs[childID] = &layer{
+		parentID: parentID,
+		files:    make(map[string]blob),
+		baseline: s.snapshotOverlays(parentID),
+	}
+	delete(s.lives, parentID)
+	s.lives[childID] = childLive
+	s.handoffs++
+	s.mu.Unlock()
 	return nil
 }
 
@@ -618,7 +696,7 @@ func copyMergeSide(root, dstRoot, rel string) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
 		return false, err
 	}
-	if err := os.WriteFile(dst, data, 0o640); err != nil {
+	if err := os.WriteFile(dst, data, regularMode(info.Mode().Perm()&0o111 != 0)); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -635,7 +713,7 @@ func copyMergeBlob(dstRoot, rel string, b blob) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
 		return false, err
 	}
-	if err := os.WriteFile(dst, b.data, 0o640); err != nil {
+	if err := os.WriteFile(dst, b.data, regularMode(b.executable)); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -665,21 +743,28 @@ func isMergeRuntimePath(path string) bool {
 }
 
 type content struct {
-	exists    bool
-	tombstone bool
-	data      []byte
-	maskFrom  string
-	maskFile  bool
+	exists     bool
+	tombstone  bool
+	executable bool
+	data       []byte
+	maskFrom   string
+	maskFile   bool
 }
 
 func overlayContent(b blob) content {
-	return content{exists: true, tombstone: b.tombstone, data: b.data}
+	return content{
+		exists:     true,
+		tombstone:  b.tombstone,
+		executable: b.executable,
+		data:       b.data,
+	}
 }
 
 func maskedContent(prefix string, b blob) content {
 	c := content{exists: true, tombstone: true, maskFrom: prefix, maskFile: !b.tombstone}
 	if !b.tombstone {
 		c.data = cloneBytes(b.data)
+		c.executable = b.executable
 	}
 	return c
 }
@@ -746,11 +831,19 @@ func (s *Store) lookupHost(rel string) content {
 	if err != nil {
 		return content{}
 	}
+	info, err := os.Stat(host)
+	if err != nil || info.IsDir() || info.Mode().Type() != 0 {
+		return content{}
+	}
 	data, err := os.ReadFile(host)
 	if err != nil {
 		return content{}
 	}
-	return content{exists: true, data: data}
+	return content{
+		exists:     true,
+		executable: info.Mode().Perm()&0o111 != 0,
+		data:       data,
+	}
 }
 
 func (s *Store) liveFileAncestor(envID, rel string) bool {
@@ -806,7 +899,7 @@ func contentEqual(a, b content) bool {
 			return false
 		}
 		if a.maskFile {
-			return bytes.Equal(a.data, b.data)
+			return a.executable == b.executable && bytes.Equal(a.data, b.data)
 		}
 		return true
 	}
@@ -822,7 +915,7 @@ func contentEqual(a, b content) bool {
 	if a.tombstone {
 		return true
 	}
-	return bytes.Equal(a.data, b.data)
+	return a.executable == b.executable && bytes.Equal(a.data, b.data)
 }
 
 func exactHidden(c content) bool {
@@ -833,7 +926,7 @@ func cloneBlob(b blob) blob {
 	if b.tombstone {
 		return blob{tombstone: true}
 	}
-	return blob{data: cloneBytes(b.data)}
+	return blob{data: cloneBytes(b.data), executable: b.executable}
 }
 
 func cloneFiles(src map[string]blob) map[string]blob {
@@ -909,7 +1002,14 @@ func (v *View) Write(path string, data []byte) error {
 	}
 	v.store.mu.Lock()
 	defer v.store.mu.Unlock()
-	v.store.ensure(v.envID).files[rel] = blob{data: cloneBytes(data)}
+	current := v.store.lookupContent(v.envID, rel)
+	v.store.ensure(v.envID).files[rel] = blob{
+		data: cloneBytes(data),
+		executable: current.exists &&
+			!current.tombstone &&
+			current.maskFrom == "" &&
+			current.executable,
+	}
 	return nil
 }
 
@@ -1028,15 +1128,20 @@ func (s *Store) ensure(envID string) *layer {
 }
 
 func (s *Store) lookupBlob(envID, rel string) ([]byte, bool, bool) {
+	b, found := s.lookupBlobValue(envID, rel)
+	return b.data, b.tombstone, found
+}
+
+func (s *Store) lookupBlobValue(envID, rel string) (blob, bool) {
 	for _, files := range s.overlayMaps(envID) {
 		if b, ok := files[rel]; ok {
-			return b.data, b.tombstone, true
+			return b, true
 		}
 		if _, ok := filesMask(files, rel); ok {
-			return nil, true, true
+			return blob{tombstone: true}, true
 		}
 	}
-	return nil, false, false
+	return blob{}, false
 }
 
 func layerMasks(l *layer, rel string) bool {

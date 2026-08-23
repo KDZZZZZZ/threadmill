@@ -13,8 +13,8 @@ import (
 
 func TestMemoryToolsDefinitions(t *testing.T) {
 	tools := MemoryTools(func() ctxgraph.Copy { return ctxgraph.Copy{} }, nil)
-	if len(tools) != 5 {
-		t.Fatalf("MemoryTools() len = %d, want 5", len(tools))
+	if len(tools) != 6 {
+		t.Fatalf("MemoryTools() len = %d, want 6", len(tools))
 	}
 
 	want := []string{
@@ -23,6 +23,7 @@ func TestMemoryToolsDefinitions(t *testing.T) {
 		"memory_sources_of",
 		"memory_nodes_in",
 		"memory_add_to_subgraph",
+		"memory_apply",
 	}
 	for i, tool := range tools {
 		def := tool.Definition()

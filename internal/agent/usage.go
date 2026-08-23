@@ -10,12 +10,12 @@ type Usage struct {
 	TotalTokens      int
 }
 
-// ShouldCompact 在已配置窗口且用量超过窗口时触发压缩。
+// ShouldCompact 在已配置窗口接近耗尽时触发压缩，为下一次模型输出留出空间。
 func ShouldCompact(usage *Usage, contextWindow int) bool {
 	if usage == nil || contextWindow <= 0 {
 		return false
 	}
-	return usage.TotalTokens > contextWindow
+	return usage.TotalTokens >= max(1, softContextThreshold(contextWindow))
 }
 
 // cloneUsage 复制可选用量，避免 Hook 或调用方修改内部历史。

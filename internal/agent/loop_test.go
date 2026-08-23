@@ -586,6 +586,101 @@ func TestLoopPublishesModelDelta(t *testing.T) {
 	}
 }
 
+func TestLoopPublishesModelRetries(t *testing.T) {
+	bus, got := recordingBus()
+	loop, err := NewLoop(Config{
+		AgentID: "manager",
+		Provider: modelFunc(func(ctx context.Context, _ Request) (AssistantMessage, error) {
+			sink := event.RetrySink(ctx)
+			if sink == nil {
+				t.Fatal("missing retry sink")
+			}
+			sink("transport")
+			sink("stream_server_error")
+			return AssistantMessage{Content: "done", Model: "stub-model"}, nil
+		}),
+		Events: bus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loop.Ask(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if len(*got) != 4 || (*got)[0].Phase != event.PhaseStart ||
+		(*got)[1].Phase != event.PhaseRetry || (*got)[1].Retries != 1 ||
+		(*got)[1].RetryReason != "transport" ||
+		(*got)[2].Phase != event.PhaseRetry || (*got)[2].Retries != 2 ||
+		(*got)[2].RetryReason != "stream_server_error" ||
+		(*got)[3].Phase != event.PhaseEnd || (*got)[3].Retries != 2 {
+		t.Fatalf("events = %#v, want start, two retries, and end", *got)
+	}
+}
+
+func TestLoopMarksBackgroundDeltasReplayableAndAllStreamsObservable(t *testing.T) {
+	for _, test := range []struct {
+		agentID string
+		want    bool
+	}{
+		{agentID: "manager", want: false},
+		{agentID: "planner", want: true},
+	} {
+		t.Run(test.agentID, func(t *testing.T) {
+			loop, err := NewLoop(Config{
+				AgentID: test.agentID,
+				Provider: modelFunc(func(ctx context.Context, _ Request) (AssistantMessage, error) {
+					if got := event.ReplayableDeltas(ctx); got != test.want {
+						t.Fatalf("ReplayableDeltas() = %v, want %v", got, test.want)
+					}
+					if event.DeltaActivitySink(ctx) == nil {
+						t.Fatal("missing delta activity sink")
+					}
+					return AssistantMessage{Content: "done"}, nil
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loop.Ask(context.Background(), "hi"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestLoopRecordsBackgroundTextActivityBeforeReplayableDelivery(t *testing.T) {
+	collector := event.NewCollector()
+	bus := event.NewBus(collector.Handle)
+	loop, err := NewLoop(Config{
+		AgentID: "planner",
+		Provider: modelFunc(func(ctx context.Context, _ Request) (AssistantMessage, error) {
+			activity := event.DeltaActivitySink(ctx)
+			if activity == nil || !event.ReplayableDeltas(ctx) {
+				t.Fatal("background stream is not observable and replayable")
+			}
+			activity(false)
+			if got := collector.Snapshot().Model.TTFT.Count; got != 0 {
+				t.Fatalf("non-text activity recorded TTFT count %d", got)
+			}
+			activity(true)
+			if got := collector.Snapshot().Model.TTFT.Count; got != 1 {
+				t.Fatalf("text activity TTFT count = %d, want 1 before delivery", got)
+			}
+			if sink := event.DeltaSink(ctx); sink != nil {
+				sink("done")
+			}
+			return AssistantMessage{Content: "done"}, nil
+		}),
+		Events: bus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loop.Ask(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMemoryCompactDoesNotPublishModelEvents(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -600,7 +695,13 @@ func TestMemoryCompactDoesNotPublishModelEvents(t *testing.T) {
 			if event.DeltaSink(ctx) != nil {
 				compactHadSink = true
 			}
-			return AssistantMessage{Content: `{"nodes":[]}`}, nil
+			if sink := event.RetrySink(ctx); sink != nil {
+				sink("transport")
+			}
+			return AssistantMessage{
+				Content: `{"nodes":[]}`,
+				Usage:   &Usage{TotalTokens: 13},
+			}, nil
 		}
 		if sink := event.DeltaSink(ctx); sink != nil {
 			sink("hello")
@@ -657,14 +758,19 @@ func TestMemoryCompactDoesNotPublishModelEvents(t *testing.T) {
 	if len(phases) != 3 {
 		t.Fatalf("model events = %#v, want one chat generate", *got)
 	}
-	var compactPhases []event.Phase
+	var compactEvents []event.RuntimeEvent
 	for _, ev := range *got {
 		if ev.Kind == event.KindMemory && ev.Name == compactMemoryToolName {
-			compactPhases = append(compactPhases, ev.Phase)
+			compactEvents = append(compactEvents, ev)
 		}
 	}
-	if !reflect.DeepEqual(compactPhases, []event.Phase{event.PhaseStart, event.PhaseEnd}) {
-		t.Fatalf("compact events = %#v, want start/end", compactPhases)
+	if len(compactEvents) != 2 ||
+		compactEvents[0].Phase != event.PhaseStart ||
+		compactEvents[1].Phase != event.PhaseEnd {
+		t.Fatalf("compact events = %#v, want start/end", compactEvents)
+	}
+	if compactEvents[1].Tokens != 13 || compactEvents[1].Retries != 1 {
+		t.Fatalf("compact end = %#v, want hidden model cost", compactEvents[1])
 	}
 }
 
