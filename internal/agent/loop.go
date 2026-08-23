@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KDZZZZZZ/threadmill/internal/env"
 	"github.com/KDZZZZZZ/threadmill/internal/event"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
@@ -72,6 +73,8 @@ type Loop struct {
 	wake          chan struct{}
 	checkpoints   CheckpointStore
 	events        *event.Bus
+	memory        env.MemoryView
+	curation      CurationConfig
 
 	mu                       sync.Mutex
 	queue                    []UserMessage
@@ -465,6 +468,19 @@ type eventProvider struct {
 }
 
 func (p eventProvider) Generate(ctx context.Context, request Request) (AssistantMessage, error) {
+	retries := 0
+	ctx = event.WithRetrySink(ctx, func(reason string) {
+		retries++
+		p.loop.publish(ctx, event.ModelRetry(p.loop.agentID, retries, reason))
+	})
+	ctx = event.WithDeltaActivitySink(ctx, func(text bool) {
+		activity := event.ModelDelta(p.loop.agentID, "")
+		activity.StreamText = text
+		p.loop.publish(ctx, activity)
+	})
+	if p.loop.agentID != "manager" {
+		ctx = event.WithReplayableDeltas(ctx)
+	}
 	ctx = event.WithDeltaSink(ctx, func(delta string) {
 		p.loop.publish(ctx, event.ModelDelta(p.loop.agentID, delta))
 	})
@@ -475,14 +491,16 @@ func (p eventProvider) Generate(ctx context.Context, request Request) (Assistant
 	if message.Usage != nil {
 		tokens = message.Usage.TotalTokens
 	}
-	p.loop.publish(ctx, event.ModelEnd(
+	end := event.ModelEnd(
 		p.loop.agentID,
 		message.Model,
 		started,
 		len(message.ToolCalls),
 		tokens,
 		err,
-	))
+	)
+	end.Retries = retries
+	p.loop.publish(ctx, end)
 	return message, err
 }
 

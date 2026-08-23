@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
@@ -60,6 +61,7 @@ var knownFileTools = map[string]struct{}{
 	memoryNodesInToolName:         {},
 	memoryAddToSubgraphToolName:   {},
 	memoryDropFromContextToolName: {},
+	agenttool.MemoryApplyName:     {},
 	fileReadToolName:              {},
 	fileWriteToolName:             {},
 	fileEditToolName:              {},
@@ -70,6 +72,11 @@ var knownFileTools = map[string]struct{}{
 	coordReplacePendingToolName:   {},
 	coordRequestHelpToolName:      {},
 	coordProvideHelpToolName:      {},
+}
+
+// organizerOnlyTools 只允许 subgraph_organizer 装配：记忆图的批量改写权集中在整理 Agent。
+var organizerOnlyTools = map[string]struct{}{
+	agenttool.MemoryApplyName: {},
 }
 
 var knownFileHooks = map[string]struct{}{
@@ -116,6 +123,7 @@ type FileOverlay struct {
 	Prompts    FilePrompts
 	NamedTools map[string]agenttool.Tool
 	Events     *event.Bus
+	Curation   CurationConfig
 }
 
 // FileAgents 是 threadmill.yaml 里内置 Agent 的配置。
@@ -147,16 +155,18 @@ func (t *Team) PrepareTaskContext(
 	if memory == nil {
 		return fmt.Errorf("prepare task context: nil memory")
 	}
-	query := "为下面的 Task Info 准备任务启动包。只选择执行任务必需的最小节点集合；" +
+	query := "为下面的 Task Info 准备任务启动包。先按系统提示中的审核规则检查相关节点：缺证据锚的完成声明标 disputed、被带证据新节点取代的旧结论标 superseded，修改用 memory_apply 批量提交；然后再选节点。" +
+		"必须包含原始目标、逐字契约（精确 API 名、方法签名、输出字符串、字段、退出码）与全部硬约束对应的节点，并纳入带证据锚（命令、测试名、退出码）的最新验证结论与未决缺陷；" +
 		"如果已有子图混有大量无关节点，不要整图加入。保留节点原有归属，只把必要节点加入目标子图。\n\n" +
 		"Task Info: " + strings.TrimSpace(taskInfo)
-	_, err := t.Organizer.Ask(ctx, organizeQuery(
+	return organizeMemory(
+		ctx,
+		t.Organizer,
+		memory,
+		"organize_task_context",
 		query,
 		subgraphID,
-		memory.Snapshot(),
-		t.Organizer.organizeQueryText(),
-	))
-	return err
+	)
 }
 
 // Validate 拒绝空白 ID、负的步数，以及未知或重复的 tool/hook 名。
@@ -197,6 +207,11 @@ func (role FileAgent) validate(name string) error {
 	for _, tool := range role.Tools {
 		if _, ok := managerOnlyTools[tool]; ok {
 			return fmt.Errorf("agents.%s.tools: %q is manager-only", name, tool)
+		}
+		if name != "subgraph_organizer" {
+			if _, ok := organizerOnlyTools[tool]; ok {
+				return fmt.Errorf("agents.%s.tools: %q is organizer-only", name, tool)
+			}
 		}
 	}
 	return nil
@@ -450,6 +465,7 @@ func bindLoopTools(loop *Loop, e env.Env) error {
 		return nil
 	}
 	loop.mu.Lock()
+	loop.memory = e.Memory
 	if organizer := organizerFromTool(loop.tools[organizeSubgraphToolName]); organizer != nil {
 		loop.mu.Unlock()
 		if err := bindLoopTools(organizer, e); err != nil {
@@ -825,12 +841,14 @@ func (t *organizeSubgraphTool) Execute(ctx context.Context, call agenttool.Call)
 		return agenttool.Output{}, fmt.Errorf("commit organized subgraph: %w", err)
 	}
 
-	if _, err := t.organizer.Ask(ctx, organizeQuery(
+	if err := organizeMemory(
+		ctx,
+		t.organizer,
+		t.memory,
+		organizeSubgraphToolName,
 		query,
 		subgraph.ID,
-		t.memory.Snapshot(),
-		t.organizer.organizeQueryText(),
-	)); err != nil {
+	); err != nil {
 		return agenttool.Output{}, err
 	}
 
@@ -846,6 +864,34 @@ func (t *organizeSubgraphTool) Execute(ctx context.Context, call agenttool.Call)
 		return agenttool.Output{}, fmt.Errorf("encode subgraph: %w", err)
 	}
 	return agenttool.Output{Content: string(payload)}, nil
+}
+
+func organizeMemory(
+	ctx context.Context,
+	organizer *Loop,
+	memory env.MemoryView,
+	operation, query, subgraphID string,
+) error {
+	before := memory.Snapshot()
+	started := time.Now()
+	organizer.publish(ctx, event.MemoryStart(organizer.agentID, operation, subgraphID))
+	_, err := organizer.Ask(ctx, organizeQuery(
+		query,
+		subgraphID,
+		before,
+		organizer.organizeQueryText(),
+	))
+	selected := len(memory.Snapshot().NodesInSubgraphs([]string{subgraphID}))
+	organizer.publish(ctx, event.MemoryOrganized(
+		organizer.agentID,
+		operation,
+		subgraphID,
+		started,
+		len(before.Nodes),
+		selected,
+		err,
+	))
+	return err
 }
 
 func organizeQuery(query, subgraphID string, graph ctxgraph.Graph, instruction string) string {

@@ -25,6 +25,7 @@ type helpRequest struct {
 	task       Task
 	configured chan struct{}
 	children   []helpChild
+	declined   bool
 }
 
 type helpChild struct {
@@ -38,6 +39,7 @@ type helpState struct {
 	NodeID   string           `json:"node_id"`
 	Reason   string           `json:"reason"`
 	Children []helpChildState `json:"children,omitempty"`
+	Declined bool             `json:"declined,omitempty"`
 }
 
 type helpChildState struct {
@@ -80,7 +82,7 @@ type requestHelpTool struct{ help *helpCoordinator }
 func (t requestHelpTool) Definition() agenttool.Definition {
 	return agenttool.Definition{
 		Name:        coordRequestHelpName,
-		Description: "当前任务需要拆分时请求 manager 改图。调用后本 Agent 自动暂停，直到 manager 创建的帮助任务全部 join 回当前节点。",
+		Description: "当前任务需要拆分时请求 manager 改图。调用后本 Agent 自动暂停；帮助任务会 join 回当前节点，没有可行分支时 manager 会结束等待并让当前任务继续。",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}},"required":["reason"],"additionalProperties":false}`),
 	}
 }
@@ -114,7 +116,7 @@ type provideHelpTool struct{ help *helpCoordinator }
 func (t provideHelpTool) Definition() agenttool.Definition {
 	return agenttool.Definition{
 		Name:        coordProvideHelpName,
-		Description: "响应 task 的拆分请求：从其他节点 spawn 一个或多个帮助任务，并自动 join 回请求节点。一次调用提交完整帮助列表。",
+		Description: "响应 task 的拆分请求：从其他不会成环的节点 spawn 帮助任务，并自动 join 回请求节点。一次调用提交完整帮助列表；没有合法来源时不要调用。",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"request_id":{"type":"string"},"spawns":{"type":"array","minItems":1,"items":{"type":"object","properties":{"from":{"type":"string"},"info":{"type":"string"}},"required":["from","info"],"additionalProperties":false}}},"required":["request_id","spawns"],"additionalProperties":false}`),
 	}
 }
@@ -172,7 +174,7 @@ func (h *helpCoordinator) request(ctx context.Context, nodeID, callID, reason st
 		delete(h.byID, state.ID)
 		h.mu.Unlock()
 	}()
-	if len(state.Children) == 0 {
+	if len(state.Children) == 0 && !state.Declined {
 		notify(fmt.Sprintf(
 			"[拆分请求] %s\n请求节点: %s\n原因: %s\n请调用 %s，从其他合适节点 spawn 帮助任务；帮助任务会自动 join 回请求节点。",
 			state.ID,
@@ -186,12 +188,49 @@ func (h *helpCoordinator) request(ctx context.Context, nodeID, callID, reason st
 	case <-ctx.Done():
 		return "", ctx.Err()
 	case <-req.configured:
+		if req.declined {
+			return "manager 未提供帮助任务；请在当前任务中继续。", nil
+		}
 		result, err := runner.runHelp(ctx, req.task, req.id, req.children)
 		if err != nil {
 			runner.fail(err)
 		}
 		return result, err
 	}
+}
+
+// ParseHelpRequestID returns the request named by a manager help notification.
+func ParseHelpRequestID(message string) (string, bool) {
+	line, _, _ := strings.Cut(message, "\n")
+	id, ok := strings.CutPrefix(strings.TrimSpace(line), "[拆分请求] ")
+	id = strings.TrimSpace(id)
+	return id, ok && id != ""
+}
+
+// DeclineHelp resumes an unconfigured help request without adding graph tasks.
+func (g *Graph) DeclineHelp(requestID string) error {
+	g.mu.Lock()
+	help := g.help
+	g.mu.Unlock()
+	if help == nil {
+		return nil
+	}
+	return help.decline(strings.TrimSpace(requestID))
+}
+
+func (h *helpCoordinator) decline(requestID string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	req := h.byID[requestID]
+	if req == nil || req.children != nil || req.declined {
+		return nil
+	}
+	if err := h.graph.markHelpDeclined(requestID, req.nodeID); err != nil {
+		return err
+	}
+	req.declined = true
+	closeHelpConfigured(req)
+	return nil
 }
 
 func (h *helpCoordinator) provide(requestID string, spawns []PendingSpawn) (Snapshot, error) {
@@ -277,6 +316,11 @@ func (g *Graph) helpRequestLocked(state helpState) (*helpRequest, bool) {
 		nodeID:     state.NodeID,
 		task:       g.decorateLocked(task),
 		configured: make(chan struct{}),
+		declined:   state.Declined,
+	}
+	if state.Declined {
+		close(req.configured)
+		return req, true
 	}
 	if len(state.Children) == 0 {
 		return req, true
@@ -293,6 +337,24 @@ func (g *Graph) helpRequestLocked(state helpState) (*helpRequest, bool) {
 	}
 	close(req.configured)
 	return req, true
+}
+
+func (g *Graph) markHelpDeclined(requestID, nodeID string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	before := g.stateLocked()
+	for i := range g.helps {
+		state := &g.helps[i]
+		if state.ID != requestID || state.NodeID != nodeID {
+			continue
+		}
+		if len(state.Children) > 0 || state.Declined {
+			return nil
+		}
+		state.Declined = true
+		return g.saveOrRestoreLocked(before)
+	}
+	return nil
 }
 
 func (g *Graph) addHelp(requestID, join string, spawns []PendingSpawn) ([]helpChild, Snapshot, error) {

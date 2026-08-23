@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 )
 
 const defaultKeepRecentTokens = 20000
 const maxOrganizeFormatAttempts = 3
+const maxOrganizePromptBytes = 16 << 10
 
 type organizeOutput struct {
 	Nodes []organizeNode `json:"nodes"`
@@ -138,11 +140,38 @@ func buildOrganizeUserPrompt(graph ctxgraph.Graph, subgraphIDs []string, message
 		b.WriteString("（无）\n")
 	}
 	for _, node := range existing {
-		fmt.Fprintf(&b, "- [%s/%s] %s\n", node.Kind, node.Status, node.Statement)
+		fmt.Fprintf(&b, "- %s [%s/%s] %s\n", node.ID, node.Kind, node.Status, node.Statement)
 	}
-	b.WriteString("\n待整理对话：\n")
-	b.WriteString(serializeConversation(messages))
-	return b.String()
+	metadata := clipMiddle(b.String(), maxOrganizePromptBytes/4)
+	header := "\n待整理对话：\n"
+	conversation := clipMiddle(
+		serializeConversation(messages),
+		maxOrganizePromptBytes-len(metadata)-len(header),
+	)
+	return metadata + header + conversation
+}
+
+func clipMiddle(text string, limit int) string {
+	const marker = "\n[... middle omitted to bound memory compaction input ...]\n"
+	if limit <= 0 {
+		return ""
+	}
+	if len(text) <= limit {
+		return text
+	}
+	if limit <= len(marker) {
+		return marker[:limit]
+	}
+	head := (limit - len(marker)) / 2
+	tail := limit - len(marker) - head
+	for head > 0 && !utf8.RuneStart(text[head]) {
+		head--
+	}
+	tailStart := len(text) - tail
+	for tailStart < len(text) && !utf8.RuneStart(text[tailStart]) {
+		tailStart++
+	}
+	return text[:head] + marker + text[tailStart:]
 }
 
 func writeSubgraphCatalog(b *strings.Builder, graph ctxgraph.Graph, ids []string) {
@@ -354,12 +383,20 @@ func keepRecentIndex(messages []Message, keepRecentTokens int) int {
 		if accumulated < keepRecentTokens {
 			continue
 		}
-		return lastCutPointAtOrBefore(messages, i)
+		return recentCutPoint(messages, i)
 	}
 	return 0
 }
 
-func lastCutPointAtOrBefore(messages []Message, index int) int {
+func recentCutPoint(messages []Message, index int) int {
+	if isCutPoint(messages[index]) {
+		return index
+	}
+	for i := index + 1; i < len(messages); i++ {
+		if isCutPoint(messages[i]) {
+			return i
+		}
+	}
 	for i := index; i >= 0; i-- {
 		if isCutPoint(messages[i]) {
 			return i
@@ -373,7 +410,7 @@ func isCutPoint(message Message) bool {
 }
 
 func estimateTokens(message Message) int {
-	chars := len(message.Content) + len(message.Thinking)
+	chars := len(message.Content) + len(message.Thinking) + len(message.ModelData)
 	for _, call := range message.ToolCalls {
 		chars += len(call.Name) + len(call.Arguments)
 	}

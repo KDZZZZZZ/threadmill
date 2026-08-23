@@ -2,16 +2,84 @@
 
 Threadmill 是轻量级 Agent OS。
 
+## 安装
+
+当前基线分支是 `dev-native`，需要 Go 1.24.2 或更高版本：
+
+```sh
+go install github.com/KDZZZZZZ/threadmill/cmd/threadmill@dev-native
+```
+
+如果 shell 找不到命令，把 Go 的二进制目录加入 `PATH`：
+
+```sh
+export PATH="$(go env GOPATH)/bin:$PATH"
+```
+
+在源码仓库中开发时也可以安装当前工作区版本：
+
+```sh
+go install ./cmd/threadmill
+```
+
+## 打开 CLI
+
+在任意项目目录直接运行即可进入 TUI：
+
+```sh
+threadmill
+```
+
+首次交互启动会询问 API 地址、模型、上下文窗口和凭据名，并用无回显输入读取 API key。也可以指定其他工作区，或执行一次无交互任务：
+
+```sh
+threadmill -C /path/to/project
+threadmill -C /path/to/project -p "修复失败的测试"
+threadmill -C /path/to/project -config /path/to/override.yaml
+```
+
+`-p` 不会启动首次配置交互；用于脚本前，请先运行一次 `threadmill`，或手动写好下面的配置和凭据文件。
+
+## 配置分层
+
+提示词、Agent、工具和执行配置已经内置在二进制中，普通使用不再要求项目根目录存在 `threadmill.yaml`。模型设置按以下顺序覆盖，越靠后优先级越高：
+
+1. 二进制内置默认值
+2. 用户配置 `~/.threadmill/config.yaml`
+3. 兼容旧项目的 `<workspace>/threadmill.yaml`
+4. 项目配置 `<workspace>/.threadmill/config.yaml`
+5. `-config` 指定的额外覆盖文件
+
+用户配置由首次启动自动写入，格式如下：
+
+```yaml
+llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  credential: personal
+  model: gpt-5
+  context_window: 128000
+```
+
+项目配置只需写要覆盖的字段，例如：
+
+```yaml
+# .threadmill/config.yaml
+llm:
+  model: another-model
+  context_window: 200000
+```
+
 ## 凭据配置
 
-项目的 `threadmill.yaml` 只保存凭据名：
+模型配置只保存凭据名，不保存 API key：
 
 ```yaml
 llm:
   credential: opencode
 ```
 
-密钥统一保存在用户目录的 `~/.threadmill/credentials.yaml`，同名字段对应项目中的凭据名：
+密钥统一保存在用户目录的 `~/.threadmill/credentials.yaml`，同名字段对应模型配置中的凭据名：
 
 ```yaml
 opencode: sk-your-key
@@ -27,7 +95,7 @@ chmod 600 ~/.threadmill/credentials.yaml
 
 ## 命令隔离
 
-Threadmill 默认只在可用的 `bwrap` 沙箱中执行 Agent 命令，不会静默降级到宿主执行。如果宿主不能创建所需 namespace，可以为项目显式选择一个本地已有的 Docker 镜像：
+Threadmill 默认只在可用的 `bwrap` 沙箱中执行 Agent 命令，不会静默降级到宿主执行。`bwrap` 保持挂载、用户和 PID 隔离，但默认共享宿主网络，并只透传 HTTP(S) 代理和 CA 配置；需要限制出站目标时，应由宿主防火墙或外层代理执行策略。如果宿主不能创建所需 namespace，可以为项目显式选择一个本地已有的 Docker 镜像：
 
 ```yaml
 exec:
@@ -35,6 +103,15 @@ exec:
 ```
 
 Docker 后端不会自动拉取镜像；容器禁用网络、使用只读根文件系统，并且只把当前 task 的 live workspace 挂载为可写目录。
+
+如果 Threadmill 本身已经运行在 Pier 等可信的外层隔离边界中，并由外层负责进程、文件和出站网络策略，可以显式复用该边界：
+
+```yaml
+exec:
+  external_sandbox: true
+```
+
+这不是宿主执行的自动降级。该模式仍为每个环境分配独立的 `HOME`/`TMPDIR`，并沿用相同的代理和 CA 白名单，不继承任意变量。不要在没有外层隔离的宿主上启用。
 
 ## 提示词结构
 

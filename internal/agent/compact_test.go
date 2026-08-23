@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -268,6 +269,7 @@ func TestKeepRecentIndex(t *testing.T) {
 	assistant := Message{Role: RoleAssistant, Content: "hello"}
 	tool := Message{Role: RoleTool, Content: "tool-output"}
 	final := Message{Role: RoleAssistant, Content: "done"}
+	afterTool := Message{Role: RoleAssistant, Content: "x"}
 
 	tests := []struct {
 		name     string
@@ -299,6 +301,12 @@ func TestKeepRecentIndex(t *testing.T) {
 			keep:     estimateTokens(tool),
 			expected: 1,
 		},
+		{
+			name:     "compact an oversized completed tool exchange",
+			messages: []Message{user, assistant, tool, afterTool},
+			keep:     estimateTokens(tool),
+			expected: 3,
+		},
 	}
 
 	for _, tt := range tests {
@@ -309,6 +317,20 @@ func TestKeepRecentIndex(t *testing.T) {
 				t.Fatalf("keepRecentIndex() = %d, want %d", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestEstimateTokensIncludesReplayModelData(t *testing.T) {
+	t.Parallel()
+
+	message := Message{
+		Role:      RoleAssistant,
+		Content:   "text",
+		ModelData: json.RawMessage(`"` + strings.Repeat("x", 400) + `"`),
+	}
+	want := (len(message.Content) + len(message.ModelData) + 3) / 4
+	if got := estimateTokens(message); got != want {
+		t.Fatalf("estimateTokens() = %d, want %d including replay model data", got, want)
 	}
 }
 
@@ -655,5 +677,47 @@ func TestCompactHistoryDoesNotCompressMemoryToolTraffic(t *testing.T) {
 	}
 	if !strings.Contains(payload, `echo({"text":"keep"})`) || !strings.Contains(payload, "keep result") {
 		t.Fatalf("payload lost ordinary tool traffic: %q", payload)
+	}
+}
+
+func TestCompactHistoryBoundsLargeOrganizerPrompt(t *testing.T) {
+	t.Parallel()
+
+	provider := &stubProvider{response: `{"nodes":[]}`}
+	messages := []Message{{Role: RoleUser, Content: "ORIGINAL_GOAL: preserve typed SSE requirements"}}
+	for i := range 24 {
+		messages = append(messages,
+			Message{Role: RoleAssistant, ToolCalls: []agenttool.Call{{
+				Name:      "read",
+				Arguments: json.RawMessage(fmt.Sprintf(`{"path":"source-%d.ts"}`, i)),
+			}}},
+			Message{Role: RoleTool, Content: strings.Repeat(fmt.Sprintf("middle-%02d ", i), 4096)},
+		)
+	}
+	messages = append(messages, Message{Role: RoleTool, Content: "RECENT_EVIDENCE: pnpm test exited 0"})
+
+	_, tail, err := CompactHistory(
+		context.Background(),
+		provider,
+		ctxgraph.Graph{},
+		messages,
+		nil,
+		0,
+		"planner",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tail) != 0 {
+		t.Fatalf("tail = %#v, want fully compacted history", tail)
+	}
+	payload := provider.last.Messages[0].Content
+	if len(payload) > 16<<10 {
+		t.Fatalf("organizer prompt = %d bytes, want at most 16 KiB", len(payload))
+	}
+	for _, want := range []string{"ORIGINAL_GOAL", "RECENT_EVIDENCE", "middle omitted"} {
+		if !strings.Contains(payload, want) {
+			t.Fatalf("organizer prompt lost %q", want)
+		}
 	}
 }

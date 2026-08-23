@@ -27,7 +27,7 @@ func TestInjectCoordinationGraphAppendsLatestSnapshot(t *testing.T) {
 	if !strings.HasPrefix(got.SystemPrompt, "yaml manager") {
 		t.Fatalf("system prompt = %q, want prefix yaml manager", got.SystemPrompt)
 	}
-	if !strings.Contains(got.SystemPrompt, "当前协调图：") {
+	if !strings.Contains(got.SystemPrompt, "当前协调图（JSON：") {
 		t.Fatalf("system prompt = %q, want injected graph label", got.SystemPrompt)
 	}
 	if !strings.Contains(got.SystemPrompt, `"ID":"task-1"`) {

@@ -25,8 +25,48 @@ func sandboxEnv(home, tmpdir string) []string {
 	}
 }
 
+var networkEnvironment = [...]string{
+	"all_proxy",
+	"http_proxy",
+	"https_proxy",
+	"no_proxy",
+	"ALL_PROXY",
+	"HTTP_PROXY",
+	"HTTPS_PROXY",
+	"NO_PROXY",
+	"CURL_CA_BUNDLE",
+	"GIT_SSL_CAINFO",
+	"NODE_EXTRA_CA_CERTS",
+	"REQUESTS_CA_BUNDLE",
+	"SSL_CERT_DIR",
+	"SSL_CERT_FILE",
+}
+
+func networkSandboxEnv(home, tmpdir string) []string {
+	env := sandboxEnv(home, tmpdir)
+	for _, name := range networkEnvironment {
+		if value, ok := os.LookupEnv(name); ok {
+			env = append(env, name+"="+value)
+		}
+	}
+	return env
+}
+
 func bashArgs(command string) []string {
 	return []string{"bash", "-c", command}
+}
+
+func runExternalSandbox(
+	ctx context.Context,
+	live, tempDir, command string,
+	capBytes int,
+	track func(int),
+) (env.ExecResult, error) {
+	args := bashArgs(command)
+	cmd := osexec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Dir = live
+	cmd.Env = networkSandboxEnv(tempDir, tempDir)
+	return collect(ctx, cmd, capBytes, track)
 }
 
 func collect(ctx context.Context, cmd *osexec.Cmd, capBytes int, track func(int)) (env.ExecResult, error) {

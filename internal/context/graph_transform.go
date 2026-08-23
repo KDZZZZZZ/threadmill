@@ -248,6 +248,7 @@ func sameNode(a, b Node) bool {
 		a.Statement == b.Statement &&
 		a.Status == b.Status &&
 		a.CreatorAgentID == b.CreatorAgentID &&
+		a.SupersededBy == b.SupersededBy &&
 		slices.Equal(a.SubgraphIDs, b.SubgraphIDs) &&
 		slices.Equal(a.SourceRefs, b.SourceRefs)
 }

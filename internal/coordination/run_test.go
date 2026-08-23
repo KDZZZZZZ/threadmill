@@ -62,6 +62,100 @@ func TestGraphRunAbsorbsAndReleasesLiveAfterRoles(t *testing.T) {
 	}
 }
 
+func TestGraphRunLaterRootReplacesPersistentParentFiles(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	first := graph.AddTask()
+	child := mustSpawn(t, graph, first.Planner.ID, first.Verifier.ID)
+	second := graph.AddTask()
+	base := t.TempDir()
+	state := t.TempDir()
+	files, err := vfs.NewPersistentStore(base, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
+	assemble := func(task Task) (Roles, error) {
+		return Roles{
+			Planner: instantAsker(),
+			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
+				if task.ID == first.ID {
+					live, err := files.Materialize(task.Env.ID)
+					if err != nil {
+						return "", err
+					}
+					if err := os.WriteFile(filepath.Join(live, "first.txt"), []byte("kept"), 0o600); err != nil {
+						return "", err
+					}
+				}
+				return query + "/executor", nil
+			}),
+			Verifier: instantAsker(),
+		}, nil
+	}
+
+	if _, err := graph.Run(context.Background(), first.ID, "first", stores, assemble); err != nil {
+		t.Fatalf("first Run() error = %v", err)
+	}
+	firstLive, err := files.Materialize(first.Env.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstLiveInfo, err := os.Stat(firstLive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{
+		first.Env.ID + ":planner",
+		first.Env.ID + ":planner:join",
+		first.Env.ID + ":join",
+		first.Env.ID + ":verifier",
+		first.Env.ID + ":verifier:join",
+		child.Env.ID,
+		child.Env.ID + ":verifier",
+	} {
+		if err := files.Fork(first.Env.ID, id); err != nil {
+			t.Fatalf("create retained task workspace %s: %v", id, err)
+		}
+	}
+	if _, err := graph.Run(context.Background(), second.ID, "second", stores, assemble); err != nil {
+		t.Fatalf("second Run() error = %v", err)
+	}
+	got, err := files.View(second.Env.ID).Read("first.txt")
+	if err != nil {
+		t.Fatalf("second root missed parent files: %v", err)
+	}
+	if string(got) != "kept" {
+		t.Fatalf("second root first.txt = %q, want kept", got)
+	}
+	if got := files.Stats().LiveDirs; got != 1 {
+		t.Fatalf("persistent live dirs = %d, want only the latest root", got)
+	}
+	secondLive, err := files.Materialize(second.Env.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondLiveInfo, err := os.Stat(secondLive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(firstLiveInfo, secondLiveInfo) {
+		t.Fatal("later root copied the released parent live directory instead of taking ownership")
+	}
+	restored, err := vfs.NewPersistentStore(base, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.Fork(first.Env.ID, second.Env.ID); err != nil {
+		t.Fatalf("restore latest root: %v", err)
+	}
+	got, err = restored.View(second.Env.ID).Read("first.txt")
+	if err != nil || string(got) != "kept" {
+		t.Fatalf("restored second root first.txt = %q, %v", got, err)
+	}
+}
+
 func TestGraphRunUnknownTask(t *testing.T) {
 	t.Parallel()
 

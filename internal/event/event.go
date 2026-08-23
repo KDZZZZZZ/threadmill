@@ -19,31 +19,38 @@ const (
 	KindMemory Kind = "memory"
 )
 
-// Phase 是一次调用的时点，对应 Eino Timing OnStart / OnEnd；失败写在 End 的 Err 上。
+// Phase 是一次调用的开始、结束、流活动或重试时点；失败写在 End 的 Err 上。
 type Phase string
 
 const (
 	PhaseStart Phase = "start"
 	PhaseEnd   Phase = "end"
 	PhaseDelta Phase = "delta"
+	PhaseRetry Phase = "retry"
 )
 
 // RuntimeEvent 是模型/工具调用的归一化记录。
 type RuntimeEvent struct {
-	Time      time.Time     `json:"time"`
-	AgentID   string        `json:"agent_id,omitempty"`
-	Kind      Kind          `json:"kind"`
-	Phase     Phase         `json:"phase"`
-	Name      string        `json:"name,omitempty"`
-	CallID    string        `json:"call_id,omitempty"`
-	Duration  time.Duration `json:"duration,omitempty"`
-	Err       string        `json:"error,omitempty"`
-	IsError   bool          `json:"is_error,omitempty"`
-	Messages  int           `json:"messages,omitempty"`
-	Tools     int           `json:"tools,omitempty"`
-	ToolCalls int           `json:"tool_calls,omitempty"`
-	Tokens    int           `json:"tokens,omitempty"`
-	Delta     string        `json:"delta,omitempty"`
+	Time             time.Time     `json:"time"`
+	AgentID          string        `json:"agent_id,omitempty"`
+	Kind             Kind          `json:"kind"`
+	Phase            Phase         `json:"phase"`
+	Name             string        `json:"name,omitempty"`
+	CallID           string        `json:"call_id,omitempty"`
+	Duration         time.Duration `json:"duration,omitempty"`
+	Err              string        `json:"error,omitempty"`
+	IsError          bool          `json:"is_error,omitempty"`
+	Messages         int           `json:"messages,omitempty"`
+	Tools            int           `json:"tools,omitempty"`
+	ToolCalls        int           `json:"tool_calls,omitempty"`
+	Tokens           int           `json:"tokens,omitempty"`
+	Retries          int           `json:"retries,omitempty"`
+	RetryReason      string        `json:"retry_reason,omitempty"`
+	Delta            string        `json:"delta,omitempty"`
+	StreamText       bool          `json:"stream_text,omitempty"`
+	MemoryOrganized  bool          `json:"memory_organized,omitempty"`
+	MemoryCandidates int           `json:"memory_candidates,omitempty"`
+	MemorySelected   int           `json:"memory_selected,omitempty"`
 }
 
 // Input 是生产者交给 Normalize 的原始字段。
@@ -110,6 +117,18 @@ func ModelEnd(agentID, name string, started time.Time, toolCalls, tokens int, er
 	}, PhaseEnd)
 }
 
+// ModelRetry 记录一次即将重放的模型请求；attempt 从 1 开始。
+func ModelRetry(agentID string, attempt int, reason string) RuntimeEvent {
+	return RuntimeEvent{
+		Time:        time.Now(),
+		AgentID:     agentID,
+		Kind:        KindModel,
+		Phase:       PhaseRetry,
+		Retries:     attempt,
+		RetryReason: reason,
+	}
+}
+
 // ToolStart 归一化一次工具调用开始。
 func ToolStart(agentID, name, callID string) RuntimeEvent {
 	return Normalize(Input{
@@ -171,6 +190,35 @@ func MemoryEnd(agentID, name, callID string, started time.Time, err error) Runti
 	}, PhaseEnd)
 }
 
+// MemoryDelta records provider stream activity inside a hidden memory operation.
+// It intentionally carries no response text.
+func MemoryDelta(agentID, name, callID string, text bool) RuntimeEvent {
+	return RuntimeEvent{
+		Time:       time.Now(),
+		AgentID:    agentID,
+		Kind:       KindMemory,
+		Phase:      PhaseDelta,
+		Name:       name,
+		CallID:     callID,
+		StreamText: text,
+	}
+}
+
+// MemoryOrganized records the candidate and selected node counts for one
+// organizer pass. A zero selection remains observable through MemoryOrganized.
+func MemoryOrganized(
+	agentID, name, callID string,
+	started time.Time,
+	candidates, selected int,
+	err error,
+) RuntimeEvent {
+	ev := MemoryEnd(agentID, name, callID, started, err)
+	ev.MemoryOrganized = true
+	ev.MemoryCandidates = candidates
+	ev.MemorySelected = selected
+	return ev
+}
+
 // ModelDelta 归一化一段流式文本增量。
 func ModelDelta(agentID, delta string) RuntimeEvent {
 	return RuntimeEvent{
@@ -183,6 +231,12 @@ func ModelDelta(agentID, delta string) RuntimeEvent {
 }
 
 type deltaKey struct{}
+
+type retryKey struct{}
+
+type replayableDeltasKey struct{}
+
+type deltaActivityKey struct{}
 
 // WithDeltaSink 把文本增量回调挂到 ctx 上，供 Provider 在流式生成时调用。
 func WithDeltaSink(ctx context.Context, sink func(string)) context.Context {
@@ -198,5 +252,56 @@ func DeltaSink(ctx context.Context) func(string) {
 		return nil
 	}
 	sink, _ := ctx.Value(deltaKey{}).(func(string))
+	return sink
+}
+
+// WithReplayableDeltas 表示增量尚未直接交付给用户，Provider 可在流中断时安全重放。
+func WithReplayableDeltas(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, replayableDeltasKey{}, true)
+}
+
+// ReplayableDeltas 报告 Provider 是否可以丢弃一次失败尝试的增量并重试。
+func ReplayableDeltas(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	replayable, _ := ctx.Value(replayableDeltasKey{}).(bool)
+	return replayable
+}
+
+// WithDeltaActivitySink 把不含正文的流活动回调挂到 ctx 上，供监控记录流式进度。
+func WithDeltaActivitySink(ctx context.Context, sink func(text bool)) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, deltaActivityKey{}, sink)
+}
+
+// DeltaActivitySink 取出流活动回调；没有时返回 nil。
+func DeltaActivitySink(ctx context.Context) func(bool) {
+	if ctx == nil {
+		return nil
+	}
+	sink, _ := ctx.Value(deltaActivityKey{}).(func(bool))
+	return sink
+}
+
+// WithRetrySink 把 Provider 重试回调挂到 ctx 上，供模型事件聚合重试次数。
+func WithRetrySink(ctx context.Context, sink func(string)) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, retryKey{}, sink)
+}
+
+// RetrySink 取出 ctx 上的 Provider 重试回调；没有时返回 nil。
+func RetrySink(ctx context.Context) func(string) {
+	if ctx == nil {
+		return nil
+	}
+	sink, _ := ctx.Value(retryKey{}).(func(string))
 	return sink
 }

@@ -61,6 +61,53 @@ func TestOpenUsesOneUserStateDirectoryForCanonicalPath(t *testing.T) {
 	}
 }
 
+func TestOpenLoadsConfigOutsideProject(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	project := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "settings.yaml")
+	data, err := os.ReadFile(filepath.Join("..", "..", provider.ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr, err := Open(context.Background(), Options{
+		Root:       project,
+		ConfigPath: configPath,
+		Provider: stubProvider(func(context.Context, agent.Request) (agent.AssistantMessage, error) {
+			return agent.AssistantMessage{Content: "idle"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.Close()
+	if _, err := os.Stat(filepath.Join(project, provider.ConfigFileName)); !os.IsNotExist(err) {
+		t.Fatalf("project config exists or stat failed: %v", err)
+	}
+}
+
+func TestOpenUsesBuiltInConfigWithoutProjectFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	project := t.TempDir()
+
+	mgr, err := Open(context.Background(), Options{
+		Root: project,
+		Provider: stubProvider(func(context.Context, agent.Request) (agent.AssistantMessage, error) {
+			return agent.AssistantMessage{Content: "idle"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.Close()
+	if _, err := os.Stat(filepath.Join(project, provider.ConfigFileName)); !os.IsNotExist(err) {
+		t.Fatalf("project config exists or stat failed: %v", err)
+	}
+}
+
 func TestStateUsesUserProjectDirectory(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -826,6 +873,100 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 	}
 }
 
+func TestManagerDeclinedHelpResumesRequester(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	rootCreated := false
+	invalidHelpAttempted := false
+	var requesterResult string
+	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
+		sys := request.SystemPrompt
+		query := lastUser(request.Messages)
+		switch {
+		case strings.Contains(sys, "记忆整理器"):
+			return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
+		case strings.Contains(sys, "经理 Agent"):
+			switch {
+			case strings.Contains(query, "[拆分请求]"):
+				if !invalidHelpAttempted {
+					invalidHelpAttempted = true
+					requestID := strings.TrimSpace(strings.TrimPrefix(strings.SplitN(query, "\n", 2)[0], "[拆分请求]"))
+					args, err := json.Marshal(map[string]any{
+						"request_id": requestID,
+						"spawns": []map[string]string{{
+							"from": "task-1:executor", "info": "impossible self help",
+						}},
+					})
+					if err != nil {
+						return agent.AssistantMessage{}, err
+					}
+					return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+						ID:        "invalid-help",
+						Name:      "coordination_provideHelp",
+						Arguments: args,
+					}}}, nil
+				}
+				return agent.AssistantMessage{Content: "当前没有可行的帮助分支"}, nil
+			case strings.Contains(query, "[任务报告]"):
+				return agent.AssistantMessage{Content: "任务已完成"}, nil
+			case !rootCreated:
+				rootCreated = true
+				args, err := json.Marshal(coordination.PendingSubgraph{
+					Roots: []coordination.PendingRoot{{Info: "solve"}},
+				})
+				if err != nil {
+					return agent.AssistantMessage{}, err
+				}
+				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+					ID:        "root-graph",
+					Name:      "coordination_replacePending",
+					Arguments: args,
+				}}}, nil
+			default:
+				return agent.AssistantMessage{Content: "已开始"}, nil
+			}
+		case strings.Contains(sys, "规划 Agent"):
+			return agent.AssistantMessage{Content: "root-plan"}, nil
+		case strings.Contains(sys, "执行 Agent"):
+			if result := lastToolResult(request.Messages); result != "" {
+				requesterResult = result
+				return agent.AssistantMessage{Content: "executed"}, nil
+			}
+			return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+				ID:        "need-help",
+				Name:      "coordination_requestHelp",
+				Arguments: json.RawMessage(`{"reason":"need evidence"}`),
+			}}}, nil
+		default:
+			return agent.AssistantMessage{Content: "verified"}, nil
+		}
+	})
+
+	mgr, err := Open(ctx, Options{
+		Root:     t.TempDir(),
+		File:     loadRepoConfig(t),
+		Provider: provider,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer mgr.Close()
+
+	mgr.Send("solve")
+	if err := mgr.WaitIdle(ctx); err != nil {
+		t.Fatalf("WaitIdle() error = %v", err)
+	}
+	if !strings.Contains(requesterResult, "未提供帮助") {
+		t.Fatalf("requester tool result = %q, want declined help result", requesterResult)
+	}
+	task := mgr.Snapshot().Tasks[0]
+	if task.Outcome != coordination.OutcomeDone {
+		t.Fatalf("task outcome = %q, want done", task.Outcome)
+	}
+}
+
 func TestManagerUserCanAddFutureBranchWhileTaskRuns(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1060,7 +1201,8 @@ func TestFormatReport(t *testing.T) {
 		Info:    "goal",
 		Outcome: coordination.OutcomeFailed,
 	}, "", errors.New("planner boom"), time.Second, 0)
-	if !strings.Contains(got, "planner boom") || !strings.Contains(got, "failed") {
-		t.Fatalf("failed report = %q", got)
+	want = "[任务报告] task-1 · failed · 耗时 1s\n目标: goal\n流程错误:\nplanner boom"
+	if got != want {
+		t.Fatalf("failed report = %q, want %q", got, want)
 	}
 }

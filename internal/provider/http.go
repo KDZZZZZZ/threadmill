@@ -11,13 +11,14 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/KDZZZZZZ/threadmill/internal/event"
 )
 
 const (
-	maxResponseBody       = 16 << 20
-	defaultRequestTimeout = 2 * time.Minute
-	maxRequestRetries     = 5
-	defaultRetryInterval  = time.Second
+	maxResponseBody      = 16 << 20
+	maxRequestRetries    = 5
+	defaultRetryInterval = time.Second
 )
 
 // transport 保存 OpenAI-compatible Provider 共用的 HTTP 配置。
@@ -52,7 +53,7 @@ func newTransport(
 		return transport{}, err
 	}
 	if client == nil {
-		client = &http.Client{Timeout: defaultRequestTimeout}
+		client = &http.Client{}
 	}
 
 	baseURL, _ := url.Parse(config.BaseURL)
@@ -74,7 +75,8 @@ func (transport transport) post(ctx context.Context, payload any, output any) er
 		return fmt.Errorf("encode provider request: %w", err)
 	}
 
-	response, err := transport.do(ctx, body, "")
+	retries := 0
+	response, err := transport.do(ctx, body, "", &retries)
 	if err != nil {
 		return err
 	}
@@ -93,9 +95,10 @@ func (transport transport) post(ctx context.Context, payload any, output any) er
 	return nil
 }
 
-// do 最多重试五次尚未开始交付响应体的瞬时请求失败。
-func (transport transport) do(ctx context.Context, body []byte, accept string) (*http.Response, error) {
-	for attempt := 0; ; attempt++ {
+// do 从共享预算中重试尚未开始交付响应体的瞬时请求失败。
+func (transport transport) do(ctx context.Context, body []byte, accept string, retries *int) (*http.Response, error) {
+	for {
+		retryReason := "transport"
 		request, err := http.NewRequestWithContext(
 			ctx,
 			http.MethodPost,
@@ -117,10 +120,11 @@ func (transport transport) do(ctx context.Context, body []byte, accept string) (
 		}
 		if err != nil {
 			err = fmt.Errorf("send provider request: %w", err)
-			if ctx.Err() != nil || attempt >= maxRequestRetries {
+			if ctx.Err() != nil || *retries >= maxRequestRetries {
 				return nil, err
 			}
 		} else {
+			retryReason = retryReasonForStatus(response.StatusCode)
 			responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBody+1))
 			response.Body.Close()
 			if readErr != nil {
@@ -130,13 +134,34 @@ func (transport transport) do(ctx context.Context, body []byte, accept string) (
 				return nil, errors.New("provider response exceeds 16 MiB")
 			}
 			err = decodeHTTPError(response.Status, responseBody)
-			if !retryableStatus(response.StatusCode) || attempt >= maxRequestRetries {
+			if !retryableStatus(response.StatusCode) || *retries >= maxRequestRetries {
 				return nil, err
 			}
 		}
+		(*retries)++
+		notifyRetry(ctx, retryReason)
 		if err := waitRetry(ctx, transport.retryInterval); err != nil {
 			return nil, err
 		}
+	}
+}
+
+func notifyRetry(ctx context.Context, reason string) {
+	if sink := event.RetrySink(ctx); sink != nil {
+		sink(reason)
+	}
+}
+
+func retryReasonForStatus(status int) string {
+	switch status {
+	case http.StatusRequestTimeout:
+		return "http_timeout"
+	case http.StatusConflict:
+		return "http_conflict"
+	case http.StatusTooManyRequests:
+		return "http_rate_limit"
+	default:
+		return "http_server_error"
 	}
 }
 

@@ -38,6 +38,7 @@ var (
 
 // MemoryTools 返回操作本 Agent 已持有图副本的工具。
 // snapshot 必须返回那份副本；写入工具通过 commit 写回，不得再 Clone 全局图。
+// memory_apply 是批量整理工具，只应装配给记忆整理 Agent。
 func MemoryTools(snapshot func() ctxgraph.Copy, commit func(ctxgraph.Copy) error) []Tool {
 	return []Tool{
 		memoryTool{name: memoryNeighborsName, snapshot: snapshot, commit: commit},
@@ -45,6 +46,7 @@ func MemoryTools(snapshot func() ctxgraph.Copy, commit func(ctxgraph.Copy) error
 		memoryTool{name: memorySourcesOfName, snapshot: snapshot, commit: commit},
 		memoryTool{name: memoryNodesInName, snapshot: snapshot, commit: commit},
 		memoryTool{name: memoryAddToSubgraphName, snapshot: snapshot, commit: commit},
+		memoryApplyTool{snapshot: snapshot, commit: commit},
 	}
 }
 

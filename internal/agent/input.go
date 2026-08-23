@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
@@ -98,6 +99,9 @@ func formatMemory(nodes []ctxgraph.Node) string {
 			b.WriteString("记忆：")
 		}
 		b.WriteString("\n- ")
+		if node.Kind != "" || node.Status != "" {
+			fmt.Fprintf(&b, "[%s/%s] ", node.Kind, node.Status)
+		}
 		b.WriteString(node.Statement)
 	}
 	return b.String()

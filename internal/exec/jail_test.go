@@ -2,7 +2,10 @@ package exec
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -83,7 +86,9 @@ func TestSandboxReapsBackgroundJobs(t *testing.T) {
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("background sleep held the exec slot")
 	}
-	s.Reap("env-a")
+	if err := s.Reap("env-a"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestSandboxHasWritableTmp(t *testing.T) {
@@ -101,5 +106,30 @@ func TestSandboxHasWritableTmp(t *testing.T) {
 	}
 	if !strings.Contains(res.Output, "ok") {
 		t.Fatalf("mktemp output = %q, want ok", res.Output)
+	}
+}
+
+func TestBwrapSharesHostNetwork(t *testing.T) {
+	if !probeBwrap() {
+		t.Skip("bwrap unavailable")
+	}
+	if _, err := osexec.LookPath("curl"); err != nil {
+		t.Skip("curl unavailable")
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("reachable"))
+	}))
+	defer server.Close()
+	s := New(Config{Slots: 1})
+	files := vfs.NewStore(t.TempDir())
+	result, err := s.View("env-a", files).Run(context.Background(), env.Cmd{
+		Command: `curl --noproxy '*' --fail --silent --max-time 5 ` + server.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 || result.Output != "reachable" {
+		t.Fatalf("Run() = %#v, want host network response", result)
 	}
 }

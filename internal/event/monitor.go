@@ -15,6 +15,9 @@ func Monitor(logger *slog.Logger) Handler {
 			return
 		}
 		level := slog.LevelInfo
+		if ev.Phase == PhaseRetry {
+			level = slog.LevelWarn
+		}
 		if ev.Err != "" {
 			level = slog.LevelError
 		}
@@ -51,6 +54,18 @@ func Monitor(logger *slog.Logger) Handler {
 		}
 		if ev.Tokens > 0 {
 			attrs = append(attrs, "tokens", ev.Tokens)
+		}
+		if ev.Retries > 0 {
+			attrs = append(attrs, "retries", ev.Retries)
+		}
+		if ev.RetryReason != "" {
+			attrs = append(attrs, "retry_reason", ev.RetryReason)
+		}
+		if ev.MemoryOrganized {
+			attrs = append(attrs,
+				"memory_candidates", ev.MemoryCandidates,
+				"memory_selected", ev.MemorySelected,
+			)
 		}
 		logger.Log(ctx, level, "runtime event", attrs...)
 	}

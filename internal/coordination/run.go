@@ -208,22 +208,25 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (output stri
 	}
 	defer func() {
 		if r.stores.Exec != nil {
-			r.stores.Exec.Reap(task.Env.ID)
+			err = errors.Join(err, r.stores.Exec.Reap(task.Env.ID))
 		}
 		if r.stores.Files == nil {
 			return
 		}
-		if rerr := r.stores.Files.Release(task.Env.ID); err == nil {
-			err = rerr
-		}
+		err = errors.Join(err, r.stores.Files.Release(task.Env.ID))
 	}()
 
 	parentID := task.Env.ParentID
 	if parentID == "" {
 		parentID = ManagerEnvID
 	}
-	if err := r.stores.Fork(parentID, task.Env.ID); err != nil {
+	if err := r.forkTaskEnvironment(task, parentID); err != nil {
 		return "", err
+	}
+	if task.SpawnedFrom == "" && task.Env.ParentID != "" {
+		if err := r.discardRootFiles(task.Env.ParentID); err != nil {
+			return "", err
+		}
 	}
 	if task.Env.ParentID == "" {
 		if err := r.stores.Memory.DropSubgraph(task.Env.ID, ManagerMemorySubgraphID); err != nil {
@@ -264,6 +267,16 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (output stri
 		}
 	}
 	return output, nil
+}
+
+func (r *runner) forkTaskEnvironment(task Task, parentID string) error {
+	if task.SpawnedFrom != "" || task.Env.ParentID == "" || r.stores.Files == nil {
+		return r.stores.Fork(parentID, task.Env.ID)
+	}
+	if err := r.stores.Memory.Fork(parentID, task.Env.ID); err != nil {
+		return err
+	}
+	return r.stores.Files.Handoff(parentID, task.Env.ID)
 }
 
 func (r *runner) drainJoins(ctx context.Context, task Task, nodes []Node, outputs map[string]string, merged map[string]bool) error {
@@ -681,6 +694,38 @@ func (r *runner) discardJoinedFiles(joined []joinedTask) error {
 	var err error
 	for _, item := range joined {
 		err = errors.Join(err, r.stores.DiscardFiles(item.task.Env.ID))
+	}
+	return err
+}
+
+func (r *runner) discardTaskFiles(envID string) error {
+	var err error
+	for _, suffix := range []string{
+		"", ":" + RolePlanner, ":" + RolePlanner + ":join", ":join",
+		":" + RoleVerifier, ":" + RoleVerifier + ":join",
+	} {
+		err = errors.Join(err, r.stores.DiscardFiles(envID+suffix))
+	}
+	return err
+}
+
+func (r *runner) discardRootFiles(envID string) error {
+	rootID := ""
+	for _, task := range r.graph.Snapshot().Tasks {
+		if task.Env.ID == envID {
+			rootID = task.ID
+			break
+		}
+	}
+	if rootID == "" {
+		return r.discardTaskFiles(envID)
+	}
+	var err error
+	for _, taskID := range r.graph.taskTree(rootID) {
+		task, ok := r.graph.Task(taskID)
+		if ok {
+			err = errors.Join(err, r.discardTaskFiles(task.Env.ID))
+		}
 	}
 	return err
 }

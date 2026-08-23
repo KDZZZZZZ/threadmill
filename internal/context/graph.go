@@ -37,13 +37,14 @@ const (
 
 // Node 是上下文图中的一条知识陈述。
 type Node struct {
-	ID             string   `json:"id"`               // 节点稳定标识
-	Kind           string   `json:"kind"`             // directive、fact 或 hypothesis
-	Statement      string   `json:"statement"`        // 原子化知识陈述
-	Status         string   `json:"status"`           // 当前有效性
-	SubgraphIDs    []string `json:"subgraph_ids"`     // 正式归属；一个节点可属于多个子图
-	SourceRefs     []string `json:"source_refs"`      // 支撑该陈述的来源引用
-	CreatorAgentID string   `json:"creator_agent_id"` // 创建该节点的 Agent
+	ID             string   `json:"id"`                      // 节点稳定标识
+	Kind           string   `json:"kind"`                    // directive、fact 或 hypothesis
+	Statement      string   `json:"statement"`               // 原子化知识陈述
+	Status         string   `json:"status"`                  // 当前有效性
+	SubgraphIDs    []string `json:"subgraph_ids"`            // 正式归属；一个节点可属于多个子图
+	SourceRefs     []string `json:"source_refs"`             // 支撑该陈述的来源引用
+	CreatorAgentID string   `json:"creator_agent_id"`        // 创建该节点的 Agent
+	SupersededBy   string   `json:"superseded_by,omitempty"` // status=superseded 时的取代者节点 ID
 }
 
 // Edge 是从节点或子图引用指向节点的有向关系。

@@ -3,6 +3,7 @@ package event
 import (
 	"context"
 	"math"
+	"strings"
 	"sync"
 	"time"
 )
@@ -49,14 +50,26 @@ type OperationMetrics struct {
 
 // MetricsSnapshot 是事件采集器的一致快照；不包含 prompt、delta 正文或动态标签。
 type MetricsSnapshot struct {
-	Model       OperationMetrics `json:"model"`
-	Tool        OperationMetrics `json:"tool"`
-	Task        OperationMetrics `json:"task"`
-	Memory      OperationMetrics `json:"memory"`
-	Tokens      uint64           `json:"tokens"`
-	ToolCalls   uint64           `json:"tool_calls"`
-	DeltaChunks uint64           `json:"delta_chunks"`
-	DeltaBytes  uint64           `json:"delta_bytes"`
+	Model                     OperationMetrics `json:"model"`
+	Tool                      OperationMetrics `json:"tool"`
+	Task                      OperationMetrics `json:"task"`
+	Memory                    OperationMetrics `json:"memory"`
+	Tokens                    uint64           `json:"tokens"`
+	ToolCalls                 uint64           `json:"tool_calls"`
+	ModelRetries              uint64           `json:"model_retries"`
+	MemoryTokens              uint64           `json:"memory_tokens"`
+	MemoryRetries             uint64           `json:"memory_retries"`
+	MemoryOrganizerRuns       uint64           `json:"memory_organizer_runs"`
+	MemoryOrganizerCandidates uint64           `json:"memory_organizer_candidates"`
+	MemoryOrganizerSelected   uint64           `json:"memory_organizer_selected"`
+	MemoryOrganizerTokens     uint64           `json:"memory_organizer_tokens"`
+	MemoryOrganizerDuration   DurationMetrics  `json:"memory_organizer_duration"`
+	StreamChunks              uint64           `json:"stream_chunks"`
+	ModelStreamIdle           time.Duration    `json:"model_stream_idle"`
+	MemoryStreamChunks        uint64           `json:"memory_stream_chunks"`
+	MemoryStreamIdle          time.Duration    `json:"memory_stream_idle"`
+	DeltaChunks               uint64           `json:"delta_chunks"`
+	DeltaBytes                uint64           `json:"delta_bytes"`
 }
 
 type histogram struct {
@@ -117,7 +130,10 @@ func (h histogram) quantile(q float64) time.Duration {
 			continue
 		}
 		if i < len(durationBounds) {
-			return durationBounds[i]
+			if durationBounds[i] < h.max {
+				return durationBounds[i]
+			}
+			return h.max
 		}
 		return h.max
 	}
@@ -146,6 +162,7 @@ func (o operation) snapshot() OperationMetrics {
 
 type modelFlight struct {
 	started   time.Time
+	lastDelta time.Time
 	deltaSeen bool
 }
 
@@ -158,16 +175,32 @@ type Collector struct {
 	task   operation
 	memory operation
 
-	modelFlights map[string]modelFlight
-	tokens       uint64
-	toolCalls    uint64
-	deltaChunks  uint64
-	deltaBytes   uint64
+	modelFlights              map[string]modelFlight
+	memoryFlights             map[string]modelFlight
+	tokens                    uint64
+	toolCalls                 uint64
+	modelRetries              uint64
+	memoryTokens              uint64
+	memoryRetries             uint64
+	memoryOrganizerRuns       uint64
+	memoryOrganizerCandidates uint64
+	memoryOrganizerSelected   uint64
+	memoryOrganizerTokens     uint64
+	memoryOrganizerDuration   histogram
+	memoryOrganizerFlights    map[string]uint64
+	streamChunks              uint64
+	memoryStreamChunks        uint64
+	deltaChunks               uint64
+	deltaBytes                uint64
 }
 
 // NewCollector 创建有界内存采集器。
 func NewCollector() *Collector {
-	return &Collector{modelFlights: make(map[string]modelFlight)}
+	return &Collector{
+		modelFlights:           make(map[string]modelFlight),
+		memoryFlights:          make(map[string]modelFlight),
+		memoryOrganizerFlights: make(map[string]uint64),
+	}
 }
 
 // Handle 聚合一条事件；它不保留正文，也不执行外部 I/O。
@@ -179,13 +212,33 @@ func (c *Collector) Handle(_ context.Context, ev RuntimeEvent) {
 	defer c.mu.Unlock()
 
 	if ev.Kind == KindModel && ev.Phase == PhaseDelta {
-		c.deltaChunks++
-		c.deltaBytes += uint64(len(ev.Delta))
+		if ev.Delta == "" {
+			c.streamChunks++
+		} else {
+			c.deltaChunks++
+			c.deltaBytes += uint64(len(ev.Delta))
+		}
 		flight, ok := c.modelFlights[ev.AgentID]
-		if ok && !flight.deltaSeen && !flight.started.IsZero() && !ev.Time.Before(flight.started) {
-			c.model.ttft.observe(ev.Time.Sub(flight.started))
-			flight.deltaSeen = true
+		if ok {
+			flight.lastDelta = ev.Time
+			if (ev.StreamText || ev.Delta != "") && !flight.deltaSeen && !flight.started.IsZero() && !ev.Time.Before(flight.started) {
+				c.model.ttft.observe(ev.Time.Sub(flight.started))
+				flight.deltaSeen = true
+			}
 			c.modelFlights[ev.AgentID] = flight
+		}
+		return
+	}
+	if ev.Kind == KindMemory && ev.Phase == PhaseDelta {
+		c.memoryStreamChunks++
+		flight, ok := c.memoryFlights[ev.AgentID]
+		if ok {
+			flight.lastDelta = ev.Time
+			if ev.StreamText && !flight.deltaSeen && !flight.started.IsZero() && !ev.Time.Before(flight.started) {
+				c.memory.ttft.observe(ev.Time.Sub(flight.started))
+				flight.deltaSeen = true
+			}
+			c.memoryFlights[ev.AgentID] = flight
 		}
 		return
 	}
@@ -200,6 +253,13 @@ func (c *Collector) Handle(_ context.Context, ev RuntimeEvent) {
 		op.active++
 		if ev.Kind == KindModel {
 			c.modelFlights[ev.AgentID] = modelFlight{started: ev.Time}
+		}
+		if ev.Kind == KindMemory {
+			if strings.HasPrefix(ev.Name, "organize_") {
+				c.memoryOrganizerFlights[ev.AgentID] = 0
+			} else {
+				c.memoryFlights[ev.AgentID] = modelFlight{started: ev.Time}
+			}
 		}
 	case PhaseEnd:
 		op.completed++
@@ -216,6 +276,26 @@ func (c *Collector) Handle(_ context.Context, ev RuntimeEvent) {
 			delete(c.modelFlights, ev.AgentID)
 			c.tokens += uint64(max(ev.Tokens, 0))
 			c.toolCalls += uint64(max(ev.ToolCalls, 0))
+			if _, ok := c.memoryOrganizerFlights[ev.AgentID]; ok {
+				c.memoryOrganizerFlights[ev.AgentID] += uint64(max(ev.Tokens, 0))
+			}
+		}
+		if ev.Kind == KindMemory {
+			delete(c.memoryFlights, ev.AgentID)
+			c.memoryTokens += uint64(max(ev.Tokens, 0))
+			c.memoryRetries += uint64(max(ev.Retries, 0))
+			if ev.MemoryOrganized {
+				c.memoryOrganizerRuns++
+				c.memoryOrganizerCandidates += uint64(max(ev.MemoryCandidates, 0))
+				c.memoryOrganizerSelected += uint64(max(ev.MemorySelected, 0))
+				c.memoryOrganizerTokens += c.memoryOrganizerFlights[ev.AgentID]
+				c.memoryOrganizerDuration.observe(ev.Duration)
+			}
+			delete(c.memoryOrganizerFlights, ev.AgentID)
+		}
+	case PhaseRetry:
+		if ev.Kind == KindModel {
+			c.modelRetries++
 		}
 	}
 }
@@ -242,14 +322,44 @@ func (c *Collector) Snapshot() MetricsSnapshot {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	now := time.Now()
+	modelStreamIdle := streamIdle(now, c.modelFlights)
+	memoryStreamIdle := streamIdle(now, c.memoryFlights)
 	return MetricsSnapshot{
-		Model:       c.model.snapshot(),
-		Tool:        c.tool.snapshot(),
-		Task:        c.task.snapshot(),
-		Memory:      c.memory.snapshot(),
-		Tokens:      c.tokens,
-		ToolCalls:   c.toolCalls,
-		DeltaChunks: c.deltaChunks,
-		DeltaBytes:  c.deltaBytes,
+		Model:                     c.model.snapshot(),
+		Tool:                      c.tool.snapshot(),
+		Task:                      c.task.snapshot(),
+		Memory:                    c.memory.snapshot(),
+		Tokens:                    c.tokens,
+		ToolCalls:                 c.toolCalls,
+		ModelRetries:              c.modelRetries,
+		MemoryTokens:              c.memoryTokens,
+		MemoryRetries:             c.memoryRetries,
+		MemoryOrganizerRuns:       c.memoryOrganizerRuns,
+		MemoryOrganizerCandidates: c.memoryOrganizerCandidates,
+		MemoryOrganizerSelected:   c.memoryOrganizerSelected,
+		MemoryOrganizerTokens:     c.memoryOrganizerTokens,
+		MemoryOrganizerDuration:   c.memoryOrganizerDuration.snapshot(),
+		StreamChunks:              c.streamChunks,
+		ModelStreamIdle:           modelStreamIdle,
+		MemoryStreamChunks:        c.memoryStreamChunks,
+		MemoryStreamIdle:          memoryStreamIdle,
+		DeltaChunks:               c.deltaChunks,
+		DeltaBytes:                c.deltaBytes,
 	}
+}
+
+func streamIdle(now time.Time, flights map[string]modelFlight) time.Duration {
+	var idle time.Duration
+	for _, flight := range flights {
+		last := flight.lastDelta
+		if last.IsZero() {
+			last = flight.started
+		}
+		if last.IsZero() || now.Before(last) {
+			continue
+		}
+		idle = max(idle, now.Sub(last))
+	}
+	return idle
 }

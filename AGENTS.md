@@ -75,6 +75,7 @@ Example:
 
 ## Working rules
 
+- Architecture changes and module optimization must follow [`docs/architecture-governance.md`](docs/architecture-governance.md). Dependencies not shown in its architecture diagram require explicit human approval.
 - Before any Go coding, review, debugging, troubleshooting, or setup task, load the `samber/cc-skills-golang@golang-how-to` skill first — it routes to whichever other Go skills the task needs.
 - Use `tdd` for test-first feature or bug work.
 - Use `source-driven-development` when implementing against a library or framework.

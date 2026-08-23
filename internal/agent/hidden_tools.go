@@ -197,6 +197,27 @@ func unwrapEventProvider(p Provider) Provider {
 	return p
 }
 
+// hiddenCostProvider keeps organizer calls out of the visible model stream while
+// retaining their token and retry cost on the enclosing memory operation.
+type hiddenCostProvider struct {
+	inner    Provider
+	tokens   int
+	retries  int
+	activity func(bool)
+}
+
+func (p *hiddenCostProvider) Generate(ctx context.Context, request Request) (AssistantMessage, error) {
+	ctx = event.WithRetrySink(ctx, func(string) { p.retries++ })
+	if p.activity != nil {
+		ctx = event.WithDeltaActivitySink(ctx, p.activity)
+	}
+	message, err := p.inner.Generate(ctx, request)
+	if message.Usage != nil {
+		p.tokens += message.Usage.TotalTokens
+	}
+	return message, err
+}
+
 func (l *Loop) snapshotTranscript() Transcript {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -220,16 +241,26 @@ func (l *Loop) withTranscript(ctx context.Context) context.Context {
 func (l *Loop) execHidden(ctx context.Context, name string, args json.RawMessage) (out agenttool.Output, err error) {
 	callID := "hidden-" + name
 	started := time.Now()
+	transcript := l.snapshotTranscript()
+	cost := &hiddenCostProvider{inner: transcript.Provider}
+	cost.activity = func(text bool) {
+		l.publish(ctx, event.MemoryDelta(l.agentID, name, callID, text))
+	}
+	transcript.Provider = cost
+	ctx = WithTranscript(ctx, transcript)
 	l.publish(ctx, event.MemoryStart(l.agentID, name, callID))
 	defer func() {
-		l.publish(ctx, event.MemoryEnd(l.agentID, name, callID, started, err))
+		end := event.MemoryEnd(l.agentID, name, callID, started, err)
+		end.Tokens = cost.tokens
+		end.Retries = cost.retries
+		l.publish(ctx, end)
 	}()
 
 	tool, ok := l.tools[name]
 	if !ok {
 		return agenttool.Output{}, fmt.Errorf("tool %q not found", name)
 	}
-	out, err = tool.Execute(l.withTranscript(ctx), agenttool.Call{
+	out, err = tool.Execute(ctx, agenttool.Call{
 		ID:        callID,
 		Name:      name,
 		Arguments: args,

@@ -54,6 +54,46 @@ func TestMonitorLogsErrorLevel(t *testing.T) {
 	}
 }
 
+func TestMonitorLogsModelRetries(t *testing.T) {
+	var output bytes.Buffer
+	logger := logging.New(logging.Config{Output: &output, JSON: true})
+	ev := ModelRetry("planner", 3, "stream_server_error")
+	Monitor(logger)(context.Background(), ev)
+
+	var got map[string]any
+	if err := json.Unmarshal(output.Bytes(), &got); err != nil {
+		t.Fatalf("decode log: %v", err)
+	}
+	if got["level"] != "WARN" || got["phase"] != "retry" ||
+		got["retries"] != float64(3) || got["retry_reason"] != "stream_server_error" {
+		t.Fatalf("retry log = %#v", got)
+	}
+}
+
+func TestMonitorLogsMemoryOrganizerSelection(t *testing.T) {
+	var output bytes.Buffer
+	logger := logging.New(logging.Config{Output: &output, JSON: true})
+	ev := MemoryOrganized(
+		"subgraph-organizer",
+		"organize_task_context",
+		"task-2-package",
+		time.Now().Add(-time.Millisecond),
+		40,
+		0,
+		nil,
+	)
+	Monitor(logger)(context.Background(), ev)
+
+	var got map[string]any
+	if err := json.Unmarshal(output.Bytes(), &got); err != nil {
+		t.Fatalf("decode log: %v", err)
+	}
+	if got["memory_candidates"] != float64(40) ||
+		got["memory_selected"] != float64(0) {
+		t.Fatalf("organizer log = %#v", got)
+	}
+}
+
 func TestMonitorSkipsDelta(t *testing.T) {
 	var output bytes.Buffer
 	logger := logging.New(logging.Config{Output: &output, JSON: true})

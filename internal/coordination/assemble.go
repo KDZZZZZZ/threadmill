@@ -159,13 +159,14 @@ func Assemble(
 					},
 					cleanup: func(activeID string, completed bool) error {
 						if !completed {
+							var err error
 							if stores.Exec != nil {
-								stores.Exec.Reap(activeID)
+								err = stores.Exec.Reap(activeID)
 							}
 							if activeID != workspaceID || !disposable {
-								return nil
+								return err
 							}
-							return stores.Files.Release(workspaceID)
+							return errors.Join(err, stores.Files.Release(workspaceID))
 						}
 						var err error
 						if activeID != workspaceID {
