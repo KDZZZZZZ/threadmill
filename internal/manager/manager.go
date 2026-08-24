@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -111,9 +112,20 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	files, err := vfs.NewPersistentStore(opt.Root, paths.VFSDir)
+	liveRoot := paths.VFSDir
+	if file.VFS.LiveRoot != "" {
+		liveRoot = file.VFS.LiveRoot
+	}
+	files, err := vfs.NewPersistentStoreWithOptions(
+		opt.Root,
+		liveRoot,
+		vfs.Options{Overlay: true},
+	)
 	if err != nil {
 		return nil, err
+	}
+	if file.Memory.SoftMemoryLimitMB > 0 {
+		debug.SetMemoryLimit(int64(file.Memory.SoftMemoryLimitMB) << 20)
 	}
 
 	s := &Manager{
@@ -151,6 +163,13 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 		s.logFile = f
 	}
 	s.logger = logger
+	fileStats := files.Stats()
+	if fileStats.OverlayAvailable {
+		logger.Info("VFS materialization acceleration available", "backend", fileStats.OverlayBackend)
+	} else if !vfs.ReflinkCloneable(opt.Root, liveRoot) {
+		logger.Warn("materialize cannot use reflink clones (live root not on a reflink filesystem, or base repo and live root on different devices); each environment will full-copy the repo",
+			"live_root", liveRoot)
+	}
 	bus := event.NewBus(s.onEvent, s.metrics.Handle, event.Monitor(logger), opt.OnEvent)
 	s.events = bus
 	overlay := agent.FileOverlay{
@@ -353,6 +372,11 @@ func (s *Manager) Close() {
 		s.cancel()
 	}
 	s.wg.Wait()
+	if s.stores.Files != nil {
+		if err := s.stores.Files.Close(); err != nil && s.logger != nil {
+			s.logger.Warn("close VFS", "error", err)
+		}
+	}
 	if s.logFile != nil {
 		_ = s.logFile.Close()
 	}
@@ -582,6 +606,12 @@ func (s *Manager) logSnapshot() {
 		"exec_run_duration", snapshot.Exec.RunDuration,
 		"exec_tracked_process_groups", snapshot.Exec.TrackedProcessGroups,
 		"exec_runtime_dirs", snapshot.Exec.RuntimeDirs,
+		"exec_heavy_capacity", snapshot.Exec.HeavyCapacity,
+		"exec_heavy_queued", snapshot.Exec.HeavyQueued,
+		"exec_heavy_active", snapshot.Exec.HeavyActive,
+		"exec_heavy_peak_queued", snapshot.Exec.HeavyPeakQueued,
+		"exec_heavy_peak_active", snapshot.Exec.HeavyPeakActive,
+		"exec_heavy_wait_duration", snapshot.Exec.HeavyWaitDuration,
 		"vfs_environments", snapshot.VFS.Environments,
 		"vfs_live_dirs", snapshot.VFS.LiveDirs,
 		"vfs_overlay_files", snapshot.VFS.OverlayFiles,

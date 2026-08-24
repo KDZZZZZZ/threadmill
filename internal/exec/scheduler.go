@@ -38,6 +38,12 @@ type Config struct {
 	ContainerImage string
 	// ExternalSandbox trusts the caller's process boundary for isolation.
 	ExternalSandbox bool
+	// HeavySlots 限制重命令（历史均值超过 HeavyThreshold）的并发；0 时取 slots/8（至少 1）。
+	HeavySlots int
+	// HeavyThreshold 判定重命令的历史平均时长阈值；0 时取 10s。
+	HeavyThreshold time.Duration
+	// MemoryBudgetBytes 按历史峰值 RSS 做记账准入；0 关闭。
+	MemoryBudgetBytes int64
 }
 
 // Scheduler 用信号量限制并发，并把命令跑进某个 env 的 live 目录。
@@ -54,21 +60,33 @@ type Scheduler struct {
 	groups   map[string][]int
 	runtimes map[string]string
 	counters schedulerCounters
+	costs    *costTable
+
+	heavy          chan struct{}
+	heavyThreshold time.Duration
+	memMu          sync.Mutex
+	memInUse       int64
+	memBudget      int64
 }
 
 type schedulerCounters struct {
-	requests     uint64
-	started      uint64
-	completed    uint64
-	errors       uint64
-	canceled     uint64
-	timedOut     uint64
-	queued       int
-	active       int
-	peakQueued   int
-	peakActive   int
-	waitDuration time.Duration
-	runDuration  time.Duration
+	requests          uint64
+	started           uint64
+	completed         uint64
+	errors            uint64
+	canceled          uint64
+	timedOut          uint64
+	queued            int
+	active            int
+	peakQueued        int
+	peakActive        int
+	waitDuration      time.Duration
+	runDuration       time.Duration
+	heavyQueued       int
+	heavyActive       int
+	heavyPeakQueued   int
+	heavyPeakActive   int
+	heavyWaitDuration time.Duration
 }
 
 // Stats 是执行槽位、排队和完成情况的并发一致快照。
@@ -90,6 +108,12 @@ type Stats struct {
 	RunDuration          time.Duration `json:"run_duration"`
 	TrackedProcessGroups int           `json:"tracked_process_groups"`
 	RuntimeDirs          int           `json:"runtime_dirs"`
+	HeavyCapacity        int           `json:"heavy_capacity"`
+	HeavyQueued          int           `json:"heavy_queued"`
+	HeavyActive          int           `json:"heavy_active"`
+	HeavyPeakQueued      int           `json:"heavy_peak_queued"`
+	HeavyPeakActive      int           `json:"heavy_peak_active"`
+	HeavyWaitDuration    time.Duration `json:"heavy_wait_duration"`
 }
 
 // New 创建调度器。Slots <= 0 时用 runtime.NumCPU()。
@@ -108,7 +132,21 @@ func New(cfg Config) *Scheduler {
 		timeout:   cfg.Timeout,
 		outputCap: capBytes,
 		image:     cfg.ContainerImage,
+		costs:     newCostTable(),
 	}
+	heavySlots := cfg.HeavySlots
+	if heavySlots <= 0 {
+		heavySlots = max(1, n/8)
+	}
+	s.heavy = make(chan struct{}, heavySlots)
+	for range heavySlots {
+		s.heavy <- struct{}{}
+	}
+	s.heavyThreshold = cfg.HeavyThreshold
+	if s.heavyThreshold <= 0 {
+		s.heavyThreshold = defaultHeavyThreshold
+	}
+	s.memBudget = cfg.MemoryBudgetBytes
 	if cfg.ExternalSandbox {
 		s.sandbox = sandboxExternal
 	} else {
@@ -151,6 +189,12 @@ func (s *Scheduler) Stats() Stats {
 		RunDuration:          c.runDuration,
 		TrackedProcessGroups: tracked,
 		RuntimeDirs:          len(s.runtimes),
+		HeavyCapacity:        cap(s.heavy),
+		HeavyQueued:          c.heavyQueued,
+		HeavyActive:          c.heavyActive,
+		HeavyPeakQueued:      c.heavyPeakQueued,
+		HeavyPeakActive:      c.heavyPeakActive,
+		HeavyWaitDuration:    c.heavyWaitDuration,
 	}
 }
 
@@ -201,6 +245,39 @@ func (v execView) Run(ctx context.Context, spec env.Cmd) (result env.ExecResult,
 		v.sched.requestRejected(0, false, err)
 		return env.ExecResult{}, err
 	}
+	// 物化发生在拿槽之前：环境准备不占用命令槽位，拷贝时间不计入排队。
+	live, err := v.files.Materialize(v.envID)
+	if err != nil {
+		return env.ExecResult{}, err
+	}
+	heavy, estRSS := v.sched.commandClass(spec.Command)
+	if !v.sched.reserveMemory(ctx, estRSS) {
+		v.sched.requestRejected(time.Since(requested), false, ctx.Err())
+		return env.ExecResult{}, ctx.Err()
+	}
+	defer v.sched.releaseMemory(estRSS)
+	if heavy {
+		heavyQueued := false
+		heavyRequested := time.Now()
+		select {
+		case <-v.sched.heavy:
+		default:
+			heavyQueued = true
+			v.sched.heavyRequestQueued()
+			select {
+			case <-v.sched.heavy:
+			case <-ctx.Done():
+				v.sched.heavyRequestRejected(time.Since(heavyRequested))
+				v.sched.requestRejected(time.Since(requested), false, ctx.Err())
+				return env.ExecResult{}, ctx.Err()
+			}
+		}
+		v.sched.heavyRequestStarted(time.Since(heavyRequested), heavyQueued)
+		defer func() {
+			v.sched.heavy <- struct{}{}
+			v.sched.heavyRequestCompleted()
+		}()
+	}
 	queued := false
 	select {
 	case <-v.sched.slots:
@@ -221,10 +298,6 @@ func (v execView) Run(ctx context.Context, spec env.Cmd) (result env.ExecResult,
 		v.sched.requestCompleted(time.Since(started), runErr)
 	}()
 
-	live, err := v.files.Materialize(v.envID)
-	if err != nil {
-		return env.ExecResult{}, err
-	}
 	timeout := spec.Timeout
 	if timeout == 0 {
 		timeout = v.sched.timeout
@@ -234,10 +307,22 @@ func (v execView) Run(ctx context.Context, spec env.Cmd) (result env.ExecResult,
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
+	var out env.ExecResult
 	if v.sched.run != nil {
-		return v.sched.run(ctx, live, spec)
+		out, runErr = v.sched.run(ctx, live, spec)
+	} else {
+		out, runErr = v.sched.runSandboxed(ctx, live, spec.Command, v.envID)
 	}
-	return v.sched.runSandboxed(ctx, live, spec.Command, v.envID)
+	v.sched.costs.record(spec.Command, time.Since(started), out.PeakRSSBytes)
+	return out, runErr
+}
+
+// CostStats 返回按命令指纹累计的时长与 RSS 峰值画像，供调度分层与容量规划使用。
+func (s *Scheduler) CostStats() CostSnapshot {
+	if s == nil || s.costs == nil {
+		return CostSnapshot{}
+	}
+	return s.costs.snapshot()
 }
 
 func (s *Scheduler) requestReceived() {
@@ -283,6 +368,37 @@ func (s *Scheduler) requestCompleted(took time.Duration, err error) {
 	s.counters.completed++
 	s.counters.runDuration += took
 	s.counters.recordError(err)
+}
+
+func (s *Scheduler) heavyRequestQueued() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.counters.heavyQueued++
+	s.counters.heavyPeakQueued = max(s.counters.heavyPeakQueued, s.counters.heavyQueued)
+}
+
+func (s *Scheduler) heavyRequestStarted(wait time.Duration, queued bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if queued {
+		s.counters.heavyQueued--
+		s.counters.heavyWaitDuration += wait
+	}
+	s.counters.heavyActive++
+	s.counters.heavyPeakActive = max(s.counters.heavyPeakActive, s.counters.heavyActive)
+}
+
+func (s *Scheduler) heavyRequestRejected(wait time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.counters.heavyQueued--
+	s.counters.heavyWaitDuration += wait
+}
+
+func (s *Scheduler) heavyRequestCompleted() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.counters.heavyActive--
 }
 
 func (c *schedulerCounters) recordError(err error) {

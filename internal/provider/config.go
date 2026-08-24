@@ -44,11 +44,18 @@ type FileConfig struct {
 	Agents  agent.FileAgents      `yaml:"agents"`
 	Exec    ExecConfig            `yaml:"exec"`
 	Memory  MemoryFileConfig      `yaml:"memory"`
+	VFS     VFSFileConfig         `yaml:"vfs"`
 }
 
-// MemoryFileConfig 配置记忆图整理行为。
+// MemoryFileConfig 配置记忆图整理与进程内存软限制。
 type MemoryFileConfig struct {
-	Curation agent.CurationConfig `yaml:"curation"`
+	Curation          agent.CurationConfig `yaml:"curation"`
+	SoftMemoryLimitMB int                  `yaml:"soft_memory_limit_mb"` // 0 表示不设置 GOMEMLIMIT
+}
+
+// VFSFileConfig 配置 VFS 持久化 live 目录；reflink 文件系统（XFS/btrfs）可让物化退化为块级克隆。
+type VFSFileConfig struct {
+	LiveRoot string `yaml:"live_root"` // 空表示用默认派生目录
 }
 
 // ExecConfig 配置命令执行槽位、超时、输出上限和沙箱边界。
@@ -237,7 +244,23 @@ func decodeConfig(path string, reader io.Reader) (FileConfig, error) {
 	if err := config.Memory.Curation.Validate(); err != nil {
 		return FileConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
+	if config.Memory.SoftMemoryLimitMB < 0 {
+		return FileConfig{}, fmt.Errorf("%w: memory.soft_memory_limit_mb must not be negative", ErrInvalidConfig)
+	}
+	if err := config.VFS.validate(); err != nil {
+		return FileConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+	}
 	return config, nil
+}
+
+func (c VFSFileConfig) validate() error {
+	if strings.TrimSpace(c.LiveRoot) != c.LiveRoot {
+		return fmt.Errorf("vfs.live_root must not have surrounding whitespace")
+	}
+	if c.LiveRoot != "" && !filepath.IsAbs(c.LiveRoot) {
+		return fmt.Errorf("vfs.live_root must be an absolute path")
+	}
+	return nil
 }
 
 func loadConfigMap(path string, required bool) (map[string]any, bool, error) {

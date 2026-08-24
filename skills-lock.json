@@ -1,11 +1,29 @@
 {
   "version": 1,
   "skills": {
+    "architectural-refactor": {
+      "source": "petekp/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/architectural-refactor/SKILL.md",
+      "computedHash": "239115d52da78b7585889022f39449f8c1ed70bb7ea5750c824d93bee262ae70"
+    },
+    "audit-overengineering": {
+      "source": "betterlmy/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/audit-overengineering/SKILL.md",
+      "computedHash": "72597ca379bb4b80ba9b7b522bc837139334e950e66060d375eac34802ff7598"
+    },
     "bubbletea": {
       "source": "brojonat/llmsrules",
       "sourceType": "github",
       "skillPath": "skills/bubbletea/SKILL.md",
       "computedHash": "19e5d4bb033fe65f3c1fcb57ba0e7ed7368b928c6abe5080daebb29155a4b7ce"
+    },
+    "code-review-and-quality": {
+      "source": "addyosmani/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/code-review-and-quality/SKILL.md",
+      "computedHash": "6231479cc74c7ed70a5618b81b3f94034d9806c0319a1a23d15f9b94a368c581"
     },
     "go-tui-design": {
       "source": "trentkm/go-tui-design",
@@ -294,6 +312,24 @@
       "sourceType": "github",
       "skillPath": "skills/ponytail/SKILL.md",
       "computedHash": "210fa0831f649ce9f8a305f7b7c8cf2a0dd09ac4dd53067109941b96e7811d4e"
+    },
+    "ponytail-audit": {
+      "source": "dietrichgebert/ponytail",
+      "sourceType": "github",
+      "skillPath": "skills/ponytail-audit/SKILL.md",
+      "computedHash": "8b8d72e6ff70b65b6c9518d470fcf29dc696eea93d28f3efa10fdcc60cbd696d"
+    },
+    "refactor-safety-net": {
+      "source": "ahmedbenaw/refactor-chain",
+      "sourceType": "github",
+      "skillPath": "skills/refactor-safety-net/SKILL.md",
+      "computedHash": "a71033bf01b01f0a5f9dd17be3f0bf5ff338ef1b93a1a5aed8f4c577d02aff6d"
+    },
+    "software-designer": {
+      "source": "betterlmy/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/software-designer/SKILL.md",
+      "computedHash": "2e3e11f09ae88bf4a35f833086e5e6fb9e1b36cb3d50cd0a6e8289a87a6d96b4"
     },
     "source-driven-development": {
       "source": "addyosmani/agent-skills",

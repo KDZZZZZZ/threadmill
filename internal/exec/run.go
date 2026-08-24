@@ -6,11 +6,23 @@ import (
 	"io"
 	"os"
 	osexec "os/exec"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/KDZZZZZZ/threadmill/internal/env"
 )
+
+const outputCopyBufferSize = 32 * 1024
+
+var outputCopyBuffers = sync.Pool{New: func() any {
+	buffer := make([]byte, outputCopyBufferSize)
+	return &buffer
+}}
+
+type plainReader struct {
+	io.Reader
+}
 
 func sandboxEnv(home, tmpdir string) []string {
 	path := os.Getenv("PATH")
@@ -91,12 +103,24 @@ func collect(ctx context.Context, cmd *osexec.Cmd, capBytes int, track func(int)
 		track(pgid)
 	}
 
+	meter := newProcMeter()
+	meterStop := make(chan struct{})
+	peakCh := make(chan int64, 1)
+	go func() { peakCh <- meter.run(pgid, meterStop) }()
+
 	var buf capBuffer
 	buf.cap = capBytes
 	copied := make(chan struct{})
 	go func() {
 		defer close(copied)
-		_, _ = io.Copy(&buf, pr)
+		buffer := outputCopyBuffers.Get().(*[]byte)
+		defer func() {
+			clear(*buffer)
+			outputCopyBuffers.Put(buffer)
+		}()
+		// *os.File implements io.WriterTo, which would make CopyBuffer ignore
+		// the pooled buffer. Hide that optional method while draining the pipe.
+		_, _ = io.CopyBuffer(&buf, plainReader{Reader: pr}, *buffer)
 	}()
 
 	waited := make(chan error, 1)
@@ -107,6 +131,8 @@ func collect(ctx context.Context, cmd *osexec.Cmd, capBytes int, track func(int)
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		err = <-waited
 	}
+	close(meterStop)
+	peakRSS := uint64(<-peakCh)
 	drain := time.NewTimer(100 * time.Millisecond)
 	select {
 	case <-copied:
@@ -118,14 +144,14 @@ func collect(ctx context.Context, cmd *osexec.Cmd, capBytes int, track func(int)
 	_ = pr.Close()
 	out := buf.String()
 	if ctx.Err() != nil {
-		return env.ExecResult{Output: out}, ctx.Err()
+		return env.ExecResult{Output: out, PeakRSSBytes: peakRSS}, ctx.Err()
 	}
 	if err == nil {
-		return env.ExecResult{Output: out}, nil
+		return env.ExecResult{Output: out, PeakRSSBytes: peakRSS}, nil
 	}
 	var ee *osexec.ExitError
 	if errors.As(err, &ee) {
-		return env.ExecResult{ExitCode: ee.ExitCode(), Output: out}, nil
+		return env.ExecResult{ExitCode: ee.ExitCode(), Output: out, PeakRSSBytes: peakRSS}, nil
 	}
-	return env.ExecResult{Output: out}, err
+	return env.ExecResult{Output: out, PeakRSSBytes: peakRSS}, err
 }

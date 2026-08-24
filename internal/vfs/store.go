@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -29,8 +30,11 @@ var (
 
 // Default limits for VFS absorb/file operations.
 const (
-	MaxFileSize  = 50 * 1024 * 1024  // 50 MB
-	MaxTotalSize = 200 * 1024 * 1024 // 200 MB
+	MaxFileSize               = 50 * 1024 * 1024  // 50 MB
+	MaxTotalSize              = 200 * 1024 * 1024 // 200 MB
+	maxMaterializeCopies      = 8
+	defaultOverlayLimit       = 128
+	defaultNativeOverlayLimit = 1024
 	// MergeRuntimeDir is visible only while a joined target reviews incoming files.
 	MergeRuntimeDir = ".threadmill/runtime/joins"
 )
@@ -83,19 +87,68 @@ type layer struct {
 	baseline []map[string]blob // Fork 瞬间从父到根的 overlay 快照；nil 表示不是 Fork 出来的
 }
 
+type materializeCall struct {
+	done chan struct{}
+	dir  string
+	err  error
+}
+
+// Options selects optional VFS acceleration without changing visible file semantics.
+type Options struct {
+	Overlay      bool
+	OverlayLimit int
+}
+
 // Store 按环境保存 overlay。Fork 拍父 overlay 快照作基线，不复制 host 树。
 type Store struct {
-	mu       sync.Mutex // ponytail: one store mutex, per-env locks if throughput matters
-	baseDir  string
-	liveRoot string
-	envs     map[string]*layer
-	lives    map[string]string
-	merges   map[string]MergeManifest
+	mu            sync.Mutex // ponytail: one store mutex, per-env locks if throughput matters
+	baseDir       string
+	liveRoot      string
+	envs          map[string]*layer
+	lives         map[string]string
+	liveBaselines map[string]*liveFingerprint // 物化完成时的分桶 stat 向量；恢复目录首次仍做内容扫描
+	merges        map[string]MergeManifest
+	materializing map[string]*materializeCall
+	ioSlots       chan struct{}
+	overlay       *overlayDriver
+	overlaySlots  chan struct{}
+	mountMu       sync.Mutex
+	mounts        map[string]*overlayMount
 
-	materializeCopies       uint64
-	materializeCopyErrors   uint64
-	materializeCopyDuration time.Duration
-	handoffs                uint64
+	epochMu sync.Mutex
+	epoch   string // 基线仓一次性 stat 纪元，见 fingerprint.go
+
+	baseFilesOnce sync.Once
+	baseFiles     map[string]fileSnapshot
+	baseFilesErr  error
+
+	materializeCopies        uint64
+	materializeOverlays      uint64
+	materializeReflinks      uint64
+	materializeFullCopies    uint64
+	materializeFallbacks     uint64
+	overlayCapacityFallbacks uint64
+	overlayErrorFallbacks    uint64
+	overlayLastFallback      string
+	materializeCopyErrors    uint64
+	materializeCopyDuration  time.Duration
+	materializeActive        int
+	materializePeakActive    int
+	materializeWaitDuration  time.Duration
+	absorbFastPaths          uint64
+	absorbUpperAttempts      uint64
+	absorbUpperEntries       uint64
+	absorbUpperFallbacks     uint64
+	absorbUpperErrors        uint64
+	absorbUpperDuration      time.Duration
+	absorbScans              uint64
+	absorbScanErrors         uint64
+	absorbScanDuration       time.Duration
+	absorbContentComparisons uint64
+	absorbActive             int
+	absorbPeakActive         int
+	absorbWaitDuration       time.Duration
+	handoffs                 uint64
 }
 
 // Stats 是 VFS 当前持有的有界资源清单。
@@ -106,25 +159,67 @@ type Stats struct {
 	Tombstones   int   `json:"tombstones"`
 	OverlayBytes int64 `json:"overlay_bytes"`
 
-	MaterializeCopies       uint64        `json:"materialize_copies"`
-	MaterializeCopyErrors   uint64        `json:"materialize_copy_errors"`
-	MaterializeCopyDuration time.Duration `json:"materialize_copy_duration"`
-	Handoffs                uint64        `json:"handoffs"`
+	MaterializeCopies        uint64        `json:"materialize_copies"`
+	MaterializeOverlays      uint64        `json:"materialize_overlays"`
+	MaterializeReflinks      uint64        `json:"materialize_reflinks"`
+	MaterializeFullCopies    uint64        `json:"materialize_full_copies"`
+	MaterializeFallbacks     uint64        `json:"materialize_fallbacks"`
+	OverlayCapacityFallbacks uint64        `json:"overlay_capacity_fallbacks"`
+	OverlayErrorFallbacks    uint64        `json:"overlay_error_fallbacks"`
+	OverlayLastFallback      string        `json:"overlay_last_fallback,omitempty"`
+	MaterializeCopyErrors    uint64        `json:"materialize_copy_errors"`
+	MaterializeCopyDuration  time.Duration `json:"materialize_copy_duration"`
+	MaterializeCapacity      int           `json:"materialize_capacity"`
+	MaterializeActive        int           `json:"materialize_active"`
+	MaterializePeakActive    int           `json:"materialize_peak_active"`
+	MaterializeWaitDuration  time.Duration `json:"materialize_wait_duration"`
+	OverlayAvailable         bool          `json:"overlay_available"`
+	OverlayBackend           string        `json:"overlay_backend"`
+	OverlayActive            int           `json:"overlay_active"`
+	OverlayCapacity          int           `json:"overlay_capacity"`
+	AbsorbFastPaths          uint64        `json:"absorb_fast_paths"`
+	AbsorbUpperAttempts      uint64        `json:"absorb_upper_attempts"`
+	AbsorbUpperEntries       uint64        `json:"absorb_upper_entries"`
+	AbsorbUpperFallbacks     uint64        `json:"absorb_upper_fallbacks"`
+	AbsorbUpperErrors        uint64        `json:"absorb_upper_errors"`
+	AbsorbUpperDuration      time.Duration `json:"absorb_upper_duration"`
+	AbsorbScans              uint64        `json:"absorb_scans"`
+	AbsorbScanErrors         uint64        `json:"absorb_scan_errors"`
+	AbsorbScanDuration       time.Duration `json:"absorb_scan_duration"`
+	AbsorbContentComparisons uint64        `json:"absorb_content_comparisons"`
+	AbsorbCapacity           int           `json:"absorb_capacity"`
+	AbsorbActive             int           `json:"absorb_active"`
+	AbsorbPeakActive         int           `json:"absorb_peak_active"`
+	AbsorbWaitDuration       time.Duration `json:"absorb_wait_duration"`
+	Handoffs                 uint64        `json:"handoffs"`
 }
 
 // NewStore 以只读 host 树为 base。写入不会改 baseDir。
 func NewStore(baseDir string) *Store {
+	materializeCapacity := min(runtime.NumCPU(), maxMaterializeCopies)
 	return &Store{
-		baseDir: baseDir,
-		envs:    make(map[string]*layer),
-		lives:   make(map[string]string),
-		merges:  make(map[string]MergeManifest),
+		baseDir:       baseDir,
+		envs:          make(map[string]*layer),
+		lives:         make(map[string]string),
+		liveBaselines: make(map[string]*liveFingerprint),
+		merges:        make(map[string]MergeManifest),
+		materializing: make(map[string]*materializeCall),
+		ioSlots:       make(chan struct{}, max(1, materializeCapacity)),
+		mounts:        make(map[string]*overlayMount),
 	}
 }
 
 // NewPersistentStore keeps materialized environments under liveRoot so another
 // Store instance can resume them after an ungraceful process exit.
 func NewPersistentStore(baseDir, liveRoot string) (*Store, error) {
+	return NewPersistentStoreWithOptions(baseDir, liveRoot, Options{})
+}
+
+// NewPersistentStoreWithOptions enables optional acceleration for a persistent store.
+func NewPersistentStoreWithOptions(
+	baseDir, liveRoot string,
+	options Options,
+) (*Store, error) {
 	if liveRoot == "" {
 		return nil, fmt.Errorf("vfs: persistent live root is required")
 	}
@@ -137,7 +232,42 @@ func NewPersistentStore(baseDir, liveRoot string) (*Store, error) {
 	}
 	store := NewStore(baseDir)
 	store.liveRoot = root
+	if options.Overlay {
+		store.overlay = detectOverlayDriver()
+		if store.overlay != nil && !ReflinkCloneable(baseDir, root) {
+			limit := options.OverlayLimit
+			if limit <= 0 {
+				limit = defaultOverlayLimit
+				if store.overlay.kind == "native-overlayfs" {
+					limit = defaultNativeOverlayLimit
+				}
+			}
+			store.overlaySlots = make(chan struct{}, limit)
+		} else {
+			store.overlay = nil
+		}
+	}
 	return store, nil
+}
+
+// Close unmounts active acceleration backends while retaining persistent state.
+func (s *Store) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mountMu.Lock()
+	ids := make([]string, 0, len(s.mounts))
+	for id := range s.mounts {
+		ids = append(ids, id)
+	}
+	s.mountMu.Unlock()
+	var errs []error
+	for _, id := range ids {
+		if err := s.closeOverlay(id); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Stats 返回 overlay 和 live 目录的并发一致快照，不扫描宿主工作区。
@@ -148,13 +278,46 @@ func (s *Store) Stats() Stats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	overlayBackend := "unavailable"
+	if s.overlay != nil {
+		overlayBackend = s.overlay.kind
+	}
 	stats := Stats{
-		Environments:            len(s.envs),
-		LiveDirs:                len(s.lives),
-		MaterializeCopies:       s.materializeCopies,
-		MaterializeCopyErrors:   s.materializeCopyErrors,
-		MaterializeCopyDuration: s.materializeCopyDuration,
-		Handoffs:                s.handoffs,
+		Environments:             len(s.envs),
+		LiveDirs:                 len(s.lives),
+		MaterializeCopies:        s.materializeCopies,
+		MaterializeOverlays:      s.materializeOverlays,
+		MaterializeReflinks:      s.materializeReflinks,
+		MaterializeFullCopies:    s.materializeFullCopies,
+		MaterializeFallbacks:     s.materializeFallbacks,
+		OverlayCapacityFallbacks: s.overlayCapacityFallbacks,
+		OverlayErrorFallbacks:    s.overlayErrorFallbacks,
+		OverlayLastFallback:      s.overlayLastFallback,
+		MaterializeCopyErrors:    s.materializeCopyErrors,
+		MaterializeCopyDuration:  s.materializeCopyDuration,
+		MaterializeCapacity:      cap(s.ioSlots),
+		MaterializeActive:        s.materializeActive,
+		MaterializePeakActive:    s.materializePeakActive,
+		MaterializeWaitDuration:  s.materializeWaitDuration,
+		OverlayAvailable:         s.overlay != nil,
+		OverlayBackend:           overlayBackend,
+		OverlayActive:            s.overlayActive(),
+		OverlayCapacity:          cap(s.overlaySlots),
+		AbsorbFastPaths:          s.absorbFastPaths,
+		AbsorbUpperAttempts:      s.absorbUpperAttempts,
+		AbsorbUpperEntries:       s.absorbUpperEntries,
+		AbsorbUpperFallbacks:     s.absorbUpperFallbacks,
+		AbsorbUpperErrors:        s.absorbUpperErrors,
+		AbsorbUpperDuration:      s.absorbUpperDuration,
+		AbsorbScans:              s.absorbScans,
+		AbsorbScanErrors:         s.absorbScanErrors,
+		AbsorbScanDuration:       s.absorbScanDuration,
+		AbsorbContentComparisons: s.absorbContentComparisons,
+		AbsorbCapacity:           cap(s.ioSlots),
+		AbsorbActive:             s.absorbActive,
+		AbsorbPeakActive:         s.absorbPeakActive,
+		AbsorbWaitDuration:       s.absorbWaitDuration,
+		Handoffs:                 s.handoffs,
 	}
 	for _, layer := range s.envs {
 		for _, item := range layer.files {
@@ -176,6 +339,7 @@ func (s *Store) Stats() Stats {
 
 // Fork 先把 parent 的 live 收进 overlay，再给 child 挂上当时从父到根的 overlay 快照作基线。
 // 子环境已存在时不覆盖，也不改基线。parent 未物化则 Absorb 是空操作。
+// 物化是惰性的：只有命令执行或显式 Materialize 才把可见树落到 live 目录。
 func (s *Store) Fork(parentID, childID string) error {
 	if childID == "" {
 		return nil
@@ -215,12 +379,9 @@ func (s *Store) Fork(parentID, childID string) error {
 		files:    make(map[string]blob),
 		baseline: s.snapshotOverlays(parentID),
 	}
-	persistent := s.liveRoot != ""
 	s.mu.Unlock()
-	if persistent {
-		_, err := s.Materialize(childID)
-		return err
-	}
+	// 惰性物化：Fork 只建 overlay，不拷贝基线树。live 目录在第一次需要时
+	// （首条命令、join 准备等）由 Materialize 按需创建；纯认知型环境永不落盘。
 	return nil
 }
 
@@ -246,7 +407,9 @@ func (s *Store) Handoff(parentID, childID string) error {
 			files:    make(map[string]blob),
 			baseline: s.snapshotOverlays(parentID),
 		}
+		delete(s.lives, parentID)
 		s.lives[childID] = live
+		delete(s.liveBaselines, parentID)
 		s.mu.Unlock()
 		return nil
 	}
@@ -269,7 +432,41 @@ func (s *Store) Handoff(parentID, childID string) error {
 	childLive := live
 	if s.liveRoot != "" {
 		childLive = s.persistentLivePath(childID)
-		if err := os.Rename(live, childLive); err != nil {
+		if s.overlayStateExists(parentID) {
+			if err := s.closeOverlay(parentID); err != nil {
+				s.mu.Unlock()
+				return err
+			}
+			parentState := s.overlayStatePath(parentID)
+			childState := s.overlayStatePath(childID)
+			if err := os.Rename(parentState, childState); err != nil {
+				_, _, restoreErr := s.persistedLive(parentID)
+				s.mu.Unlock()
+				return errors.Join(
+					fmt.Errorf("vfs: handoff overlay state: %w", err),
+					restoreErr,
+				)
+			}
+			if err := os.Rename(live, childLive); err != nil {
+				rollbackErr := os.Rename(childState, parentState)
+				_, _, restoreErr := s.persistedLive(parentID)
+				s.mu.Unlock()
+				return errors.Join(
+					fmt.Errorf("vfs: handoff overlay mountpoint: %w", err),
+					rollbackErr,
+					restoreErr,
+				)
+			}
+			remounted, ok, err := s.persistedLive(childID)
+			if err != nil || !ok {
+				s.mu.Unlock()
+				return errors.Join(
+					fmt.Errorf("vfs: remount handed-off overlay"),
+					err,
+				)
+			}
+			childLive = remounted
+		} else if err := os.Rename(live, childLive); err != nil {
 			s.mu.Unlock()
 			return fmt.Errorf("vfs: handoff persistent environment: %w", err)
 		}
@@ -281,6 +478,10 @@ func (s *Store) Handoff(parentID, childID string) error {
 	}
 	delete(s.lives, parentID)
 	s.lives[childID] = childLive
+	if baseline, ok := s.liveBaselines[parentID]; ok {
+		s.liveBaselines[childID] = baseline
+	}
+	delete(s.liveBaselines, parentID)
 	s.handoffs++
 	s.mu.Unlock()
 	return nil
@@ -289,6 +490,9 @@ func (s *Store) Handoff(parentID, childID string) error {
 func (s *Store) persistedLive(envID string) (string, bool, error) {
 	if s.liveRoot == "" || envID == "" {
 		return "", false, nil
+	}
+	if live, ok, err := s.restoreOverlay(envID); ok || err != nil {
+		return live, ok, err
 	}
 	path := s.persistentLivePath(envID)
 	info, err := os.Lstat(path)
@@ -681,7 +885,7 @@ func copyMergeSide(root, dstRoot, rel string) (bool, error) {
 		if err := os.MkdirAll(dst, 0o750); err != nil {
 			return false, err
 		}
-		if err := copyTree(src, dst); err != nil {
+		if _, err := copyTree(src, dst); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -992,6 +1196,7 @@ func (v *View) Read(path string) ([]byte, error) {
 }
 
 // Write 写入本环境 overlay；已物化则写 live。
+// 持久 store 上首次写入会触发物化：live 目录是持久层，纯 overlay 写入重启即丢。
 func (v *View) Write(path string, data []byte) error {
 	rel, err := jail(path)
 	if err != nil {
@@ -999,6 +1204,14 @@ func (v *View) Write(path string, data []byte) error {
 	}
 	if live, ok := v.liveDir(); ok {
 		return writeLive(live, rel, data)
+	}
+	if v.store.liveRoot != "" {
+		if _, err := v.store.Materialize(v.envID); err != nil {
+			return err
+		}
+		if live, ok := v.liveDir(); ok {
+			return writeLive(live, rel, data)
+		}
 	}
 	v.store.mu.Lock()
 	defer v.store.mu.Unlock()
@@ -1013,7 +1226,7 @@ func (v *View) Write(path string, data []byte) error {
 	return nil
 }
 
-// Delete 在本环境 overlay 上打 tombstone；已物化则删 live。
+// Delete 在本环境 overlay 上打 tombstone；已物化则删 live。持久 store 上首次删除同样触发物化。
 func (v *View) Delete(path string) error {
 	rel, err := jail(path)
 	if err != nil {
@@ -1021,6 +1234,14 @@ func (v *View) Delete(path string) error {
 	}
 	if live, ok := v.liveDir(); ok {
 		return deleteLive(live, rel)
+	}
+	if v.store.liveRoot != "" {
+		if _, err := v.store.Materialize(v.envID); err != nil {
+			return err
+		}
+		if live, ok := v.liveDir(); ok {
+			return deleteLive(live, rel)
+		}
 	}
 	v.store.mu.Lock()
 	defer v.store.mu.Unlock()
