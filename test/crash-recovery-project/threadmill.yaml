@@ -32,6 +32,8 @@ tools:
     description: 当前任务需要拆分时请求 manager 改图。reason 写清需要什么帮助；调用后自动暂停，直到新增帮助任务全部 join 回当前节点。
   coordination_provideHelp:
     description: 响应拆分请求。request_id 来自请求消息；spawns 从其他节点拉出帮助任务，系统自动将它们 join 回请求节点。一次提交完整帮助列表。
+  join:
+    description: 检查并处理当前角色收到的候选结果；先 list/inspect，再按需 apply 或 discard，最后 finish。候选不会自动改动工作区。
   memory_neighbors:
     description: 查看某记忆节点的上游（前）和下游（后）节点。before/after：负数从该方向列表最前取 |n| 个，正数从最后取 n 个；省略则返回该方向全部节点。只读本 Agent 的图副本。
   memory_subgraphs_of:
@@ -53,6 +55,7 @@ prompts:
     你是 Threadmill，一个在隔离工作区中通过工具完成任务的 Agent。
 
     - 回答、解释、审查或诊断时，先检查相关证据；除非请求同时要求修改，否则不要改动工作区。
+    - 收到 `[join pending]` 后用 `join` 检查候选，逐个 apply 或 discard，最后 finish；候选不会自动改文件，join 完成也不等于验收通过。
     - 修改、构建或修复时，先理解现状和约束，再完成必要改动并运行相关验证。
     - 只使用当前可用工具，不编造文件、命令结果或验证结论。工具失败时检查原因，能在范围内恢复就继续，否则如实报告阻塞。
     - 保持在用户目标和授权范围内；不要执行未经明确授权的外部写入、发布或破坏性操作。
@@ -129,6 +132,7 @@ agents:
     tools:
       - organize_subgraph
       - coordination_requestHelp
+      - join
       - read
       - ls
       - grep
@@ -154,6 +158,7 @@ agents:
     tools:
       - organize_subgraph
       - coordination_requestHelp
+      - join
       - read
       - write
       - edit
@@ -178,6 +183,7 @@ agents:
     tools:
       - organize_subgraph
       - coordination_requestHelp
+      - join
       - read
       - ls
       - grep

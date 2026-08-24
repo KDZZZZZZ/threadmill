@@ -37,6 +37,7 @@ const (
 	coordReplacePendingToolName = "coordination_replacePending"
 	coordRequestHelpToolName    = "coordination_requestHelp"
 	coordProvideHelpToolName    = "coordination_provideHelp"
+	coordJoinToolName           = "join"
 
 	hookInjectSubscribedMemory      = "inject_subscribed_memory"
 	hookCompactOnOverflow           = "compact_on_overflow"
@@ -72,6 +73,7 @@ var knownFileTools = map[string]struct{}{
 	coordReplacePendingToolName:   {},
 	coordRequestHelpToolName:      {},
 	coordProvideHelpToolName:      {},
+	coordJoinToolName:             {},
 }
 
 // organizerOnlyTools 只允许 subgraph_organizer 装配：记忆图的批量改写权集中在整理 Agent。
@@ -89,6 +91,10 @@ var knownFileHooks = map[string]struct{}{
 var managerOnlyTools = map[string]struct{}{
 	coordReplacePendingToolName: {},
 	coordProvideHelpToolName:    {},
+}
+
+var taskRoleOnlyTools = map[string]struct{}{
+	coordJoinToolName: {},
 }
 
 // FileAgent 是 threadmill.yaml 里单个 Agent 的配置。
@@ -201,10 +207,13 @@ func (role FileAgent) validate(name string) error {
 	if err := validatePluginNames(name, "hooks", role.Hooks, knownFileHooks); err != nil {
 		return err
 	}
-	if name == "manager" {
-		return nil
-	}
 	for _, tool := range role.Tools {
+		if _, ok := taskRoleOnlyTools[tool]; ok && name != "planner" && name != "executor" && name != "verifier" {
+			return fmt.Errorf("agents.%s.tools: %q is task-role-only", name, tool)
+		}
+		if name == "manager" {
+			continue
+		}
 		if _, ok := managerOnlyTools[tool]; ok {
 			return fmt.Errorf("agents.%s.tools: %q is manager-only", name, tool)
 		}

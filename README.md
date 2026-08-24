@@ -4,22 +4,24 @@ Threadmill 是轻量级 Agent OS。
 
 ## 安装
 
-当前基线分支是 `dev-native`，需要 Go 1.24.2 或更高版本：
+Linux x86-64/ARM64 使用一键安装。它把 Threadmill、必要时使用的私有 Go 工具链和构建缓存放在 `~/.threadmill`，检查并安装 `git`、`bash`、`bubblewrap`、`fuse-overlayfs`，并把 `~/.threadmill/bin` 幂等写入当前 shell 的启动文件。VFS 会按当前权限和文件系统自动选择高性能后端：原生 OverlayFS、FUSE OverlayFS、reflink 或兼容复制：
 
 ```sh
-go install github.com/KDZZZZZZ/threadmill/cmd/threadmill@dev-native
+curl -fsSL https://raw.githubusercontent.com/KDZZZZZZ/threadmill/dev-native/scripts/install.sh | sh
 ```
 
-如果 shell 找不到命令，把 Go 的二进制目录加入 `PATH`：
+安装不会读取或写入模型密钥。打开新终端后，在任意项目目录首次运行：
 
 ```sh
-export PATH="$(go env GOPATH)/bin:$PATH"
+threadmill
 ```
 
-在源码仓库中开发时也可以安装当前工作区版本：
+TUI 会询问 API 地址、模型、上下文窗口和凭据名，并用无回显输入读取 API key。配置保存到 `~/.threadmill/config.yaml`，密钥单独保存到权限为 `0600` 的 `~/.threadmill/credentials.yaml`。
+
+在源码仓库中开发时仍可直接安装当前工作区版本：
 
 ```sh
-go install ./cmd/threadmill
+GOBIN="$HOME/.threadmill/bin" go install ./cmd/threadmill
 ```
 
 ## 打开 CLI
@@ -30,7 +32,7 @@ go install ./cmd/threadmill
 threadmill
 ```
 
-首次交互启动会询问 API 地址、模型、上下文窗口和凭据名，并用无回显输入读取 API key。也可以指定其他工作区，或执行一次无交互任务：
+首次交互配置完成后，也可以指定其他工作区，或执行一次无交互任务：
 
 ```sh
 threadmill -C /path/to/project
@@ -130,4 +132,4 @@ exec:
 | `agents.verifier.system_prompt` | verifier | 只读验收 | PASS/FAIL/INCONCLUSIVE、逐项标准、证据来源和缺口 |
 | `agents.subgraph_organizer.system_prompt` | subgraph organizer | 选择并挂接记忆节点 | 查询数据边界、搜索范围、最小集合和目标子图 |
 
-运行时还会动态拼入 5 类上下文，它们不是独立配置项：manager 的最新协调图；manager 专属的用户消息与 task 报告；task 启动包；planner → executor → verifier 的上游输出与 join/help 报告；压缩调用中的已有记忆、可选子图和待整理对话。修改提示词时应在固定任务集上比较任务成功率、工具误用、验证完整性、token、延迟和费用，不能只凭文案判断效果。
+运行时还会动态拼入 5 类上下文，它们不是独立配置项：manager 的最新协调图；manager 专属的用户消息与 task 报告；task 启动包；planner → executor → verifier 的上游输出，以及待处理 Join 的紧凑 session 元数据（候选完整输出和文件只通过 `join` 按需读取）；压缩调用中的已有记忆、可选子图和待整理对话。修改提示词时应在固定任务集上比较任务成功率、工具误用、验证完整性、token、延迟和费用，不能只凭文案判断效果。

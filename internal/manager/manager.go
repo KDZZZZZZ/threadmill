@@ -52,6 +52,7 @@ type Manager struct {
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
 	mu          sync.Mutex
+	inputs      []managerInput
 	pending     int
 	idle        *sync.Cond
 	err         error
@@ -60,6 +61,11 @@ type Manager struct {
 	taskRunning bool
 	logFile     io.Closer
 	logger      *slog.Logger
+}
+
+// managerInput 只保存与 loop FIFO 同步的投影元数据；消息本体由 loop 持有。
+type managerInput struct {
+	projectUserMessage bool
 }
 
 // Open 接线存储、装配经理并启动常驻 Run。
@@ -209,6 +215,7 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 		return nil, err
 	}
 	if managerPending {
+		s.inputs = append(s.inputs, managerInput{})
 		s.pending++
 	}
 	s.loop = loop
@@ -255,14 +262,9 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 	return s, nil
 }
 
-// Send 把用户消息入队，唤醒经理。
+// Send 把用户消息加入 loop FIFO；消息只在对应 turn 开始时进入 manager 记忆。
 func (s *Manager) Send(text string) {
-	if err := s.stores.ProjectManagerUserMessage(text); err != nil {
-		s.setErr(err)
-		return
-	}
-	s.addPending(1)
-	s.loop.Enqueue(agent.UserMessage{Content: text})
+	s.enqueue(text, true)
 }
 
 // WaitIdle 等到经理队列清空且没有正在跑的任务。
@@ -384,6 +386,23 @@ func (s *Manager) Close() {
 
 func (s *Manager) hooks() agent.Hooks {
 	return agent.Hooks{
+		BeforeTurn: []agent.TurnHook{
+			func(_ context.Context, message agent.UserMessage) error {
+				s.mu.Lock()
+				if len(s.inputs) == 0 {
+					s.mu.Unlock()
+					return errors.New("manager: missing queued input metadata")
+				}
+				input := s.inputs[0]
+				s.inputs[0] = managerInput{}
+				s.inputs = s.inputs[1:]
+				s.mu.Unlock()
+				if !input.projectUserMessage {
+					return nil
+				}
+				return s.stores.ProjectManagerUserMessage(message.Content)
+			},
+		},
 		AfterAssistant: []agent.AfterAssistantHook{
 			func(_ context.Context, message agent.AssistantMessage) error {
 				if len(message.ToolCalls) > 0 || message.Content == "" || s.output == nil {
@@ -485,26 +504,30 @@ func (s *Manager) runRoot(ctx context.Context, cancel context.CancelFunc, task c
 		return
 	}
 
-	s.mu.Lock()
-	s.taskRunning = false
-	s.cancelRun = nil
-	s.pending++
-	s.mu.Unlock()
 	if s.output != nil {
 		s.output(report)
 	}
-	s.loop.Enqueue(agent.UserMessage{Content: report})
+	s.mu.Lock()
+	s.taskRunning = false
+	s.cancelRun = nil
+	s.enqueueLocked(report, false)
+	s.mu.Unlock()
 }
 
 func (s *Manager) enqueueManager(text string) {
-	s.addPending(1)
-	s.loop.Enqueue(agent.UserMessage{Content: text})
+	s.enqueue(text, false)
 }
 
-func (s *Manager) addPending(n int) {
+func (s *Manager) enqueue(text string, projectUserMessage bool) {
 	s.mu.Lock()
-	s.pending += n
+	s.enqueueLocked(text, projectUserMessage)
 	s.mu.Unlock()
+}
+
+func (s *Manager) enqueueLocked(text string, projectUserMessage bool) {
+	s.inputs = append(s.inputs, managerInput{projectUserMessage: projectUserMessage})
+	s.pending++
+	s.loop.Enqueue(agent.UserMessage{Content: text})
 }
 
 func (s *Manager) turnDone() {

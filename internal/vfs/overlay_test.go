@@ -117,6 +117,70 @@ func TestOverlayMaterializeFallsBackAtCapacity(t *testing.T) {
 	}
 }
 
+func TestFuseOverlayAbsorbUsesUpperdirDelta(t *testing.T) {
+	driver := detectOverlayDriver()
+	if driver == nil || driver.kind != "fuse-overlayfs" {
+		t.Skip("fuse-overlayfs unavailable")
+	}
+	root := t.TempDir()
+	base := filepath.Join(root, "base")
+	state := filepath.Join(root, "state")
+	if err := os.MkdirAll(base, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"changed.txt": "before",
+		"deleted.txt": "delete me",
+	} {
+		if err := os.WriteFile(filepath.Join(base, name), []byte(content), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := NewPersistentStoreWithOptions(base, state, Options{Overlay: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	live, err := store.Materialize("parent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "changed.txt"), []byte("after"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(live, "deleted.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "created.txt"), []byte("created"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Absorb("parent"); err != nil {
+		t.Fatal(err)
+	}
+	if stats := store.Stats(); stats.AbsorbUpperAttempts != 1 ||
+		stats.AbsorbUpperFallbacks != 0 || stats.AbsorbScans != 0 {
+		t.Fatalf("absorb stats = %+v, want one FUSE upperdir fast path", stats)
+	}
+	if err := store.Fork("parent", "child"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Discard("parent"); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		"changed.txt": "after",
+		"created.txt": "created",
+	} {
+		got, readErr := store.View("child").Read(path)
+		if readErr != nil || string(got) != want {
+			t.Fatalf("child %s = %q, %v, want %q", path, got, readErr, want)
+		}
+	}
+	if _, err := store.View("child").Read("deleted.txt"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("child deleted.txt error = %v, want not found", err)
+	}
+}
+
 func TestNativeOverlayAbsorbUsesUpperdirDelta(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("native OverlayFS requires root")
@@ -229,9 +293,9 @@ func TestNativeOverlayAbsorbUsesUpperdirDelta(t *testing.T) {
 	}
 }
 
-func TestNativeOverlayAbsorbFallsBackForOpaqueDirectory(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("native OverlayFS requires root")
+func TestOverlayAbsorbFallsBackForOpaqueDirectory(t *testing.T) {
+	if detectOverlayDriver() == nil {
+		t.Skip("no usable OverlayFS backend")
 	}
 	root := t.TempDir()
 	base := filepath.Join(root, "base")

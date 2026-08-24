@@ -57,21 +57,10 @@ func (s Stores) ProjectManagerTaskReport(task Task, statement string) error {
 	return s.projectManagerNodeKeepingStatus(node)
 }
 
-// ProjectJoinedTaskReport 把 join 报告同时投影到父 task 启动包和 manager 固定子图。
-func (s Stores) ProjectJoinedTaskReport(parent, child Task, output string) error {
-	if s.Memory == nil {
-		return ErrNilStore
-	}
+// ProjectCandidateTaskReport keeps the manager informed without injecting a
+// candidate's full output into the target role; the role reads it through join.
+func (s Stores) ProjectCandidateTaskReport(child Task, output string) error {
 	statement := fmt.Sprintf("[Task Report] %s:\n%s", child.ID, output)
-	node := taskReportNode(child, "joined-report-"+child.ID, statement)
-	node.Status = reportNodeStatus(output)
-	if err := s.Memory.AppendNode(
-		parent.Env.ID,
-		TaskPackageSubgraph(parent.ID),
-		node,
-	); err != nil {
-		return err
-	}
 	return s.ProjectManagerTaskReport(child, statement)
 }
 
@@ -145,26 +134,6 @@ func (s Stores) Fork(parentID, childID string) error {
 	}
 	if s.Files != nil {
 		if err := s.Files.Fork(parentID, childID); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Merge 把 from 环境合入 into。
-func (s Stores) Merge(from, into string) error {
-	return s.MergeInto(from, into, into)
-}
-
-// MergeInto 把文件和记忆增量分别合入各自的目标环境。
-func (s Stores) MergeInto(from, memoryInto, filesInto string) error {
-	if s.Files != nil {
-		if err := s.Files.Merge(from, filesInto); err != nil {
-			return err
-		}
-	}
-	if s.Memory != nil {
-		if err := s.Memory.Merge(from, memoryInto); err != nil {
 			return err
 		}
 	}

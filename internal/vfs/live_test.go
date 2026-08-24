@@ -501,7 +501,7 @@ func TestMaterializeAppliesOverlayTombstone(t *testing.T) {
 	}
 }
 
-func TestMergeUpdatesMaterializedLive(t *testing.T) {
+func TestApplyJoinSafeUpdatesMaterializedLive(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -514,7 +514,7 @@ func TestMergeUpdatesMaterializedLive(t *testing.T) {
 	if err := store.View("child").Write("from-child.txt", []byte("hi")); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Merge("child", "parent"); err != nil {
+	if err := applySafeJoin(store, "child", "parent"); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(filepath.Join(live, "from-child.txt"))
@@ -639,7 +639,7 @@ func TestForkPreservesChmodOnly(t *testing.T) {
 	}
 }
 
-func TestMergePreservesExecutableBit(t *testing.T) {
+func TestApplyJoinSafePreservesExecutableBit(t *testing.T) {
 	t.Parallel()
 
 	store, base := newTestStore(t)
@@ -654,7 +654,7 @@ func TestMergePreservesExecutableBit(t *testing.T) {
 	if err := os.Chmod(filepath.Join(childLive, "script.sh"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Merge("child", "parent"); err != nil {
+	if err := applySafeJoin(store, "child", "parent"); err != nil {
 		t.Fatal(err)
 	}
 	parentLive, err := store.Materialize("parent")
@@ -670,7 +670,7 @@ func TestMergePreservesExecutableBit(t *testing.T) {
 	}
 }
 
-func TestMergeAbsorbsChildLiveWrites(t *testing.T) {
+func TestApplyJoinSafeAbsorbsChildLiveWrites(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -683,7 +683,7 @@ func TestMergeAbsorbsChildLiveWrites(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(live, "from-live.txt"), []byte("from-live"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Merge("child", "parent"); err != nil {
+	if err := applySafeJoin(store, "child", "parent"); err != nil {
 		t.Fatal(err)
 	}
 	got, err := store.View("parent").Read("from-live.txt")

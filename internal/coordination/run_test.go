@@ -108,10 +108,7 @@ func TestGraphRunLaterRootReplacesPersistentParentFiles(t *testing.T) {
 	}
 	for _, id := range []string{
 		first.Env.ID + ":planner",
-		first.Env.ID + ":planner:join",
-		first.Env.ID + ":join",
 		first.Env.ID + ":verifier",
-		first.Env.ID + ":verifier:join",
 		child.Env.ID,
 		child.Env.ID + ":verifier",
 	} {
@@ -287,7 +284,7 @@ func TestGraphRunVerifierReadsExecutorLiveWrite(t *testing.T) {
 	}
 }
 
-func TestGraphRunJoinToVerifierMergesChildLiveWrites(t *testing.T) {
+func TestGraphRunJoinToVerifierDoesNotAutomaticallyMergeChildLiveWrites(t *testing.T) {
 	t.Parallel()
 
 	graph := newGraph()
@@ -311,16 +308,6 @@ func TestGraphRunJoinToVerifierMergesChildLiveWrites(t *testing.T) {
 				return query + "/executor", nil
 			}),
 			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
-				if task.ID != root.ID {
-					return query + "/verifier", nil
-				}
-				got, err := files.View(root.Env.ID).Read("from-child-live.txt")
-				if err != nil {
-					return "", fmt.Errorf("verifier missed child code: %w", err)
-				}
-				if string(got) != "from-live" {
-					return "", fmt.Errorf("from-child-live.txt = %q, want from-live", got)
-				}
 				return query + "/verifier", nil
 			}),
 		}, nil
@@ -328,12 +315,15 @@ func TestGraphRunJoinToVerifierMergesChildLiveWrites(t *testing.T) {
 	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
+	if _, err := files.View(root.Env.ID).Read("from-child-live.txt"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("child write was automatically merged: %v", err)
+	}
 	if _, err := files.View(child.Env.ID).Read("from-child-live.txt"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("joined child workspace was retained: %v", err)
 	}
 }
 
-func TestGraphRunJoinMergesChildFiles(t *testing.T) {
+func TestGraphRunJoinDoesNotAutomaticallyMergeChildFiles(t *testing.T) {
 	t.Parallel()
 
 	graph := newGraph()
@@ -349,15 +339,6 @@ func TestGraphRunJoinMergesChildFiles(t *testing.T) {
 						return "", err
 					}
 				}
-				if task.ID == root.ID && role == RoleExecutor {
-					got, err := files.View(root.Env.ID).Read("from-child.txt")
-					if err != nil {
-						return "", fmt.Errorf("verifier ask missed child file: %w", err)
-					}
-					if string(got) != "from-child" {
-						return "", fmt.Errorf("from-child.txt = %q, want from-child", got)
-					}
-				}
 				return query + "/" + role, nil
 			})
 		}
@@ -371,31 +352,27 @@ func TestGraphRunJoinMergesChildFiles(t *testing.T) {
 	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	got, err := files.View(root.Env.ID).Read("from-child.txt")
-	if err != nil {
-		t.Fatalf("join did not merge child file into %s: %v", root.Env.ID, err)
-	}
-	if string(got) != "from-child" {
-		t.Fatalf("merged from-child.txt = %q, want from-child", got)
+	if _, err := files.View(root.Env.ID).Read("from-child.txt"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("child file was automatically merged: %v", err)
 	}
 	if _, err := files.View(child.Env.ID).Read("from-child.txt"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("joined child workspace was retained: %v", err)
 	}
 }
 
-func TestGraphRunJoinTargetResolvesConflictInPreparedWorkspace(t *testing.T) {
+func TestGraphRunJoinTargetExplicitlySelectsAConflictingCandidate(t *testing.T) {
 	t.Parallel()
 
 	graph := newGraph()
 	root := graph.AddTask()
 	first := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
 	second := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
+	graph.HelpTools(nil)
 	files := vfs.NewStore(t.TempDir())
 	if err := files.View(root.Env.ID).Write("shared.txt", []byte("base")); err != nil {
 		t.Fatal(err)
 	}
 
-	var workspaces sync.Map
 	assemble := func(task Task) (Roles, error) {
 		roleAsker := func(role string) Asker {
 			return askerFunc(func(_ context.Context, query string) (string, error) {
@@ -404,78 +381,46 @@ func TestGraphRunJoinTargetResolvesConflictInPreparedWorkspace(t *testing.T) {
 						return "", err
 					}
 				}
-				if task.ID == root.ID && role == RoleExecutor {
-					workspace, ok := workspaces.Load(task.ID + ":" + role)
-					if !ok {
-						return "", errors.New("executor workspace was not bound")
-					}
-					view := files.View(workspace.(string))
-					manifest, err := view.Read(vfs.MergeRuntimeDir + "/manifest.json")
-					if err != nil || !strings.Contains(string(manifest), `"status": "conflict"`) {
-						return "", fmt.Errorf("executor missed conflict manifest: %q, %v", manifest, err)
-					}
-					theirs, err := view.Read(vfs.MergeRuntimeDir + "/sources/source-2/shared.txt")
-					if err != nil || string(theirs) != second.ID {
-						return "", fmt.Errorf("executor missed second source side: %q, %v", theirs, err)
-					}
-					if err := view.Write("shared.txt", []byte("resolved")); err != nil {
+				if task.ID == root.ID && role == RoleExecutor && strings.Contains(query, "[join pending]") {
+					sessionID := "join:incoming:" + root.Executor.ID
+					if _, err := graph.join.execute(root.Executor.ID, root.Env.ID, joinArgs{
+						Action: "apply", SessionID: sessionID, SourceID: second.ID, All: true, Strategy: "replace", Reason: "selected second",
+					}); err != nil {
 						return "", err
 					}
-					if !strings.Contains(query, vfs.MergeRuntimeDir) {
-						return "", errors.New("join instructions did not explain the prepared workspace")
+					if _, err := graph.join.execute(root.Executor.ID, root.Env.ID, joinArgs{
+						Action: "discard", SessionID: sessionID, SourceIDs: []string{first.ID}, Reason: "selected second",
+					}); err != nil {
+						return "", err
+					}
+					if _, err := graph.join.execute(root.Executor.ID, root.Env.ID, joinArgs{
+						Action: "finish", SessionID: sessionID, Reason: "candidate selected",
+					}); err != nil {
+						return "", err
 					}
 				}
 				return query + "/" + role, nil
 			})
 		}
-		return Roles{
-			Planner:  roleAsker(RolePlanner),
-			Executor: roleAsker(RoleExecutor),
-			Verifier: roleAsker(RoleVerifier),
-			scope: func(role string) (roleScope, error) {
-				return roleScope{
-					workspaceID: task.Env.ID,
-					bind: func(workspaceID string) error {
-						if workspaceID != task.Env.ID {
-							if err := files.Fork(task.Env.ID, workspaceID); err != nil {
-								return err
-							}
-						}
-						workspaces.Store(task.ID+":"+role, workspaceID)
-						return nil
-					},
-					cleanup: func(workspaceID string, completed bool) error {
-						if completed && workspaceID != task.Env.ID {
-							return files.Discard(workspaceID)
-						}
-						return nil
-					},
-				}, nil
-			},
-		}, nil
+		return Roles{Planner: roleAsker(RolePlanner), Executor: roleAsker(RoleExecutor), Verifier: roleAsker(RoleVerifier)}, nil
 	}
 
-	if _, err := graph.Run(
-		context.Background(),
-		root.ID,
-		"in",
-		Stores{Memory: ctxgraph.NewStore(), Files: files},
-		assemble,
-	); err != nil {
+	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	got, err := files.View(root.Env.ID).Read("shared.txt")
-	if err != nil || string(got) != "resolved" {
-		t.Fatalf("shared.txt = %q, %v; want resolved", got, err)
+	if err != nil || string(got) != second.ID {
+		t.Fatalf("shared.txt = %q, %v; want selected candidate %s", got, err, second.ID)
 	}
 }
 
-func TestGraphRunResumesPreparedJoinWorkspaceAfterTargetFailure(t *testing.T) {
+func TestGraphRunResumesUnfinishedJoinDecisionAfterTargetFailure(t *testing.T) {
 	t.Parallel()
 
 	graph := newGraph()
 	root := graph.AddTask()
 	child := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
+	graph.HelpTools(nil)
 	progress, err := NewDirProgressStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -495,23 +440,19 @@ func TestGraphRunResumesPreparedJoinWorkspaceAfterTargetFailure(t *testing.T) {
 				}
 				if task.ID == root.ID && role == RoleExecutor {
 					rootExecutorCalls++
-					workspaceID := task.Env.ID + ":join"
-					view := files.View(workspaceID)
+					sessionID := "join:incoming:" + root.Executor.ID
 					switch rootExecutorCalls {
 					case 1:
-						if err := view.Write("joined.txt", []byte("draft decision")); err != nil {
+						if _, err := graph.join.execute(root.Executor.ID, root.Env.ID, joinArgs{
+							Action: "apply", SessionID: sessionID, SourceID: child.ID, All: true,
+						}); err != nil {
 							return "", err
 						}
 						return "", crashed
 					case 2:
-						got, err := view.Read("joined.txt")
-						if err != nil || string(got) != "draft decision" {
-							return "", fmt.Errorf("prepared workspace was not recovered: %q, %v", got, err)
-						}
-						if _, err := view.Read(vfs.MergeRuntimeDir + "/manifest.json"); err != nil {
-							return "", fmt.Errorf("merge evidence was not recovered: %w", err)
-						}
-						if err := view.Write("joined.txt", []byte("final decision")); err != nil {
+						if _, err := graph.join.execute(root.Executor.ID, root.Env.ID, joinArgs{
+							Action: "finish", SessionID: sessionID, Reason: "resume completed",
+						}); err != nil {
 							return "", err
 						}
 					}
@@ -519,28 +460,7 @@ func TestGraphRunResumesPreparedJoinWorkspaceAfterTargetFailure(t *testing.T) {
 				return query + "/" + role, nil
 			})
 		}
-		return Roles{
-			Planner:  roleAsker(RolePlanner),
-			Executor: roleAsker(RoleExecutor),
-			Verifier: roleAsker(RoleVerifier),
-			scope: func(string) (roleScope, error) {
-				return roleScope{
-					workspaceID: task.Env.ID,
-					bind: func(workspaceID string) error {
-						if workspaceID == task.Env.ID {
-							return nil
-						}
-						return files.Fork(task.Env.ID, workspaceID)
-					},
-					cleanup: func(workspaceID string, completed bool) error {
-						if completed && workspaceID != task.Env.ID {
-							return files.Discard(workspaceID)
-						}
-						return nil
-					},
-				}, nil
-			},
-		}, nil
+		return Roles{Planner: roleAsker(RolePlanner), Executor: roleAsker(RoleExecutor), Verifier: roleAsker(RoleVerifier)}, nil
 	}
 	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
 
@@ -551,12 +471,12 @@ func TestGraphRunResumesPreparedJoinWorkspaceAfterTargetFailure(t *testing.T) {
 		t.Fatalf("resume Run() error = %v", err)
 	}
 	got, err := files.View(root.Env.ID).Read("joined.txt")
-	if err != nil || string(got) != "final decision" {
-		t.Fatalf("joined.txt = %q, %v; want final decision", got, err)
+	if err != nil || string(got) != "from child" {
+		t.Fatalf("joined.txt = %q, %v; want recovered applied candidate", got, err)
 	}
 }
 
-func TestGraphRunJoinConflictsWhenParentAndChildWroteSameLiveFile(t *testing.T) {
+func TestGraphRunJoinDoesNotMechanicallyMergeConflictingLiveFiles(t *testing.T) {
 	t.Parallel()
 
 	graph := newGraph()
@@ -582,15 +502,12 @@ func TestGraphRunJoinConflictsWhenParentAndChildWroteSameLiveFile(t *testing.T) 
 			Verifier: instantAsker(),
 		}, nil
 	})
-	if err == nil {
-		t.Fatal("Run succeeded, want join merge conflict")
-	}
-	if !strings.Contains(err.Error(), "shared.txt") {
-		t.Fatalf("Run() error = %v, want shared.txt conflict", err)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
 	}
 }
 
-func TestGraphRunJoinConflictsWhenParentAndChildWroteSameFile(t *testing.T) {
+func TestGraphRunJoinDoesNotMechanicallyMergeConflictingFiles(t *testing.T) {
 	t.Parallel()
 
 	graph := newGraph()
@@ -613,11 +530,8 @@ func TestGraphRunJoinConflictsWhenParentAndChildWroteSameFile(t *testing.T) {
 			Verifier: instantAsker(),
 		}, nil
 	})
-	if err == nil {
-		t.Fatal("Run succeeded, want join merge conflict")
-	}
-	if !strings.Contains(err.Error(), "shared.txt") {
-		t.Fatalf("Run() error = %v, want shared.txt conflict", err)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
 	}
 }
 
@@ -887,7 +801,7 @@ func TestGraphRunResumesSpawnedChildWithoutReplayingFinishedRoles(t *testing.T) 
 	if len(childAsks) != 0 {
 		t.Fatalf("child replayed finished roles: %v", childAsks)
 	}
-	want := "in\n\n[join] 子任务 " + child.ID + " 输出：\nin"
+	want := "in"
 	if got != want {
 		t.Fatalf("resume Run() = %q, want %q", got, want)
 	}
@@ -1092,7 +1006,7 @@ func TestGraphRunCompletesOnlyAfterReportSucceeds(t *testing.T) {
 	}
 }
 
-func TestGraphRunKeepsActiveWhenJoinedReportFails(t *testing.T) {
+func TestGraphRunKeepsActiveWhenCandidateReportFails(t *testing.T) {
 	t.Parallel()
 
 	graph := newGraph()
@@ -1104,10 +1018,10 @@ func TestGraphRunKeepsActiveWhenJoinedReportFails(t *testing.T) {
 	}
 	graph.SetProgressStore(progress)
 	store := ctxgraph.NewStore()
-	if err := store.Save(root.Env.ID, ctxgraph.Graph{
+	if err := store.Save(ManagerEnvID, ctxgraph.Graph{
 		Subgraphs: []ctxgraph.Subgraph{{ID: "conflict"}},
 		Nodes: []ctxgraph.Node{{
-			ID:          "joined-report-" + child.ID,
+			ID:          "task-report-" + child.ID,
 			Statement:   "conflict",
 			SubgraphIDs: []string{"conflict"},
 		}},
@@ -1287,7 +1201,7 @@ func TestGraphRunSpawnPassesInfoAndAskOutputToChild(t *testing.T) {
 	}
 }
 
-func TestGraphRunJoinPassesChildOutputToAsker(t *testing.T) {
+func TestGraphRunJoinDoesNotInjectFullChildOutputIntoPrompt(t *testing.T) {
 	t.Parallel()
 
 	graph := newGraph()
@@ -1308,7 +1222,7 @@ func TestGraphRunJoinPassesChildOutputToAsker(t *testing.T) {
 			Planner:  instantAsker(),
 			Executor: instantAsker(),
 			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
-				want := "in\n\n[join] 子任务 " + child.ID + " 输出：\nfrom-child"
+				want := "in"
 				if query != want {
 					return "", fmt.Errorf("verifier query = %q, want %q", query, want)
 				}
@@ -1326,7 +1240,7 @@ func TestGraphRunJoinPassesChildOutputToAsker(t *testing.T) {
 	}
 }
 
-func TestGraphRunProjectsFailedJoinedTaskReport(t *testing.T) {
+func TestGraphRunProjectsFailedCandidateReportsOnlyToManager(t *testing.T) {
 	t.Parallel()
 
 	graph := newGraph()
@@ -1349,23 +1263,21 @@ func TestGraphRunProjectsFailedJoinedTaskReport(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("Run() error = %v, want %v", err, boom)
 	}
-	for envID, subgraphID := range map[string]string{
-		root.Env.ID:  TaskPackageSubgraph(root.ID).ID,
-		ManagerEnvID: ManagerMemorySubgraphID,
-	} {
-		nodes := store.Load(envID).NodesInSubgraphs([]string{subgraphID})
-		for _, child := range []Task{failed, canceled} {
-			found := false
-			for _, node := range nodes {
-				if strings.Contains(node.Statement, child.ID) {
-					found = true
-					break
-				}
-			}
-			if !found {
-				t.Fatalf("%s/%s nodes = %#v, want report for child %s", envID, subgraphID, nodes, child.ID)
+	nodes := store.Load(ManagerEnvID).NodesInSubgraphs([]string{ManagerMemorySubgraphID})
+	for _, child := range []Task{failed, canceled} {
+		found := false
+		for _, node := range nodes {
+			if strings.Contains(node.Statement, child.ID) {
+				found = true
+				break
 			}
 		}
+		if !found {
+			t.Fatalf("manager nodes = %#v, want report for child %s", nodes, child.ID)
+		}
+	}
+	if nodes := store.Load(root.Env.ID).NodesInSubgraphs([]string{TaskPackageSubgraph(root.ID).ID}); len(nodes) != 0 {
+		t.Fatalf("candidate reports leaked into target startup package: %#v", nodes)
 	}
 }
 
@@ -1570,8 +1482,8 @@ func TestReplacePendingAddsFutureSpawnWhileExecuting(t *testing.T) {
 	inputMu.Lock()
 	gotInput := rootVerifierInput
 	inputMu.Unlock()
-	if !strings.Contains(gotInput, "[join] 子任务 "+changed.Tasks[1].ID) {
-		t.Fatalf("root verifier input = %q, want dynamically joined child", gotInput)
+	if strings.Contains(gotInput, "from-child") || strings.Contains(gotInput, "[join] 子任务") {
+		t.Fatalf("root verifier input leaked dynamically joined child output: %q", gotInput)
 	}
 }
 
@@ -1974,7 +1886,29 @@ func TestGraphRunAssembledReActIsolatesMemoryByEnv(t *testing.T) {
 	store := ctxgraph.NewStore()
 	root := graph.AddTask()
 	child := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
+	coordTools := graph.HelpTools(nil)
 	store.Save(root.Env.ID, seededMemoryGraph())
+	provider := stubProvider(func(ctx context.Context, request agent.Request) (agent.AssistantMessage, error) {
+		input := firstUserContent(request.Messages)
+		if strings.Contains(request.SystemPrompt, "核验 Agent") && strings.Contains(input, "[join pending]") {
+			if !hasToolResult(request.Messages) {
+				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+					ID: "discard-child", Name: "join",
+					Arguments: json.RawMessage(`{"action":"discard","session_id":"join:incoming:task-1:verifier","source_ids":["task-2"],"reason":"memory isolation test does not adopt files"}`),
+				}}}, nil
+			}
+			if strings.Contains(lastToolContent(request.Messages), `"discarded"`) {
+				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+					ID: "finish-child-join", Name: "join",
+					Arguments: json.RawMessage(`{"action":"finish","session_id":"join:incoming:task-1:verifier","reason":"candidate disposition recorded"}`),
+				}}}, nil
+			}
+			return agent.AssistantMessage{Content: "verified"}, nil
+		}
+		return reactMemoryProvider()(ctx, request)
+	})
+	agents := envMemoryAgents()
+	agents.Verifier.Tools = append(agents.Verifier.Tools, "join")
 
 	got, err := graph.Run(
 		context.Background(),
@@ -1983,11 +1917,12 @@ func TestGraphRunAssembledReActIsolatesMemoryByEnv(t *testing.T) {
 		Stores{Memory: store},
 		Assemble(
 			Stores{Memory: store},
-			reactMemoryProvider(),
-			envMemoryAgents(),
+			provider,
+			agents,
 			nil,
 			0,
 			nil,
+			agent.FileOverlay{NamedTools: coordTools},
 		),
 	)
 	if err != nil {

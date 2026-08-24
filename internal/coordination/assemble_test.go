@@ -182,7 +182,7 @@ func TestGraphRunKeepsExecutorFilesButDiscardsPlannerAndVerifierFiles(t *testing
 	}
 }
 
-func TestGraphRunJoinToPlannerUsesDisposableWorkspace(t *testing.T) {
+func TestGraphRunJoinToPlannerDoesNotAutomaticallyExposeCandidateFiles(t *testing.T) {
 	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
 	ctxgraph.Update(ctxgraph.Copy{})
 
@@ -190,6 +190,7 @@ func TestGraphRunJoinToPlannerUsesDisposableWorkspace(t *testing.T) {
 	root := graph.AddTask()
 	target := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
 	writer := mustSpawn(t, graph, root.Planner.ID, target.Planner.ID)
+	coordTools := graph.HelpTools(nil)
 	setTaskInfo(t, graph, target.ID, "target task")
 	setTaskInfo(t, graph, writer.ID, "writer task")
 	files := vfs.NewStore(t.TempDir())
@@ -208,8 +209,20 @@ func TestGraphRunJoinToPlannerUsesDisposableWorkspace(t *testing.T) {
 						Arguments: json.RawMessage(`{"path":"joined.txt"}`),
 					}}}, nil
 				}
-				if !strings.Contains(lastToolContent(request.Messages), "from writer") {
-					return agent.AssistantMessage{}, errors.New("planner did not see joined code")
+				if strings.Contains(lastToolContent(request.Messages), "from writer") {
+					return agent.AssistantMessage{}, errors.New("planner saw an unaccepted candidate file")
+				}
+				if strings.Contains(lastToolContent(request.Messages), `"discarded"`) {
+					return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+						ID: "finish-join", Name: "join",
+						Arguments: json.RawMessage(`{"action":"finish","session_id":"join:incoming:task-2:planner","reason":"candidate inspected"}`),
+					}}}, nil
+				}
+				if !strings.Contains(lastToolContent(request.Messages), `"finished":true`) {
+					return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+						ID: "discard-join", Name: "join",
+						Arguments: json.RawMessage(`{"action":"discard","session_id":"join:incoming:task-2:planner","source_ids":["task-3"],"reason":"planning evidence only"}`),
+					}}}, nil
 				}
 				return agent.AssistantMessage{Content: "target plan"}, nil
 			default:
@@ -224,14 +237,28 @@ func TestGraphRunJoinToPlannerUsesDisposableWorkspace(t *testing.T) {
 				}}}, nil
 			}
 			return agent.AssistantMessage{Content: "executed"}, nil
+		case strings.Contains(request.SystemPrompt, "verify role") && strings.Contains(input, "[join pending]"):
+			if !hasToolResult(request.Messages) {
+				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+					ID: "discard-child", Name: "join",
+					Arguments: json.RawMessage(`{"action":"discard","session_id":"join:incoming:task-1:verifier","source_ids":["task-2"],"reason":"candidate is not part of this isolation test"}`),
+				}}}, nil
+			}
+			if strings.Contains(lastToolContent(request.Messages), `"discarded"`) {
+				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+					ID: "finish-child-join", Name: "join",
+					Arguments: json.RawMessage(`{"action":"finish","session_id":"join:incoming:task-1:verifier","reason":"candidate disposition recorded"}`),
+				}}}, nil
+			}
+			return agent.AssistantMessage{Content: "verified"}, nil
 		default:
 			return agent.AssistantMessage{Content: "verified"}, nil
 		}
 	})
 	agents := agent.FileAgents{
-		Planner:  agent.FileAgent{SystemPrompt: "plan role", Tools: []string{"read"}},
+		Planner:  agent.FileAgent{SystemPrompt: "plan role", Tools: []string{"join", "read"}},
 		Executor: agent.FileAgent{SystemPrompt: "execute role", Tools: []string{"write"}},
-		Verifier: agent.FileAgent{SystemPrompt: "verify role"},
+		Verifier: agent.FileAgent{SystemPrompt: "verify role", Tools: []string{"join"}},
 	}
 	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
 
@@ -240,7 +267,7 @@ func TestGraphRunJoinToPlannerUsesDisposableWorkspace(t *testing.T) {
 		root.ID,
 		"request",
 		stores,
-		Assemble(stores, provider, agents, nil, 0, nil),
+		Assemble(stores, provider, agents, nil, 0, nil, agent.FileOverlay{NamedTools: coordTools}),
 	); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -256,6 +283,7 @@ func TestGraphRunJoinToVerifierUsesDisposableWorkspace(t *testing.T) {
 	graph := newGraph()
 	root := graph.AddTask()
 	helper := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
+	coordTools := graph.HelpTools(nil)
 	setTaskInfo(t, graph, helper.ID, "verification helper")
 	files := vfs.NewStore(t.TempDir())
 	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
@@ -275,7 +303,7 @@ func TestGraphRunJoinToVerifierUsesDisposableWorkspace(t *testing.T) {
 				Name:      "write",
 				Arguments: json.RawMessage(`{"path":"joined.txt","content":"fixture"}`),
 			}}}, nil
-		case strings.Contains(input, "[join]"):
+		case strings.Contains(input, "[join pending]"):
 			if !hasToolResult(request.Messages) {
 				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 					ID:        "read-verification-fixture",
@@ -283,8 +311,20 @@ func TestGraphRunJoinToVerifierUsesDisposableWorkspace(t *testing.T) {
 					Arguments: json.RawMessage(`{"path":"joined.txt"}`),
 				}}}, nil
 			}
-			if got := lastToolContent(request.Messages); !strings.Contains(got, "fixture") {
-				return agent.AssistantMessage{}, fmt.Errorf("verifier did not see joined fixture: %q", got)
+			if got := lastToolContent(request.Messages); strings.Contains(got, "fixture") {
+				return agent.AssistantMessage{}, fmt.Errorf("verifier saw unaccepted joined fixture: %q", got)
+			}
+			if strings.Contains(lastToolContent(request.Messages), `"discarded"`) {
+				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+					ID: "finish-join", Name: "join",
+					Arguments: json.RawMessage(`{"action":"finish","session_id":"join:incoming:task-1:verifier","reason":"evidence inspected"}`),
+				}}}, nil
+			}
+			if !strings.Contains(lastToolContent(request.Messages), `"finished":true`) {
+				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+					ID: "discard-join", Name: "join",
+					Arguments: json.RawMessage(`{"action":"discard","session_id":"join:incoming:task-1:verifier","source_ids":["task-2"],"reason":"fixture not adopted"}`),
+				}}}, nil
 			}
 			return agent.AssistantMessage{Content: "verified"}, nil
 		default:
@@ -294,7 +334,7 @@ func TestGraphRunJoinToVerifierUsesDisposableWorkspace(t *testing.T) {
 	agents := agent.FileAgents{
 		Planner:  agent.FileAgent{SystemPrompt: "plan role"},
 		Executor: agent.FileAgent{SystemPrompt: "execute role", Tools: []string{"write"}},
-		Verifier: agent.FileAgent{SystemPrompt: "verify role", Tools: []string{"read"}},
+		Verifier: agent.FileAgent{SystemPrompt: "verify role", Tools: []string{"join", "read"}},
 	}
 	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
 
@@ -303,7 +343,7 @@ func TestGraphRunJoinToVerifierUsesDisposableWorkspace(t *testing.T) {
 		root.ID,
 		"request",
 		stores,
-		Assemble(stores, provider, agents, nil, 0, nil),
+		Assemble(stores, provider, agents, nil, 0, nil, agent.FileOverlay{NamedTools: coordTools}),
 	); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}

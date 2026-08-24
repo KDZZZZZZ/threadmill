@@ -53,8 +53,8 @@ type Roles struct {
 
 type roleScope struct {
 	workspaceID string
-	bind        func(string) error
-	cleanup     func(string, bool) error
+	bind        func() error
+	cleanup     func(bool) error
 }
 
 // AssembleFunc 按 task 组装三个角色。
@@ -127,18 +127,13 @@ func Assemble(
 				}
 				return roleScope{
 					workspaceID: workspaceID,
-					bind: func(activeID string) error {
+					bind: func() error {
 						if disposable {
 							if err := stores.Files.Fork(task.Env.ID, workspaceID); err != nil {
 								return err
 							}
 						}
-						if activeID != workspaceID {
-							if err := stores.Files.Fork(workspaceID, activeID); err != nil {
-								return err
-							}
-						}
-						e, err := openRoleEnv(stores, task.Env.ID, activeID)
+						e, err := openRoleEnv(stores, task.Env.ID, workspaceID)
 						if err != nil {
 							return err
 						}
@@ -147,9 +142,6 @@ func Assemble(
 							return fmt.Errorf("%w: %s", ErrNilAsker, role)
 						}
 						if err := loop.Bind(e); err != nil {
-							if activeID != workspaceID {
-								err = errors.Join(err, stores.DiscardFiles(activeID))
-							}
 							if disposable {
 								err = errors.Join(err, stores.DiscardFiles(workspaceID))
 							}
@@ -157,25 +149,21 @@ func Assemble(
 						}
 						return nil
 					},
-					cleanup: func(activeID string, completed bool) error {
+					cleanup: func(completed bool) error {
 						if !completed {
 							var err error
 							if stores.Exec != nil {
-								err = stores.Exec.Reap(activeID)
+								err = stores.Exec.Reap(workspaceID)
 							}
-							if activeID != workspaceID || !disposable {
+							if !disposable {
 								return err
 							}
 							return errors.Join(err, stores.Files.Release(workspaceID))
 						}
-						var err error
-						if activeID != workspaceID {
-							err = stores.DiscardFiles(activeID)
-						}
 						if disposable {
-							err = errors.Join(err, stores.DiscardFiles(workspaceID))
+							return stores.DiscardFiles(workspaceID)
 						}
-						return err
+						return nil
 					},
 				}, nil
 			},

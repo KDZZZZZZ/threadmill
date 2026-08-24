@@ -56,12 +56,16 @@ type helpCoordinator struct {
 	byID   map[string]*helpRequest
 }
 
-// HelpTools 创建 task 请求工具和 manager 响应工具，并允许 Run 期间增加帮助分支。
+// HelpTools 创建 task 请求、manager 响应和候选 join 工具，并允许 Run 期间增加帮助分支。
 func (g *Graph) HelpTools(notify func(string)) map[string]agenttool.Tool {
 	help := &helpCoordinator{
 		graph:  g,
 		notify: notify,
 		byID:   make(map[string]*helpRequest),
+	}
+	join := &joinCoordinator{
+		graph:    g,
+		sessions: make(map[string][]JoinProgress),
 	}
 	g.mu.Lock()
 	for _, state := range g.helps {
@@ -70,10 +74,12 @@ func (g *Graph) HelpTools(notify func(string)) map[string]agenttool.Tool {
 		}
 	}
 	g.help = help
+	g.join = join
 	g.mu.Unlock()
 	return map[string]agenttool.Tool{
 		coordRequestHelpName: requestHelpTool{help: help},
 		coordProvideHelpName: provideHelpTool{help: help},
+		joinToolName:         joinTool{join: join},
 	}
 }
 
@@ -191,7 +197,7 @@ func (h *helpCoordinator) request(ctx context.Context, nodeID, callID, reason st
 		if req.declined {
 			return "manager 未提供帮助任务；请在当前任务中继续。", nil
 		}
-		result, err := runner.runHelp(ctx, req.task, req.id, req.children)
+		result, err := runner.runHelp(ctx, req.task, req.nodeID, req.id, req.children)
 		if err != nil {
 			runner.fail(err)
 		}

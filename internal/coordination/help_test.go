@@ -106,7 +106,7 @@ func TestRestoredHelpResultDoesNotReuseRegularJoinMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := helpTestRunner(graph, progress)
-	if _, ok, err := run.restoredHelpResult(root.ID, "help-1", []helpChild{{task: child}}); err != nil || ok {
+	if _, ok, err := run.restoredHelpResult(root, root.Executor.ID, "help-1", []helpChild{{task: child}}); err != nil || ok {
 		if err != nil {
 			t.Logf("restoredHelpResult() error = %v", err)
 		}
@@ -171,8 +171,8 @@ func TestHelpRequestRestoresConfiguredChildren(t *testing.T) {
 		t.Fatal(err)
 	}
 	run.wg.Wait()
-	if !strings.Contains(firstOut.Content, "gather evidence") {
-		t.Fatalf("first request output = %q, want helper report", firstOut.Content)
+	if !strings.Contains(firstOut.Content, "[join pending]") || !strings.Contains(firstOut.Content, "task-2") {
+		t.Fatalf("first request output = %q, want pending join notice", firstOut.Content)
 	}
 
 	second, err := OpenGraph(path)
@@ -190,8 +190,8 @@ func TestHelpRequestRestoresConfiguredChildren(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "gather evidence") {
-		t.Fatalf("restored request output = %q, want existing helper report", out.Content)
+	if !strings.Contains(out.Content, "[join pending]") || !strings.Contains(out.Content, "task-2") {
+		t.Fatalf("restored request output = %q, want existing pending join", out.Content)
 	}
 	if got := second.Snapshot(); len(got.Tasks) != 2 {
 		t.Fatalf("restored tasks = %d, want root plus one existing helper", len(got.Tasks))
@@ -297,17 +297,18 @@ func TestRegularJoinLeavesConfiguredHelpForRequestTool(t *testing.T) {
 		t.Fatalf("regular join consumed help result: %q", got)
 	}
 
-	got, err = run.runHelp(context.Background(), root, state.ID, children)
+	got, err = run.runHelp(context.Background(), root, root.Executor.ID, state.ID, children)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "evidence") {
-		t.Fatalf("help result = %q, want evidence", got)
+	if !strings.Contains(got, "[join pending]") || !strings.Contains(got, child.task.ID) {
+		t.Fatalf("help result = %q, want pending join notice", got)
 	}
 }
 
 func helpTestRunner(graph *Graph, progress ProgressStore) *runner {
-	return &runner{
+	join := &joinCoordinator{graph: graph, sessions: make(map[string][]JoinProgress)}
+	run := &runner{
 		graph:      graph,
 		stores:     Stores{Memory: ctxgraph.NewStore()},
 		assemble:   func(Task) (Roles, error) { return instantRoles(), nil },
@@ -317,5 +318,8 @@ func helpTestRunner(graph *Graph, progress ProgressStore) *runner {
 		nodeDone:   make(map[string]chan struct{}),
 		nodeOutput: make(map[string]string),
 		started:    make(map[string]struct{}),
+		join:       join,
 	}
+	join.bind(run)
+	return run
 }

@@ -139,9 +139,9 @@ func TestOpenRestoresProjectGraph(t *testing.T) {
 	created := false
 	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
 		switch {
-		case strings.Contains(request.SystemPrompt, "记忆整理器"):
+		case strings.Contains(request.SystemPrompt, "你是记忆压缩器"):
 			return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
-		case strings.Contains(request.SystemPrompt, "经理 Agent"):
+		case strings.Contains(request.SystemPrompt, "你是 manager"):
 			if strings.Contains(lastUser(request.Messages), "[任务报告]") {
 				return agent.AssistantMessage{Content: "done"}, nil
 			}
@@ -215,9 +215,9 @@ func TestOpenResumesActiveProjectTask(t *testing.T) {
 		File: loadRepoConfig(t),
 		Provider: stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
 			switch {
-			case strings.Contains(request.SystemPrompt, "记忆整理器"):
+			case strings.Contains(request.SystemPrompt, "你是记忆压缩器"):
 				return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
-			case strings.Contains(request.SystemPrompt, "经理 Agent"):
+			case strings.Contains(request.SystemPrompt, "你是 manager"):
 				return agent.AssistantMessage{Content: "resumed"}, nil
 			default:
 				return agent.AssistantMessage{Content: "role done"}, nil
@@ -266,7 +266,7 @@ func TestOpenTracksResumedManagerTurnUntilIdle(t *testing.T) {
 		Root: project,
 		File: loadRepoConfig(t),
 		Provider: stubProvider(func(callCtx context.Context, request agent.Request) (agent.AssistantMessage, error) {
-			if strings.Contains(request.SystemPrompt, "经理 Agent") {
+			if strings.Contains(request.SystemPrompt, "你是 manager") {
 				startedOnce.Do(func() { close(started) })
 				select {
 				case <-release:
@@ -300,6 +300,133 @@ func TestOpenTracksResumedManagerTurnUntilIdle(t *testing.T) {
 	releaseOnce.Do(func() { close(release) })
 	if err := mgr.WaitIdle(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestManagerBuffersRequestsWhileTurnIsRunning(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	started := make(chan string, 3)
+	releaseFirst := make(chan struct{})
+	mgr, err := Open(ctx, Options{
+		Root: t.TempDir(),
+		File: loadRepoConfig(t),
+		Provider: stubProvider(func(callCtx context.Context, request agent.Request) (agent.AssistantMessage, error) {
+			if strings.Contains(request.SystemPrompt, "你是记忆压缩器") {
+				return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
+			}
+			query := lastUser(request.Messages)
+			started <- query
+			if query == "first" {
+				select {
+				case <-releaseFirst:
+				case <-callCtx.Done():
+					return agent.AssistantMessage{}, callCtx.Err()
+				}
+			}
+			return agent.AssistantMessage{Content: query + " done"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	mgr.Send("first")
+	if got := <-started; got != "first" {
+		t.Fatalf("first manager request = %q, want first", got)
+	}
+	mgr.Send("second")
+	mgr.Send("third")
+
+	select {
+	case got := <-started:
+		t.Fatalf("manager started buffered request %q before current turn completed", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	for _, want := range []string{"second", "third"} {
+		select {
+		case got := <-started:
+			if got != want {
+				t.Fatalf("manager request = %q, want %q", got, want)
+			}
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+	if err := mgr.WaitIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManagerHidesBufferedRequestFromCurrentTurn(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	bufferObserved := make(chan bool, 1)
+	dequeueObserved := make(chan bool, 1)
+	mgr, err := Open(ctx, Options{
+		Root: t.TempDir(),
+		File: loadRepoConfig(t),
+		Provider: stubProvider(func(callCtx context.Context, request agent.Request) (agent.AssistantMessage, error) {
+			if strings.Contains(request.SystemPrompt, "你是记忆压缩器") {
+				return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
+			}
+			if lastUser(request.Messages) == "second" {
+				dequeueObserved <- strings.Contains(request.SystemPrompt, "[User Message] second")
+				return agent.AssistantMessage{Content: "done"}, nil
+			}
+			if hasToolResult(request.Messages) {
+				bufferObserved <- strings.Contains(request.SystemPrompt, "[User Message] second")
+				return agent.AssistantMessage{Content: "first done"}, nil
+			}
+			close(firstStarted)
+			select {
+			case <-releaseFirst:
+			case <-callCtx.Done():
+				return agent.AssistantMessage{}, callCtx.Err()
+			}
+			return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+				ID:        "continue-first",
+				Name:      "coordination_replacePending",
+				Arguments: json.RawMessage(`{"roots":[],"spawns":[]}`),
+			}}}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	mgr.Send("first")
+	select {
+	case <-firstStarted:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	mgr.Send("second")
+	close(releaseFirst)
+
+	select {
+	case leaked := <-bufferObserved:
+		if leaked {
+			t.Fatal("buffered request was visible to the current manager turn")
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if err := mgr.WaitIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if visible := <-dequeueObserved; !visible {
+		t.Fatal("buffered request was not projected when its manager turn started")
 	}
 }
 
@@ -341,7 +468,7 @@ func TestOpenFinishesResumedManagerTurnBeforeStartingActiveTask(t *testing.T) {
 		File: loadRepoConfig(t),
 		Provider: stubProvider(func(callCtx context.Context, request agent.Request) (agent.AssistantMessage, error) {
 			switch {
-			case strings.Contains(request.SystemPrompt, "经理 Agent"):
+			case strings.Contains(request.SystemPrompt, "你是 manager"):
 				managerOnce.Do(func() { close(managerStarted) })
 				select {
 				case <-releaseManager:
@@ -349,7 +476,7 @@ func TestOpenFinishesResumedManagerTurnBeforeStartingActiveTask(t *testing.T) {
 				case <-callCtx.Done():
 					return agent.AssistantMessage{}, callCtx.Err()
 				}
-			case strings.Contains(request.SystemPrompt, "记忆整理器"):
+			case strings.Contains(request.SystemPrompt, "你是记忆压缩器"):
 				return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
 			default:
 				taskOnce.Do(func() { close(taskStarted) })
@@ -440,11 +567,11 @@ func TestOpenRestoresDurableTaskFilesBeforeResumingVerifier(t *testing.T) {
 		File: loadRepoConfig(t),
 		Provider: stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
 			switch {
-			case strings.Contains(request.SystemPrompt, "经理 Agent"):
+			case strings.Contains(request.SystemPrompt, "你是 manager"):
 				return agent.AssistantMessage{Content: "reported"}, nil
-			case strings.Contains(request.SystemPrompt, "记忆整理器"):
+			case strings.Contains(request.SystemPrompt, "你是记忆压缩器"):
 				return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
-			case strings.Contains(request.SystemPrompt, "核验 Agent"):
+			case strings.Contains(request.SystemPrompt, "你是 verifier"):
 				for _, message := range request.Messages {
 					if message.Role == agent.RoleTool {
 						verifierRead = message.Content
@@ -491,9 +618,9 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
 		sys := request.SystemPrompt
 		switch {
-		case strings.Contains(sys, "记忆整理器"):
+		case strings.Contains(sys, "你是记忆压缩器"):
 			return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
-		case strings.Contains(sys, "经理 Agent"):
+		case strings.Contains(sys, "你是 manager"):
 			mu.Lock()
 			query := lastUser(request.Messages)
 			managerQueries = append(managerQueries, query)
@@ -532,7 +659,7 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 				}}}, nil
 			}
 			return agent.AssistantMessage{Content: "已建任务"}, nil
-		case strings.Contains(sys, "规划 Agent"):
+		case strings.Contains(sys, "你是 planner"):
 			mu.Lock()
 			leakedManagerMemory = leakedManagerMemory || strings.Contains(sys, "USER MESSAGE")
 			mu.Unlock()
@@ -540,10 +667,13 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 				return agent.AssistantMessage{Content: "child plan"}, nil
 			}
 			return agent.AssistantMessage{Content: "root plan"}, nil
-		case strings.Contains(sys, "执行 Agent"):
+		case strings.Contains(sys, "你是 executor"):
+			if response, ok := discardPendingJoin(request, "join:incoming:task-1:executor", "task-2"); ok {
+				return response, nil
+			}
 			mu.Lock()
 			leakedManagerMemory = leakedManagerMemory || strings.Contains(sys, "USER MESSAGE")
-			if strings.Contains(lastUser(request.Messages), "[join]") {
+			if strings.Contains(lastUser(request.Messages), "[join pending]") {
 				rootExecutorMemory = sys
 			}
 			mu.Unlock()
@@ -614,8 +744,8 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 			t.Fatalf("manager report memory = %q, want %q", managerReportMemory, want)
 		}
 	}
-	if !strings.Contains(rootExecutorMemory, "CHILD REPORT") {
-		t.Fatalf("root executor memory = %q, want joined child report", rootExecutorMemory)
+	if strings.Contains(rootExecutorMemory, "CHILD REPORT") {
+		t.Fatalf("root executor prompt leaked candidate report: %q", rootExecutorMemory)
 	}
 	if leakedManagerMemory {
 		t.Fatal("manager-only memory leaked into task role system prompt")
@@ -638,9 +768,9 @@ func TestManagerBuildsMinimalTaskPackageFromTaskInfo(t *testing.T) {
 		sys := request.SystemPrompt
 		query := lastUser(request.Messages)
 		switch {
-		case strings.Contains(sys, "记忆整理器"):
+		case strings.Contains(sys, "你是记忆压缩器"):
 			return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
-		case strings.Contains(sys, "记忆子图整理 Agent"):
+		case strings.Contains(sys, "你是 subgraph organizer"):
 			organizerQuery = query
 			if !hasToolResult(request.Messages) {
 				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
@@ -650,7 +780,7 @@ func TestManagerBuildsMinimalTaskPackageFromTaskInfo(t *testing.T) {
 				}}}, nil
 			}
 			return agent.AssistantMessage{Content: "organized"}, nil
-		case strings.Contains(sys, "经理 Agent"):
+		case strings.Contains(sys, "你是 manager"):
 			if strings.Contains(query, "[任务报告]") {
 				return agent.AssistantMessage{Content: "done"}, nil
 			}
@@ -663,10 +793,10 @@ func TestManagerBuildsMinimalTaskPackageFromTaskInfo(t *testing.T) {
 				}}}, nil
 			}
 			return agent.AssistantMessage{Content: "started"}, nil
-		case strings.Contains(sys, "规划 Agent"):
+		case strings.Contains(sys, "你是 planner"):
 			plannerMemory = sys
 			return agent.AssistantMessage{Content: "plan"}, nil
-		case strings.Contains(sys, "执行 Agent"):
+		case strings.Contains(sys, "你是 executor"):
 			return agent.AssistantMessage{Content: "executed"}, nil
 		default:
 			return agent.AssistantMessage{Content: "verified"}, nil
@@ -730,9 +860,9 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 		sys := request.SystemPrompt
 		query := lastUser(request.Messages)
 		switch {
-		case strings.Contains(sys, "记忆整理器"):
+		case strings.Contains(sys, "你是记忆压缩器"):
 			return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
-		case strings.Contains(sys, "经理 Agent"):
+		case strings.Contains(sys, "你是 manager"):
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
@@ -778,7 +908,7 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 			default:
 				return agent.AssistantMessage{Content: "已开始"}, nil
 			}
-		case strings.Contains(sys, "规划 Agent"):
+		case strings.Contains(sys, "你是 planner"):
 			if strings.Contains(query, "gather evidence A") {
 				return agent.AssistantMessage{Content: "helper-plan-A"}, nil
 			}
@@ -786,12 +916,20 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 				return agent.AssistantMessage{Content: "helper-plan-B"}, nil
 			}
 			return agent.AssistantMessage{Content: "root-plan"}, nil
-		case strings.Contains(sys, "执行 Agent"):
+		case strings.Contains(sys, "你是 executor"):
 			if strings.Contains(query, "helper-plan-A") {
 				return agent.AssistantMessage{Content: "helper-did-A"}, nil
 			}
 			if strings.Contains(query, "helper-plan-B") {
 				return agent.AssistantMessage{Content: "helper-did-B"}, nil
+			}
+			if response, ok := discardPendingJoin(
+				request,
+				"join:help:help/task-1:executor/need-help",
+				"task-2",
+				"task-3",
+			); ok {
+				return response, nil
 			}
 			if result := lastToolResult(request.Messages); result != "" {
 				mu.Lock()
@@ -855,11 +993,11 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 	if resumedBeforeHelp {
 		t.Fatal("requester resumed before helper verifier finished")
 	}
-	if !strings.Contains(requesterResult, "helper-result-A") || !strings.Contains(requesterResult, "helper-result-B") {
-		t.Fatalf("requester tool result = %q, want both joined helper outputs", requesterResult)
+	if !strings.Contains(requesterResult, `"finished":true`) || !strings.Contains(requesterResult, "join:help:") {
+		t.Fatalf("requester tool result = %q, want finished join session", requesterResult)
 	}
-	if !strings.Contains(requesterMemory, "helper-result-A") || !strings.Contains(requesterMemory, "helper-result-B") {
-		t.Fatalf("requester memory = %q, want both joined helper reports", requesterMemory)
+	if strings.Contains(requesterMemory, "helper-result-A") || strings.Contains(requesterMemory, "helper-result-B") {
+		t.Fatalf("requester prompt leaked helper reports outside join: %q", requesterMemory)
 	}
 	for _, want := range []string{"gather evidence A", "gather evidence B"} {
 		if !strings.Contains(managerHelpMemory, want) {
@@ -885,9 +1023,9 @@ func TestManagerDeclinedHelpResumesRequester(t *testing.T) {
 		sys := request.SystemPrompt
 		query := lastUser(request.Messages)
 		switch {
-		case strings.Contains(sys, "记忆整理器"):
+		case strings.Contains(sys, "你是记忆压缩器"):
 			return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
-		case strings.Contains(sys, "经理 Agent"):
+		case strings.Contains(sys, "你是 manager"):
 			switch {
 			case strings.Contains(query, "[拆分请求]"):
 				if !invalidHelpAttempted {
@@ -927,9 +1065,9 @@ func TestManagerDeclinedHelpResumesRequester(t *testing.T) {
 			default:
 				return agent.AssistantMessage{Content: "已开始"}, nil
 			}
-		case strings.Contains(sys, "规划 Agent"):
+		case strings.Contains(sys, "你是 planner"):
 			return agent.AssistantMessage{Content: "root-plan"}, nil
-		case strings.Contains(sys, "执行 Agent"):
+		case strings.Contains(sys, "你是 executor"):
 			if result := lastToolResult(request.Messages); result != "" {
 				requesterResult = result
 				return agent.AssistantMessage{Content: "executed"}, nil
@@ -986,9 +1124,9 @@ func TestManagerUserCanAddFutureBranchWhileTaskRuns(t *testing.T) {
 		sys := request.SystemPrompt
 		query := lastUser(request.Messages)
 		switch {
-		case strings.Contains(sys, "记忆整理器"):
+		case strings.Contains(sys, "你是记忆压缩器"):
 			return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
-		case strings.Contains(sys, "经理 Agent"):
+		case strings.Contains(sys, "你是 manager"):
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
@@ -1021,7 +1159,7 @@ func TestManagerUserCanAddFutureBranchWhileTaskRuns(t *testing.T) {
 			default:
 				return agent.AssistantMessage{Content: "started"}, nil
 			}
-		case strings.Contains(sys, "规划 Agent"):
+		case strings.Contains(sys, "你是 planner"):
 			if strings.Contains(query, "late child") {
 				childOnce.Do(func() { close(childStarted) })
 				return agent.AssistantMessage{Content: "child plan"}, nil
@@ -1033,9 +1171,12 @@ func TestManagerUserCanAddFutureBranchWhileTaskRuns(t *testing.T) {
 			case <-ctx.Done():
 				return agent.AssistantMessage{}, ctx.Err()
 			}
-		case strings.Contains(sys, "执行 Agent"):
+		case strings.Contains(sys, "你是 executor"):
 			return agent.AssistantMessage{Content: "executed"}, nil
 		default:
+			if response, ok := discardPendingJoin(request, "join:incoming:task-1:verifier", "task-2"); ok {
+				return response, nil
+			}
 			return agent.AssistantMessage{Content: "verified"}, nil
 		}
 	})
@@ -1087,7 +1228,7 @@ func TestManagerIdleWhenOnlyTalking(t *testing.T) {
 	defer cancel()
 
 	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
-		if strings.Contains(request.SystemPrompt, "记忆整理器") {
+		if strings.Contains(request.SystemPrompt, "你是记忆压缩器") {
 			return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
 		}
 		return agent.AssistantMessage{Content: "hello"}, nil
@@ -1117,7 +1258,7 @@ func TestManagerLogsRuntimeEvents(t *testing.T) {
 
 	var logs bytes.Buffer
 	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
-		if strings.Contains(request.SystemPrompt, "记忆整理器") {
+		if strings.Contains(request.SystemPrompt, "你是记忆压缩器") {
 			return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
 		}
 		return agent.AssistantMessage{Content: "hello"}, nil
@@ -1181,6 +1322,37 @@ func lastToolResult(messages []agent.Message) string {
 		}
 	}
 	return ""
+}
+
+func discardPendingJoin(
+	request agent.Request,
+	sessionID string,
+	sourceIDs ...string,
+) (agent.AssistantMessage, bool) {
+	query := lastUser(request.Messages)
+	result := lastToolResult(request.Messages)
+	switch {
+	case strings.Contains(query, "[join pending]") && result == "",
+		strings.Contains(result, "[join pending]"):
+		args, _ := json.Marshal(map[string]any{
+			"action":     "discard",
+			"session_id": sessionID,
+			"source_ids": sourceIDs,
+			"reason":     "test candidate handled",
+		})
+		return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+			ID: "discard-join", Name: "join", Arguments: args,
+		}}}, true
+	case strings.Contains(result, `"discarded"`):
+		args, _ := json.Marshal(map[string]any{
+			"action": "finish", "session_id": sessionID, "reason": "test candidates handled",
+		})
+		return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+			ID: "finish-join", Name: "join", Arguments: args,
+		}}}, true
+	default:
+		return agent.AssistantMessage{}, false
+	}
 }
 
 func TestFormatReport(t *testing.T) {

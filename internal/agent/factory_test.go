@@ -678,6 +678,25 @@ func TestFileAgentsRejectsGraphToolOnPlanner(t *testing.T) {
 	}
 }
 
+func TestFileAgentsRejectsJoinOutsideTaskRoles(t *testing.T) {
+	t.Parallel()
+
+	for _, role := range []string{"manager", "subgraph_organizer"} {
+		role := role
+		t.Run(role, func(t *testing.T) {
+			agents := FileAgents{}
+			if role == "manager" {
+				agents.Manager.Tools = []string{coordJoinToolName}
+			} else {
+				agents.SubgraphOrganizer.Tools = []string{coordJoinToolName}
+			}
+			if err := agents.Validate(); err == nil || !strings.Contains(err.Error(), "task-role-only") {
+				t.Fatalf("Validate() error = %v, want task-role-only", err)
+			}
+		})
+	}
+}
+
 func TestNewManagerInstallsGraphTools(t *testing.T) {
 	resetDefaultStore(t)
 

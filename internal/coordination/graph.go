@@ -118,6 +118,7 @@ type Graph struct {
 	helps     []helpState
 	progress  ProgressStore
 	help      *helpCoordinator
+	join      *joinCoordinator
 	taskSink  TaskSink
 	statePath string
 	executing bool
