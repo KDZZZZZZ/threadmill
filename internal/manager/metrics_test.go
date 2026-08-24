@@ -23,7 +23,7 @@ func TestManagerMetricsAndIdleSnapshotCoverRuntimeAndSubsystems(t *testing.T) {
 		Root: t.TempDir(),
 		File: loadRepoConfig(t),
 		Provider: stubProvider(func(ctx context.Context, request agent.Request) (agent.AssistantMessage, error) {
-			if strings.Contains(request.SystemPrompt, "记忆整理器") {
+			if strings.Contains(request.SystemPrompt, "你是记忆压缩器") {
 				if sink := event.RetrySink(ctx); sink != nil {
 					sink("transport")
 				}
@@ -165,7 +165,7 @@ func TestManagerBurst100MessagesDrainsWithObservableCounts(t *testing.T) {
 		Root: t.TempDir(),
 		File: loadRepoConfig(t),
 		Provider: stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
-			if strings.Contains(request.SystemPrompt, "记忆整理器") {
+			if strings.Contains(request.SystemPrompt, "你是记忆压缩器") {
 				return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
 			}
 			return agent.AssistantMessage{

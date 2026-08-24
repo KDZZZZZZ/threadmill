@@ -58,7 +58,7 @@ func (s *Store) Materialize(envID string) (live string, retErr error) {
 	if overlayLive, ok, overlayErr := s.createOverlay(envID, base, blobs); ok {
 		live = overlayLive
 		var baseline *liveFingerprint
-		if _, native := s.nativeOverlayUpper(envID); !native {
+		if _, mounted := s.overlayUpper(envID); !mounted {
 			baseline = scanLiveFingerprint(live)
 		}
 		s.mu.Lock()
@@ -157,7 +157,7 @@ func (s *Store) Absorb(envID string) error {
 	s.beginAbsorbIO()
 	defer s.endAbsorbIO()
 	upperStarted := time.Now()
-	attempted, used, upperEntries, upperErr := s.absorbNativeUpper(envID, live)
+	attempted, used, upperEntries, upperErr := s.absorbOverlayUpper(envID, live)
 	if attempted {
 		s.mu.Lock()
 		s.absorbUpperAttempts++
@@ -335,15 +335,11 @@ func (s *Store) Discard(envID string) error {
 		if err := os.RemoveAll(s.overlayStatePath(envID)); err != nil {
 			return fmt.Errorf("vfs: discard overlay state: %w", err)
 		}
-		if err := os.RemoveAll(s.persistentMergePath(envID)); err != nil {
-			return fmt.Errorf("vfs: discard merge state: %w", err)
-		}
 	}
 	s.mu.Lock()
 	delete(s.lives, envID)
 	delete(s.liveBaselines, envID)
 	delete(s.envs, envID)
-	delete(s.merges, envID)
 	s.mu.Unlock()
 	return nil
 }
@@ -408,12 +404,6 @@ func walkRegularFiles(
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
-		if isMergeRuntimePath(rel) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
 		if filepath.IsAbs(rel) || !filepath.IsLocal(rel) || escapesRoot(root, path) {
 			return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
 		}
@@ -555,9 +545,6 @@ func (s *Store) visibleRegularFiles(envID string) (map[string]fileSnapshot, erro
 	overlayParents := map[string]struct{}{}
 	for _, files := range s.overlayMaps(envID) {
 		for path := range files {
-			if isMergeRuntimePath(path) {
-				continue
-			}
 			overlayPaths[path] = struct{}{}
 			for parent := path; ; {
 				i := strings.LastIndex(parent, "/")
@@ -608,12 +595,6 @@ func (s *Store) cachedBaseRegularFiles() (map[string]fileSnapshot, error) {
 				return err
 			}
 			rel = filepath.ToSlash(rel)
-			if isMergeRuntimePath(rel) {
-				if d.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
 			if filepath.IsAbs(rel) || !filepath.IsLocal(rel) || escapesRoot(base, path) {
 				return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
 			}

@@ -84,9 +84,9 @@ func BenchmarkAbsorbOneChangedOf1000(b *testing.B) {
 	}
 }
 
-func BenchmarkNativeOverlayAbsorbOneChangedOf1000(b *testing.B) {
-	if os.Geteuid() != 0 {
-		b.Skip("native OverlayFS requires root")
+func BenchmarkOverlayAbsorbOneChangedOf1000(b *testing.B) {
+	if detectOverlayDriver() == nil {
+		b.Skip("no usable OverlayFS backend")
 	}
 	root := b.TempDir()
 	base := filepath.Join(root, "base")
@@ -110,7 +110,7 @@ func BenchmarkNativeOverlayAbsorbOneChangedOf1000(b *testing.B) {
 		b.Fatal(err)
 	}
 	if store.Stats().MaterializeOverlays != 1 {
-		b.Skip("native OverlayFS unavailable")
+		b.Skip("OverlayFS unavailable")
 	}
 	changed := filepath.Join(live, "pkg-0000", "file-0000.txt")
 	b.ReportAllocs()

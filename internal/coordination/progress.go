@@ -11,8 +11,31 @@ import (
 // TaskProgress 是尚未跑完的 task 游标：启动包状态、已完成角色输出和已合入标记。
 type TaskProgress struct {
 	Outputs  map[string]string
-	Merged   []string `json:",omitempty"`
-	Prepared bool     `json:",omitempty"`
+	Merged   []string       `json:",omitempty"`
+	Prepared bool           `json:",omitempty"`
+	Joins    []JoinProgress `json:",omitempty"`
+}
+
+// JoinProgress is the durable decision record for one role-visible join session.
+type JoinProgress struct {
+	ID       string               `json:"id"`
+	NodeID   string               `json:"node_id"`
+	TargetID string               `json:"target_id"`
+	Sources  []JoinSourceProgress `json:"sources"`
+	Finished bool                 `json:"finished,omitempty"`
+	Reason   string               `json:"reason,omitempty"`
+}
+
+// JoinSourceProgress records how the target role disposed of one candidate.
+type JoinSourceProgress struct {
+	TaskID       string   `json:"task_id"`
+	EnvID        string   `json:"env_id"`
+	Output       string   `json:"output,omitempty"`
+	Applied      bool     `json:"applied,omitempty"`
+	AppliedAll   bool     `json:"applied_all,omitempty"`
+	AppliedPaths []string `json:"applied_paths,omitempty"`
+	Discarded    bool     `json:"discarded,omitempty"`
+	Reason       string   `json:"reason,omitempty"`
 }
 
 // ProgressStore 保存、读取、删除进行中的 task 进度。

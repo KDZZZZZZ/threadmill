@@ -6,7 +6,6 @@ package vfs
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -16,7 +15,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -35,32 +33,7 @@ const (
 	maxMaterializeCopies      = 8
 	defaultOverlayLimit       = 128
 	defaultNativeOverlayLimit = 1024
-	// MergeRuntimeDir is visible only while a joined target reviews incoming files.
-	MergeRuntimeDir = ".threadmill/runtime/joins"
 )
-
-// MergeSource identifies one child workspace offered to a joined target.
-type MergeSource struct {
-	Name  string
-	EnvID string
-}
-
-// MergeChange describes one direct child change in a prepared merge.
-type MergeChange struct {
-	Source    string `json:"source"`
-	Directory string `json:"directory"`
-	Path      string `json:"path"`
-	Kind      string `json:"kind"`
-	Status    string `json:"status"`
-	Conflict  string `json:"conflict,omitempty"`
-	Ours      bool   `json:"ours"`
-	Theirs    bool   `json:"theirs"`
-}
-
-// MergeManifest tells the joined target which files were merged and which need review.
-type MergeManifest struct {
-	Changes []MergeChange `json:"changes"`
-}
 
 // FileInfo 是路径上的文件元数据。
 type FileInfo struct {
@@ -107,7 +80,6 @@ type Store struct {
 	envs          map[string]*layer
 	lives         map[string]string
 	liveBaselines map[string]*liveFingerprint // 物化完成时的分桶 stat 向量；恢复目录首次仍做内容扫描
-	merges        map[string]MergeManifest
 	materializing map[string]*materializeCall
 	ioSlots       chan struct{}
 	overlay       *overlayDriver
@@ -202,7 +174,6 @@ func NewStore(baseDir string) *Store {
 		envs:          make(map[string]*layer),
 		lives:         make(map[string]string),
 		liveBaselines: make(map[string]*liveFingerprint),
-		merges:        make(map[string]MergeManifest),
 		materializing: make(map[string]*materializeCall),
 		ioSlots:       make(chan struct{}, max(1, materializeCapacity)),
 		mounts:        make(map[string]*overlayMount),
@@ -513,82 +484,6 @@ func (s *Store) persistentLivePath(envID string) string {
 	return filepath.Join(s.liveRoot, fmt.Sprintf("%x", digest[:]))
 }
 
-func (s *Store) persistentMergePath(envID string) string {
-	digest := sha256.Sum256([]byte(envID))
-	return filepath.Join(s.liveRoot, fmt.Sprintf("%x.merge.json", digest[:]))
-}
-
-func (s *Store) persistedMerge(envID string) (MergeManifest, bool, error) {
-	if s.liveRoot == "" || envID == "" {
-		return MergeManifest{}, false, nil
-	}
-	data, err := os.ReadFile(s.persistentMergePath(envID))
-	if os.IsNotExist(err) {
-		return MergeManifest{}, false, nil
-	}
-	if err != nil {
-		return MergeManifest{}, false, fmt.Errorf("vfs: read persistent merge: %w", err)
-	}
-	var manifest MergeManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return MergeManifest{}, false, fmt.Errorf("vfs: decode persistent merge: %w", err)
-	}
-	return manifest, true, nil
-}
-
-func (s *Store) persistMerge(envID string, data []byte) error {
-	if s.liveRoot == "" || envID == "" {
-		return nil
-	}
-	tmp, err := os.CreateTemp(s.liveRoot, ".merge-")
-	if err != nil {
-		return fmt.Errorf("vfs: create persistent merge: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("vfs: protect persistent merge: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("vfs: write persistent merge: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("vfs: sync persistent merge: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("vfs: close persistent merge: %w", err)
-	}
-	if err := os.Rename(tmpName, s.persistentMergePath(envID)); err != nil {
-		return fmt.Errorf("vfs: commit persistent merge: %w", err)
-	}
-	return nil
-}
-
-// Merge 把 from 的 overlay 增量三路并入 into。冲突失败，不改 into。
-// 合入前先把双方 live 收进 overlay。
-func (s *Store) Merge(from, into string) error {
-	if into == "" {
-		return nil
-	}
-	if err := s.Absorb(from); err != nil {
-		return err
-	}
-	if err := s.Absorb(into); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	apply, conflicts := s.mergePlanLocked(from, into)
-	if len(conflicts) > 0 {
-		return fmt.Errorf("vfs: merge conflict: %s", conflicts[0])
-	}
-	return s.applyPendingLocked(into, apply)
-}
-
 type pending struct {
 	path string
 	b    blob
@@ -712,238 +607,8 @@ func (s *Store) applyPendingLocked(into string, apply []pending) error {
 	return nil
 }
 
-// PrepareMerge applies independent changes to workspaceID and exposes both sides of
-// conflicting files in a reserved runtime directory for the target role to inspect.
-func (s *Store) PrepareMerge(workspaceID string, sources []MergeSource) (MergeManifest, error) {
-	s.mu.Lock()
-	manifest, prepared := s.merges[workspaceID]
-	manifest = cloneMergeManifest(manifest)
-	s.mu.Unlock()
-	if !prepared {
-		persisted, ok, err := s.persistedMerge(workspaceID)
-		if err != nil {
-			return MergeManifest{}, err
-		}
-		if ok {
-			manifest = cloneMergeManifest(persisted)
-			prepared = true
-			s.mu.Lock()
-			s.merges[workspaceID] = cloneMergeManifest(manifest)
-			s.mu.Unlock()
-		}
-	}
-
-	live, err := s.Materialize(workspaceID)
-	if err != nil {
-		return MergeManifest{}, err
-	}
-	runtime := filepath.Join(live, filepath.FromSlash(MergeRuntimeDir))
-	if err := os.RemoveAll(runtime); err != nil {
-		return MergeManifest{}, fmt.Errorf("vfs: prepare merge: reset runtime: %w", err)
-	}
-
-	if !prepared {
-		manifest = MergeManifest{Changes: []MergeChange{}}
-	}
-	for i, source := range sources {
-		if err := s.Absorb(source.EnvID); err != nil {
-			return MergeManifest{}, err
-		}
-		directory := fmt.Sprintf("source-%d", i+1)
-
-		s.mu.Lock()
-		fromLayer := s.envs[source.EnvID]
-		var paths []string
-		var sourceFiles map[string]blob
-		if fromLayer != nil {
-			sourceFiles = cloneFiles(fromLayer.files)
-			paths = make([]string, 0, len(sourceFiles))
-			for path := range sourceFiles {
-				paths = append(paths, path)
-			}
-		}
-		slices.Sort(paths)
-		for _, path := range paths {
-			if isMergeRuntimePath(path) {
-				s.mu.Unlock()
-				return MergeManifest{}, fmt.Errorf("vfs: prepare merge: reserved path %q", path)
-			}
-		}
-		var apply []pending
-		var conflicts []string
-		if !prepared {
-			apply, conflicts = s.mergePlanLocked(source.EnvID, workspaceID)
-		}
-		s.mu.Unlock()
-
-		for _, path := range paths {
-			ours, err := copyMergeSide(live, filepath.Join(runtime, "ours", directory), path)
-			if err != nil {
-				return MergeManifest{}, err
-			}
-			theirs, err := copyMergeBlob(filepath.Join(runtime, "sources", directory), path, sourceFiles[path])
-			if err != nil {
-				return MergeManifest{}, err
-			}
-			if prepared {
-				continue
-			}
-			change := MergeChange{
-				Source:    source.Name,
-				Directory: directory,
-				Path:      path,
-				Kind:      mergeChangeKind(ours, theirs),
-				Status:    "merged",
-				Ours:      ours,
-				Theirs:    theirs,
-			}
-			for _, conflict := range conflicts {
-				if pathsOverlap(path, conflict) {
-					change.Status = "conflict"
-					change.Conflict = conflict
-					break
-				}
-			}
-			manifest.Changes = append(manifest.Changes, change)
-		}
-
-		if !prepared {
-			s.mu.Lock()
-			if err := s.applyPendingLocked(workspaceID, apply); err != nil {
-				s.mu.Unlock()
-				return MergeManifest{}, err
-			}
-			s.mu.Unlock()
-		}
-	}
-
-	data, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return MergeManifest{}, fmt.Errorf("vfs: prepare merge: encode manifest: %w", err)
-	}
-	if !prepared {
-		if err := s.persistMerge(workspaceID, data); err != nil {
-			return MergeManifest{}, err
-		}
-	}
-	if err := writeLive(live, MergeRuntimeDir+"/manifest.json", data); err != nil {
-		return MergeManifest{}, fmt.Errorf("vfs: prepare merge: write manifest: %w", err)
-	}
-	if !prepared {
-		s.mu.Lock()
-		s.merges[workspaceID] = cloneMergeManifest(manifest)
-		s.mu.Unlock()
-	}
-	return manifest, nil
-}
-
-// CommitMerge removes temporary evidence and merges the target's reviewed result.
-func (s *Store) CommitMerge(workspaceID, targetID string) error {
-	s.mu.Lock()
-	live := s.lives[workspaceID]
-	s.mu.Unlock()
-	if live != "" {
-		if err := os.RemoveAll(filepath.Join(live, filepath.FromSlash(MergeRuntimeDir))); err != nil {
-			return fmt.Errorf("vfs: commit merge: remove runtime: %w", err)
-		}
-	}
-	if err := s.Release(workspaceID); err != nil {
-		return err
-	}
-	return s.Merge(workspaceID, targetID)
-}
-
-func copyMergeSide(root, dstRoot, rel string) (bool, error) {
-	src := filepath.Join(root, filepath.FromSlash(rel))
-	if escapesRoot(root, src) {
-		return false, fmt.Errorf("%w: %q", ErrInvalidPath, rel)
-	}
-	info, err := os.Lstat(src)
-	if errors.Is(err, syscall.ENOTDIR) {
-		for _, ancestor := range ancestorPrefixes(rel) {
-			copied, copyErr := copyMergeSide(root, dstRoot, ancestor)
-			if copyErr != nil {
-				return false, copyErr
-			}
-			if copied {
-				break
-			}
-		}
-		return false, nil
-	}
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	dst := filepath.Join(dstRoot, filepath.FromSlash(rel))
-	if escapesRoot(dstRoot, dst) {
-		return false, fmt.Errorf("%w: %q", ErrInvalidPath, rel)
-	}
-	if info.IsDir() {
-		if err := os.MkdirAll(dst, 0o750); err != nil {
-			return false, err
-		}
-		if _, err := copyTree(src, dst); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-	if info.Mode().Type() != 0 {
-		return false, fmt.Errorf("%w: %q (mode %s)", ErrSpecialFile, rel, info.Mode().String())
-	}
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return false, err
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
-		return false, err
-	}
-	if err := os.WriteFile(dst, data, regularMode(info.Mode().Perm()&0o111 != 0)); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func copyMergeBlob(dstRoot, rel string, b blob) (bool, error) {
-	if b.tombstone {
-		return false, nil
-	}
-	dst := filepath.Join(dstRoot, filepath.FromSlash(rel))
-	if escapesRoot(dstRoot, dst) {
-		return false, fmt.Errorf("%w: %q", ErrInvalidPath, rel)
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
-		return false, err
-	}
-	if err := os.WriteFile(dst, b.data, regularMode(b.executable)); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func cloneMergeManifest(manifest MergeManifest) MergeManifest {
-	return MergeManifest{Changes: slices.Clone(manifest.Changes)}
-}
-
-func mergeChangeKind(ours, theirs bool) string {
-	switch {
-	case !ours && theirs:
-		return "add"
-	case ours && !theirs:
-		return "delete"
-	default:
-		return "modify"
-	}
-}
-
 func pathsOverlap(a, b string) bool {
 	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
-}
-
-func isMergeRuntimePath(path string) bool {
-	return path == MergeRuntimeDir || strings.HasPrefix(path, MergeRuntimeDir+"/")
 }
 
 type content struct {

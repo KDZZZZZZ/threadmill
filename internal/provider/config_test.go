@@ -600,10 +600,10 @@ func TestRepositoryRolePromptsRequirePersistentTestEvidence(t *testing.T) {
 		prompt string
 		want   string
 	}{
-		{"manager", config.Agents.Manager.SystemPrompt, "提交中的测试文件"},
-		{"planner", config.Agents.Planner.SystemPrompt, "持久回归测试矩阵"},
-		{"executor", config.Agents.Executor.SystemPrompt, "提交到工作区的回归测试"},
-		{"verifier", config.Agents.Verifier.SystemPrompt, "临时 CLI/脚本"},
+		{"manager", config.Agents.Manager.SystemPrompt, "PASS 缺少 Task Info 逐项映射或必要门禁"},
+		{"planner", config.Agents.Planner.SystemPrompt, "持久测试"},
+		{"executor", config.Agents.Executor.SystemPrompt, "持久测试"},
+		{"verifier", config.Agents.Verifier.SystemPrompt, "任务新增验收"},
 	}
 	for _, check := range checks {
 		if !strings.Contains(check.prompt, check.want) {
@@ -612,29 +612,29 @@ func TestRepositoryRolePromptsRequirePersistentTestEvidence(t *testing.T) {
 	}
 }
 
-func TestRepositoryOrganizerPromptRejectsStaleWorkflowState(t *testing.T) {
+func TestRepositoryOrganizerPromptPreservesCumulativeContract(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(
 		config.Agents.SubgraphOrganizer.SystemPrompt,
-		"已被当前 Task Info 或协调图取代的临时状态",
+		"新的局部缺陷不能挤掉原始累计契约",
 	) {
-		t.Fatal("subgraph organizer prompt does not reject stale workflow state")
+		t.Fatal("subgraph organizer prompt does not preserve the cumulative contract")
 	}
 }
 
-func TestRepositoryPlannerPromptRejectsMissingPathsAsEvidence(t *testing.T) {
+func TestRepositoryPlannerPromptRechecksUpstreamClaims(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(
 		config.Agents.Planner.SystemPrompt,
-		"工具已确认不存在的路径",
+		"上游报告只是线索，必须用当前工作区核对",
 	) {
-		t.Fatal("planner prompt does not reject missing paths as evidence")
+		t.Fatal("planner prompt does not recheck upstream claims")
 	}
 }
 
@@ -644,8 +644,8 @@ func TestRepositoryPlannerPromptTreatsRepairRootsIncrementally(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"继承前序工作区的修复 task",
-		"不要重复已经有稳定证据的全仓调查",
+		"最近失败证据和原始累计契约",
+		"不重复已经失败的同型方案",
 	} {
 		if !strings.Contains(config.Agents.Planner.SystemPrompt, want) {
 			t.Fatalf("planner prompt does not keep repair planning incremental %q", want)
@@ -659,8 +659,8 @@ func TestRepositoryVerifierPromptDerivesExpectedOutputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"测试中的 expected 不是独立证据",
-		"返回类型、返回形状",
+		"期望值来自 Task Info、既有文档或既有测试，不从实现输出反推",
+		"逐字 API/字段/字符串/退出码/默认值",
 	} {
 		if !strings.Contains(config.Agents.Verifier.SystemPrompt, want) {
 			t.Fatalf("verifier prompt does not independently derive expected output contract %q", want)
@@ -674,9 +674,9 @@ func TestRepositoryVerifierPromptExercisesSemanticFailurePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"实现路径确实被执行",
-		"失败后的状态",
-		"测试名称、测试数量",
+		"Task Info 承诺的公共入口",
+		"优先选择能击穿充分性漏洞的反例输入",
+		"测试数量",
 	} {
 		if !strings.Contains(config.Agents.Verifier.SystemPrompt, want) {
 			t.Fatalf("verifier prompt does not exercise semantic failure paths %q", want)
@@ -690,9 +690,9 @@ func TestRepositoryVerifierPromptUsesFreshIndependentProbes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"不修改测试文件",
-		"不同输入",
-		"唯一行为证据",
+		"不同于提交测试输入",
+		"Task Info 承诺的公共入口",
+		"自写测试是线索，不是自动可信的 oracle",
 	} {
 		if !strings.Contains(config.Agents.Verifier.SystemPrompt, want) {
 			t.Fatalf("verifier prompt does not require a fresh independent probe %q", want)
@@ -706,9 +706,9 @@ func TestRepositoryVerifierPromptObservesNegativeBehavior(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"抑制、删除、不产生或覆盖",
-		"缺失、数量减少或替换后的最终结果",
-		"内部 class、flag",
+		"正负边界",
+		"合理反例",
+		"内部实现形状当作目的成立的代理条件",
 	} {
 		if !strings.Contains(config.Agents.Verifier.SystemPrompt, want) {
 			t.Fatalf("verifier prompt accepts proxy evidence for negative behavior %q", want)
@@ -716,36 +716,34 @@ func TestRepositoryVerifierPromptObservesNegativeBehavior(t *testing.T) {
 	}
 }
 
-func TestRepositoryVerifierPromptProbesRecursiveIsolation(t *testing.T) {
+func TestRepositoryVerifierPromptCoversStatefulBoundaries(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"clone、copy 或 transfer 的隔离",
-		"深度大于一层",
-		"从源和目标两侧交替修改",
-		"closure capture 或嵌套 callable 图",
+		"跨调用状态",
+		"遗漏边界",
+		"相邻回归风险",
 	} {
 		if !strings.Contains(config.Agents.Verifier.SystemPrompt, want) {
-			t.Fatalf("verifier prompt does not probe recursive isolation %q", want)
+			t.Fatalf("verifier prompt does not cover stateful boundaries %q", want)
 		}
 	}
 }
 
-func TestRepositoryVerifierPromptProbesComposedProtocolFields(t *testing.T) {
+func TestRepositoryVerifierPromptCoversComposedContracts(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"可在同一输入中共存",
-		"至少构造两两组合",
-		"不同公共编码形态",
-		"分别通过不能证明组合语义",
+		"逐字 API/字段/字符串/退出码/默认值",
+		"所有 Ci 都成立但 G 仍未实现是否可能",
+		"验收条件的合取",
 	} {
 		if !strings.Contains(config.Agents.Verifier.SystemPrompt, want) {
-			t.Fatalf("verifier prompt does not probe composed protocol fields %q", want)
+			t.Fatalf("verifier prompt does not cover composed contracts %q", want)
 		}
 	}
 }
@@ -755,35 +753,43 @@ func TestRepositoryRepairPromptsRejectCollapsedCumulativeEvidence(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	for role, prompt := range map[string]string{
-		"manager":  config.Agents.Manager.SystemPrompt,
-		"verifier": config.Agents.Verifier.SystemPrompt,
-	} {
-		for _, want := range []string{
-			"每个句子或分号子句",
-			"测试总数",
-			"相关路径已覆盖",
-		} {
-			if !strings.Contains(prompt, want) {
-				t.Fatalf("%s prompt accepts collapsed cumulative evidence %q", role, want)
+	checks := []struct {
+		role   string
+		prompt string
+		wants  []string
+	}{
+		{
+			role:   "manager",
+			prompt: config.Agents.Manager.SystemPrompt,
+			wants:  []string{"原始累计契约", "Task Info 逐项映射"},
+		},
+		{
+			role:   "verifier",
+			prompt: config.Agents.Verifier.SystemPrompt,
+			wants:  []string{"完整累计契约", "将每个 Ci 映射"},
+		},
+	}
+	for _, check := range checks {
+		for _, want := range check.wants {
+			if !strings.Contains(check.prompt, want) {
+				t.Fatalf("%s prompt accepts collapsed cumulative evidence %q", check.role, want)
 			}
 		}
 	}
 }
 
-func TestRepositoryVerifierPromptProbesColdAndWarmObservationOrder(t *testing.T) {
+func TestRepositoryVerifierPromptCoversTemporalState(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"tracker、subscription、cache 或 lazy initialization",
-		"事件发生后才首次创建或观察",
-		"预热后再触发事件",
-		"消费后的重复观察",
+		"跨调用状态",
+		"合理反例",
+		"公共入口",
 	} {
 		if !strings.Contains(config.Agents.Verifier.SystemPrompt, want) {
-			t.Fatalf("verifier prompt does not probe cold and warm observation order %q", want)
+			t.Fatalf("verifier prompt does not cover temporal state %q", want)
 		}
 	}
 }
@@ -794,20 +800,17 @@ func TestRepositoryRepairPromptsPreserveAndExerciseNamedPublicMethods(t *testing
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"公开协议的方法签名",
-		"精确输出字符串",
-		"所属模块或类型",
-		"逐字保留",
+		"逐字接口/输出",
+		"原始累计契约",
 	} {
 		if !strings.Contains(config.Agents.Manager.SystemPrompt, want) {
 			t.Fatalf("manager prompt loses named public methods in repair roots %q", want)
 		}
 	}
 	for _, want := range []string{
-		"每个明确命名的公开方法",
-		"所属模块、类型或 receiver",
-		"至少调用一次",
-		"独立进程或实例",
+		"逐字 API/字段/字符串/退出码/默认值",
+		"Task Info 承诺的公共入口",
+		"直接证据",
 	} {
 		if !strings.Contains(config.Agents.Verifier.SystemPrompt, want) {
 			t.Fatalf("verifier prompt does not exercise named public methods %q", want)
@@ -815,53 +818,42 @@ func TestRepositoryRepairPromptsPreserveAndExerciseNamedPublicMethods(t *testing
 	}
 }
 
-func TestRepositoryManagerRejectsSelfAuthoredTestOnlyEvidence(t *testing.T) {
+func TestRepositoryManagerAuditsVerifierEvidence(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"唯一行为证据",
-		"不同输入的独立临时 probe",
+		"verifier 报告是待审计证据",
+		"PASS 缺少 Task Info 逐项映射或必要门禁",
 	} {
 		if !strings.Contains(config.Agents.Manager.SystemPrompt, want) {
-			t.Fatalf("manager prompt accepts self-authored-test-only evidence %q", want)
+			t.Fatalf("manager prompt does not audit verifier evidence %q", want)
 		}
 	}
 }
 
-func TestRepositoryRolePromptsDoNotBlockOnMissingBaselineAlias(t *testing.T) {
+func TestRepositoryDefaultPromptRecoversFromToolFailures(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	checks := []struct {
-		role   string
-		prompt string
-	}{
-		{"manager", config.Agents.Manager.SystemPrompt},
-		{"planner", config.Agents.Planner.SystemPrompt},
-		{"executor", config.Agents.Executor.SystemPrompt},
-		{"verifier", config.Agents.Verifier.SystemPrompt},
-	}
-	for _, check := range checks {
-		if !strings.Contains(check.prompt, "基线分支名不存在") {
-			t.Errorf("%s prompt treats a missing baseline alias as a blocker", check.role)
-		}
+	if !strings.Contains(config.Prompts.Default, "工具失败时先根据错误恢复") {
+		t.Error("default prompt treats a recoverable mechanical mismatch as a blocker")
 	}
 }
 
-func TestRepositoryManagerPromptDoesNotRequireEmptyRepairCommit(t *testing.T) {
+func TestRepositoryManagerOnlyExtendsForActionableFailures(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"后继持久工作区已经满足报告中的修复条件",
-		"不要要求空提交",
+		"只有可由工作区改动消除的缺陷才继续扩图",
+		"workflow done 不等于验收通过",
 	} {
 		if !strings.Contains(config.Agents.Manager.SystemPrompt, want) {
-			t.Fatalf("manager prompt does not accept a no-op repair %q", want)
+			t.Fatalf("manager prompt extends for non-actionable failures %q", want)
 		}
 	}
 }
@@ -872,8 +864,8 @@ func TestRepositoryManagerPromptDoesNotPrequeueDuplicateRepairs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"一次任务报告只追加一层最小修复 root",
-		"不要预排依赖该修复结果的同质后继 root",
+		"以全局图去重跨 task 的重复工作",
+		"同型缺陷连续出现时",
 	} {
 		if !strings.Contains(config.Agents.Manager.SystemPrompt, want) {
 			t.Fatalf("manager prompt does not avoid duplicate repair roots %q", want)
@@ -881,27 +873,42 @@ func TestRepositoryManagerPromptDoesNotPrequeueDuplicateRepairs(t *testing.T) {
 	}
 }
 
-func TestRepositoryWorkspaceRolePromptsBatchIndependentTools(t *testing.T) {
+func TestRepositoryPlannerPromptBatchesReadyWork(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	checks := []struct {
-		role   string
-		prompt string
-	}{
-		{"planner", config.Agents.Planner.SystemPrompt},
-		{"executor", config.Agents.Executor.SystemPrompt},
-		{"verifier", config.Agents.Verifier.SystemPrompt},
-	}
-	for _, check := range checks {
-		if !strings.Contains(check.prompt, "互不依赖的工具调用") {
-			t.Errorf("%s prompt does not batch independent tools", check.role)
+	for _, want := range []string{
+		"同一 frontier 中全部写入不冲突的单元放进同一 concurrency group",
+		"共享前置只做一次，完成后立即 fan-out",
+	} {
+		if !strings.Contains(config.Agents.Planner.SystemPrompt, want) {
+			t.Errorf("planner prompt does not batch ready work %q", want)
 		}
 	}
 }
 
-func TestRepositoryWorkspaceRolePromptsExerciseFallbackBranches(t *testing.T) {
+func TestRepositoryOnlyExecutorRequestsHelp(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []struct {
+		name  string
+		tools []string
+		want  bool
+	}{
+		{name: "planner", tools: config.Agents.Planner.Tools},
+		{name: "executor", tools: config.Agents.Executor.Tools, want: true},
+		{name: "verifier", tools: config.Agents.Verifier.Tools},
+	} {
+		if got := slices.Contains(role.tools, "coordination_requestHelp"); got != role.want {
+			t.Errorf("%s coordination_requestHelp = %v, want %v", role.name, got, role.want)
+		}
+	}
+}
+
+func TestRepositoryRolePromptsRequireAlternativeEvidencePaths(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
@@ -909,19 +916,19 @@ func TestRepositoryWorkspaceRolePromptsExerciseFallbackBranches(t *testing.T) {
 	checks := []struct {
 		role   string
 		prompt string
+		want   string
 	}{
-		{"planner", config.Agents.Planner.SystemPrompt},
-		{"executor", config.Agents.Executor.SystemPrompt},
-		{"verifier", config.Agents.Verifier.SystemPrompt},
+		{"planner", config.Agents.Planner.SystemPrompt, "无法执行时列替代路径和未覆盖面"},
+		{"verifier", config.Agents.Verifier.SystemPrompt, "合理替代路径均已尝试"},
 	}
 	for _, check := range checks {
-		if !strings.Contains(check.prompt, "优选资源不存在") {
+		if !strings.Contains(check.prompt, check.want) {
 			t.Errorf("%s prompt does not exercise fallback branches", check.role)
 		}
 	}
 }
 
-func TestRepositoryWorkspaceRolePromptsCompileExactPublicExamples(t *testing.T) {
+func TestRepositoryRolePromptsPreserveExactPublicContracts(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
@@ -929,14 +936,17 @@ func TestRepositoryWorkspaceRolePromptsCompileExactPublicExamples(t *testing.T) 
 	checks := []struct {
 		role   string
 		prompt string
+		wants  []string
 	}{
-		{"planner", config.Agents.Planner.SystemPrompt},
-		{"executor", config.Agents.Executor.SystemPrompt},
-		{"verifier", config.Agents.Verifier.SystemPrompt},
+		{"planner", config.Agents.Planner.SystemPrompt, []string{"逐字保留 Task Info 的硬要求", "构建/编译"}},
+		{"executor", config.Agents.Executor.SystemPrompt, []string{"Task Info", "构建/编译"}},
+		{"verifier", config.Agents.Verifier.SystemPrompt, []string{"逐字 API/字段/字符串/退出码/默认值", "Task Info 承诺的公共入口"}},
 	}
 	for _, check := range checks {
-		if !strings.Contains(check.prompt, "公开调用示例") {
-			t.Errorf("%s prompt does not compile exact public examples", check.role)
+		for _, want := range check.wants {
+			if !strings.Contains(check.prompt, want) {
+				t.Errorf("%s prompt does not preserve exact public examples %q", check.role, want)
+			}
 		}
 	}
 }
@@ -1436,34 +1446,48 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 	if got.Prompts.Default == "" {
 		t.Fatal("workspace prompts.default is empty")
 	}
+	if !strings.Contains(got.Prompts.Default, "每个来源必须 apply 或 discard，结束角色前 finish") {
+		t.Fatal("workspace prompts.default missing join disposition contract")
+	}
 	if got.Agents.Manager.SystemPrompt == "" {
 		t.Fatal("workspace manager system_prompt is empty")
 	}
 	for _, want := range []string{
-		"每个角色先 fork 自己的工作区，再处理 join，最后 Ask",
-		"join 时子 task 记忆合入 task 共享记忆",
-		".threadmill/runtime/joins/manifest.json",
-		"目标角色才用已有的文件和命令工具筛选改动、解决冲突",
-		"join 到 planner：子 task 文件只进入一次性规划工作区",
-		"join 到 executor：子 task 文件进入 task 持久文件环境",
-		"join 到 verifier：子 task 文件只进入一次性核验工作区",
-		"新 root 会从前一个 root 的 task 持久环境（记忆和文件）fork",
-		"不要回退或覆盖已完成 task 的实现",
-		"修复焦点可以增量收窄，但验收范围不能随之收窄",
-		"已完成的辅助分支由系统自动保留",
+		"planner 产出的「Help Executor 计划」是任务内拆分的唯一计划来源",
+		"不能静默重命名、合并、拆开或补造 planner 的任务契约",
+		"同一 wave 的全部 ready 单元应在一次编排中并发启动",
+		"manager 只协调，不与 helper 或 executor 竞争实现工作",
+		"`cluster_active_width = 384` 是安全持续水位",
+		"workflow done 不等于验收通过",
 	} {
 		if !strings.Contains(got.Agents.Manager.SystemPrompt, want) {
 			t.Errorf("workspace manager system_prompt missing %q", want)
 		}
 	}
-	if !strings.Contains(got.Agents.Verifier.SystemPrompt, "发现实现缺陷只写入核验报告") {
-		t.Fatal("workspace verifier system_prompt missing report-only defect guidance")
+	for _, want := range []string{
+		"验收对象是 Task Info 所表达的预期目的",
+		"尽可能成为 G 的充要条件",
+		"对每个拟阻断结论做高置信复核",
+		"未证实的可能性、风格偏好和一般质量建议只能列为非阻断观察",
+	} {
+		if !strings.Contains(got.Agents.Verifier.SystemPrompt, want) {
+			t.Errorf("workspace verifier system_prompt missing %q", want)
+		}
 	}
-	if !strings.Contains(got.Agents.Verifier.SystemPrompt, "按完整累计验收清单复验") {
-		t.Fatal("workspace verifier system_prompt missing cumulative repair verification")
+	for _, role := range []struct {
+		name  string
+		tools []string
+	}{
+		{"planner", got.Agents.Planner.Tools},
+		{"executor", got.Agents.Executor.Tools},
+		{"verifier", got.Agents.Verifier.Tools},
+	} {
+		if !slices.Contains(role.tools, "join") {
+			t.Errorf("workspace %s tools = %v, want join", role.name, role.tools)
+		}
 	}
-	if !strings.Contains(got.Agents.Verifier.SystemPrompt, "枚举的保护区域、模式或变体") {
-		t.Fatal("workspace verifier system_prompt missing enumerated behavior evidence")
+	if slices.Contains(got.Agents.Manager.Tools, "join") {
+		t.Fatalf("manager tools include role-local %q", "join")
 	}
 	if got.Tools["coordination_replacePending"].Description == "" {
 		t.Fatal("workspace tools.coordination_replacePending.description is empty")

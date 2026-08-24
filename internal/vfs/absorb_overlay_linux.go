@@ -40,16 +40,16 @@ type upperBefore struct {
 	dir      bool
 }
 
-// absorbNativeUpper reads only the native OverlayFS upper layer. Kernel
-// whiteouts are the deletion journal; opaque, redirect, metacopy, symlink, or
-// otherwise unfamiliar evidence falls back to the merged-tree implementation.
+// absorbOverlayUpper reads only the active OverlayFS upper layer. Whiteouts
+// are the deletion journal; opaque, redirect, metacopy, symlink, or otherwise
+// unfamiliar evidence falls back to the merged-tree implementation.
 // See https://docs.kernel.org/filesystems/overlayfs.html#whiteouts-and-opaque-directories.
-func (s *Store) absorbNativeUpper(envID, live string) (
+func (s *Store) absorbOverlayUpper(envID, live string) (
 	attempted, used bool,
 	visited uint64,
 	err error,
 ) {
-	upper, ok := s.nativeOverlayUpper(envID)
+	upper, ok := s.overlayUpper(envID)
 	if !ok {
 		return false, false, 0, nil
 	}
@@ -124,11 +124,11 @@ func (s *Store) absorbNativeUpper(envID, live string) (
 	return true, true, scan.visited, nil
 }
 
-func (s *Store) nativeOverlayUpper(envID string) (string, bool) {
+func (s *Store) overlayUpper(envID string) (string, bool) {
 	s.mountMu.Lock()
 	defer s.mountMu.Unlock()
 	mount := s.mounts[envID]
-	if mount == nil || mount.driver == nil || mount.driver.kind != "native-overlayfs" || mount.upperdir == "" {
+	if mount == nil || mount.driver == nil || mount.upperdir == "" {
 		return "", false
 	}
 	if !overlayMounted(mount.mountpoint) {
@@ -159,9 +159,7 @@ func (s *Store) visibleOverlayFilesLocked(envID string) map[string]struct{} {
 	candidates := make(map[string]struct{})
 	for _, files := range s.overlayMaps(envID) {
 		for rel := range files {
-			if !isMergeRuntimePath(rel) {
-				candidates[rel] = struct{}{}
-			}
+			candidates[rel] = struct{}{}
 		}
 	}
 	visible := make(map[string]struct{}, len(candidates))
@@ -238,12 +236,6 @@ func scanUpperLayer(root string, ignored map[string]bool) (upperScan, bool, erro
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		if isMergeRuntimePath(rel) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
 		if filepath.IsAbs(rel) || !filepath.IsLocal(rel) || escapesRoot(root, path) {
 			return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
 		}
@@ -312,12 +304,14 @@ func overlayEntryMetadata(path string, info fs.FileInfo) (whiteout, supported bo
 		}
 		switch attr {
 		case "trusted.overlay.origin", "trusted.overlay.impure", "trusted.overlay.uuid",
-			"user.overlay.origin", "user.overlay.impure", "user.overlay.uuid":
+			"user.overlay.origin", "user.overlay.impure", "user.overlay.uuid",
+			"user.fuseoverlayfs.origin", "user.fuseoverlayfs.impure", "user.fuseoverlayfs.uuid":
 			continue
 		}
 		if strings.HasPrefix(attr, "trusted.overlay.") ||
 			strings.HasPrefix(attr, "trusted.overlayfs.") ||
-			strings.HasPrefix(attr, "user.overlay.") {
+			strings.HasPrefix(attr, "user.overlay.") ||
+			strings.HasPrefix(attr, "user.fuseoverlayfs.") {
 			return false, false, nil
 		}
 	}
