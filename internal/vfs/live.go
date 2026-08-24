@@ -14,12 +14,26 @@ import (
 )
 
 // Materialize 把 env 的可见树落到 live 目录。已物化则原样返回。
-func (s *Store) Materialize(envID string) (string, error) {
+func (s *Store) Materialize(envID string) (live string, retErr error) {
 	s.mu.Lock()
 	if dir, ok := s.lives[envID]; ok {
 		s.mu.Unlock()
 		return dir, nil
 	}
+	if call := s.materializing[envID]; call != nil {
+		s.mu.Unlock()
+		<-call.done
+		return call.dir, call.err
+	}
+	call := &materializeCall{done: make(chan struct{})}
+	s.materializing[envID] = call
+	defer func() {
+		s.mu.Lock()
+		call.dir, call.err = live, retErr
+		delete(s.materializing, envID)
+		close(call.done)
+		s.mu.Unlock()
+	}()
 	base, err := confinedRoot(s.baseDir)
 	if err != nil {
 		s.mu.Unlock()
@@ -27,11 +41,10 @@ func (s *Store) Materialize(envID string) (string, error) {
 	}
 	blobs := s.overlayBlobs(envID)
 	s.mu.Unlock()
+	s.beginMaterializeIO()
+	defer s.endMaterializeIO()
 
-	var live string
-	if s.liveRoot == "" {
-		live, err = os.MkdirTemp("", "threadmill-live-")
-	} else {
+	if s.liveRoot != "" {
 		if restored, ok, restoreErr := s.persistedLive(envID); restoreErr != nil {
 			return "", restoreErr
 		} else if ok {
@@ -40,15 +53,53 @@ func (s *Store) Materialize(envID string) (string, error) {
 			s.mu.Unlock()
 			return restored, nil
 		}
+	}
+	materializeStarted := time.Now()
+	if overlayLive, ok, overlayErr := s.createOverlay(envID, base, blobs); ok {
+		live = overlayLive
+		var baseline *liveFingerprint
+		if _, native := s.nativeOverlayUpper(envID); !native {
+			baseline = scanLiveFingerprint(live)
+		}
+		s.mu.Lock()
+		s.materializeCopies++
+		s.materializeOverlays++
+		s.materializeCopyDuration += time.Since(materializeStarted)
+		s.lives[envID] = live
+		if baseline != nil {
+			s.liveBaselines[envID] = baseline
+		}
+		s.mu.Unlock()
+		return live, nil
+	} else if overlayErr != nil {
+		s.mu.Lock()
+		s.materializeFallbacks++
+		if errors.Is(overlayErr, errOverlayCapacity) {
+			s.overlayCapacityFallbacks++
+		} else {
+			s.overlayErrorFallbacks++
+		}
+		s.overlayLastFallback = overlayErr.Error()
+		s.mu.Unlock()
+		if s.overlayStateExists(envID) {
+			return "", overlayErr
+		}
+	}
+
+	if s.liveRoot == "" {
+		live, err = os.MkdirTemp("", "threadmill-live-")
+	} else {
 		live, err = os.MkdirTemp(s.liveRoot, ".tmp-")
 	}
 	if err != nil {
 		return "", fmt.Errorf("vfs: materialize: %w", err)
 	}
 	copyStarted := time.Now()
-	copyErr := copyTree(base, live)
+	copyBackend, copyErr := copyTree(base, live)
 	s.mu.Lock()
 	s.materializeCopies++
+	s.materializeReflinks += boolCount(copyBackend == materializeReflink)
+	s.materializeFullCopies += boolCount(copyBackend == materializeFullCopy)
 	s.materializeCopyDuration += time.Since(copyStarted)
 	if copyErr != nil {
 		s.materializeCopyErrors++
@@ -79,6 +130,7 @@ func (s *Store) Materialize(envID string) (string, error) {
 		}
 	}
 
+	baseline := scanLiveFingerprint(live)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if dir, ok := s.lives[envID]; ok {
@@ -86,6 +138,7 @@ func (s *Store) Materialize(envID string) (string, error) {
 		return dir, nil
 	}
 	s.lives[envID] = live
+	s.liveBaselines[envID] = baseline
 	return live, nil
 }
 
@@ -96,29 +149,76 @@ func (s *Store) Absorb(envID string) error {
 	}
 	s.mu.Lock()
 	live, ok := s.lives[envID]
+	baseline, hasBaseline := s.liveBaselines[envID]
 	s.mu.Unlock()
 	if !ok {
 		return nil
 	}
+	s.beginAbsorbIO()
+	defer s.endAbsorbIO()
+	upperStarted := time.Now()
+	attempted, used, upperEntries, upperErr := s.absorbNativeUpper(envID, live)
+	if attempted {
+		s.mu.Lock()
+		s.absorbUpperAttempts++
+		s.absorbUpperEntries += upperEntries
+		s.absorbUpperDuration += time.Since(upperStarted)
+		if !used {
+			s.absorbUpperFallbacks++
+		}
+		if upperErr != nil {
+			s.absorbUpperErrors++
+		}
+		if used {
+			s.absorbFastPaths++
+		}
+		s.mu.Unlock()
+		if used {
+			if upperErr != nil {
+				return fmt.Errorf("vfs: absorb upperdir: %w", upperErr)
+			}
+			return nil
+		}
+	}
+	current := scanLiveFingerprint(live)
+	if hasBaseline && current.valid && current.hash == baseline.hash {
+		s.mu.Lock()
+		s.absorbFastPaths++
+		s.mu.Unlock()
+		return nil
+	}
+	scanStarted := time.Now()
 
 	s.mu.Lock()
 	if _, ok := s.lives[envID]; !ok {
 		s.mu.Unlock()
+		s.recordAbsorbScan(scanStarted, nil)
 		return nil
 	}
 	before, err := s.visibleRegularFiles(envID)
 	s.mu.Unlock()
 	if err != nil {
-		return fmt.Errorf("vfs: absorb: %w", err)
+		err = fmt.Errorf("vfs: absorb: %w", err)
+		s.recordAbsorbScan(scanStarted, err)
+		return err
 	}
-	liveFiles, err := walkRegularFiles(live, before)
-	if err != nil {
-		return fmt.Errorf("vfs: absorb: %w", err)
-	}
-
+	liveFiles, comparisons, err := walkRegularFiles(
+		live,
+		before,
+		unchangedLiveBuckets(baseline, current),
+	)
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.absorbContentComparisons += comparisons
+	s.mu.Unlock()
+	if err != nil {
+		err = fmt.Errorf("vfs: absorb: %w", err)
+		s.recordAbsorbScan(scanStarted, err)
+		return err
+	}
+	s.mu.Lock()
 	if _, ok := s.lives[envID]; !ok {
+		s.mu.Unlock()
+		s.recordAbsorbScan(scanStarted, nil)
 		return nil
 	}
 	dst := s.ensure(envID)
@@ -137,7 +237,54 @@ func (s *Store) Absorb(envID string) error {
 			executable: current.executable,
 		})
 	}
+	s.liveBaselines[envID] = current
+	s.mu.Unlock()
+	s.recordAbsorbScan(scanStarted, nil)
 	return nil
+}
+
+func (s *Store) beginMaterializeIO() {
+	waitStarted := time.Now()
+	s.ioSlots <- struct{}{}
+	s.mu.Lock()
+	s.materializeWaitDuration += time.Since(waitStarted)
+	s.materializeActive++
+	s.materializePeakActive = max(s.materializePeakActive, s.materializeActive)
+	s.mu.Unlock()
+}
+
+func (s *Store) endMaterializeIO() {
+	s.mu.Lock()
+	s.materializeActive--
+	s.mu.Unlock()
+	<-s.ioSlots
+}
+
+func (s *Store) beginAbsorbIO() {
+	waitStarted := time.Now()
+	s.ioSlots <- struct{}{}
+	s.mu.Lock()
+	s.absorbWaitDuration += time.Since(waitStarted)
+	s.absorbActive++
+	s.absorbPeakActive = max(s.absorbPeakActive, s.absorbActive)
+	s.mu.Unlock()
+}
+
+func (s *Store) endAbsorbIO() {
+	s.mu.Lock()
+	s.absorbActive--
+	s.mu.Unlock()
+	<-s.ioSlots
+}
+
+func (s *Store) recordAbsorbScan(start time.Time, err error) {
+	s.mu.Lock()
+	s.absorbScans++
+	s.absorbScanDuration += time.Since(start)
+	if err != nil {
+		s.absorbScanErrors++
+	}
+	s.mu.Unlock()
 }
 
 // Release 先把 live 收进 overlay，再删掉 live 目录。未物化则是空操作。
@@ -150,10 +297,14 @@ func (s *Store) Release(envID string) error {
 	live, ok := s.lives[envID]
 	if ok {
 		delete(s.lives, envID)
+		delete(s.liveBaselines, envID)
 	}
 	s.mu.Unlock()
 	if !ok {
 		return aerr
+	}
+	if err := s.closeOverlay(envID); err != nil {
+		return errors.Join(aerr, err)
 	}
 	if err := os.RemoveAll(live); err != nil {
 		return errors.Join(aerr, fmt.Errorf("vfs: release: %w", err))
@@ -172,18 +323,25 @@ func (s *Store) Discard(envID string) error {
 	if live == "" && s.liveRoot != "" {
 		live = s.persistentLivePath(envID)
 	}
+	if err := s.closeOverlay(envID); err != nil {
+		return err
+	}
 	if live != "" {
 		if err := os.RemoveAll(live); err != nil {
 			return fmt.Errorf("vfs: discard: %w", err)
 		}
 	}
 	if s.liveRoot != "" {
+		if err := os.RemoveAll(s.overlayStatePath(envID)); err != nil {
+			return fmt.Errorf("vfs: discard overlay state: %w", err)
+		}
 		if err := os.RemoveAll(s.persistentMergePath(envID)); err != nil {
 			return fmt.Errorf("vfs: discard merge state: %w", err)
 		}
 	}
 	s.mu.Lock()
 	delete(s.lives, envID)
+	delete(s.liveBaselines, envID)
 	delete(s.envs, envID)
 	delete(s.merges, envID)
 	s.mu.Unlock()
@@ -217,6 +375,7 @@ func (s *Store) overlayBlobs(envID string) []overlayFile {
 type fileSnapshot struct {
 	data       []byte
 	source     string
+	sourceInfo fs.FileInfo
 	executable bool
 }
 
@@ -225,9 +384,14 @@ type fileSnapshot struct {
 // 内容和 overlay+host 的可见树做比对，只把增删改写回 overlay，所以必须读字节，
 // 不能只看文件名。
 // 未改变的大型 base 文件通过内容摘要确认，不进入 overlay 限额。
-func walkRegularFiles(root string, before map[string]fileSnapshot) (map[string]fileSnapshot, error) {
+func walkRegularFiles(
+	root string,
+	before map[string]fileSnapshot,
+	unchangedBuckets [liveFingerprintBuckets]bool,
+) (map[string]fileSnapshot, uint64, error) {
 	out := map[string]fileSnapshot{}
 	var totalSize int64
+	var contentComparisons uint64
 	compareA := make([]byte, 32*1024)
 	compareB := make([]byte, len(compareA))
 	ignored := gitIgnoredPaths(root)
@@ -275,13 +439,22 @@ func walkRegularFiles(root string, before map[string]fileSnapshot) (map[string]f
 		}
 		executable := info.Mode().Perm()&0o111 != 0
 		old, existed := before[rel]
+		if existed && unchangedBuckets[liveFingerprintBucket(rel)] {
+			out[rel] = old
+			return nil
+		}
 		if existed && old.source != "" {
-			sourceInfo, err := os.Stat(old.source)
-			if err != nil {
-				return err
+			sourceInfo := old.sourceInfo
+			if sourceInfo == nil {
+				var err error
+				sourceInfo, err = os.Stat(old.source)
+				if err != nil {
+					return err
+				}
 			}
 			old.executable = sourceInfo.Mode().Perm()&0o111 != 0
 			if old.executable == executable {
+				contentComparisons++
 				equal, err := equalFileContents(
 					path,
 					info,
@@ -319,9 +492,9 @@ func walkRegularFiles(root string, before map[string]fileSnapshot) (map[string]f
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, contentComparisons, err
 	}
-	return out, nil
+	return out, contentComparisons, nil
 }
 
 func gitIgnoredPaths(root string) map[string]bool {
@@ -367,44 +540,13 @@ func retainIgnoredBase(
 }
 
 func (s *Store) visibleRegularFiles(envID string) (map[string]fileSnapshot, error) {
-	base, err := confinedRoot(s.baseDir)
+	baseFiles, err := s.cachedBaseRegularFiles()
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]fileSnapshot{}
-	err = filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(base, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if isMergeRuntimePath(rel) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if filepath.IsAbs(rel) || !filepath.IsLocal(rel) || escapesRoot(base, path) {
-			return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
-		}
-		mode := d.Type()
-		if mode&os.ModeSymlink != 0 || d.IsDir() {
-			return nil
-		}
-		if mode.Type() != 0 {
-			return fmt.Errorf("%w: %q (mode %s)", ErrSpecialFile, rel, mode.String())
-		}
-		out[rel] = fileSnapshot{source: path}
-		return nil
-	})
-	if err != nil {
-		return nil, err
+	out := make(map[string]fileSnapshot, len(baseFiles))
+	for path, snapshot := range baseFiles {
+		out[path] = snapshot
 	}
 
 	// Most paths come straight from the read-only base. Only paths touched or
@@ -449,6 +591,57 @@ func (s *Store) visibleRegularFiles(envID string) (map[string]fileSnapshot, erro
 	return out, nil
 }
 
+func (s *Store) cachedBaseRegularFiles() (map[string]fileSnapshot, error) {
+	s.baseFilesOnce.Do(func() {
+		base, err := confinedRoot(s.baseDir)
+		if err != nil {
+			s.baseFilesErr = err
+			return
+		}
+		files := make(map[string]fileSnapshot)
+		s.baseFilesErr = filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			rel, err := filepath.Rel(base, path)
+			if err != nil || rel == "." {
+				return err
+			}
+			rel = filepath.ToSlash(rel)
+			if isMergeRuntimePath(rel) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if filepath.IsAbs(rel) || !filepath.IsLocal(rel) || escapesRoot(base, path) {
+				return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
+			}
+			mode := d.Type()
+			if mode&os.ModeSymlink != 0 || d.IsDir() {
+				return nil
+			}
+			if mode.Type() != 0 {
+				return fmt.Errorf("%w: %q (mode %s)", ErrSpecialFile, rel, mode.String())
+			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			files[rel] = fileSnapshot{
+				source:     path,
+				sourceInfo: info,
+				executable: info.Mode().Perm()&0o111 != 0,
+			}
+			return nil
+		})
+		if s.baseFilesErr == nil {
+			s.baseFiles = files
+		}
+	})
+	return s.baseFiles, s.baseFilesErr
+}
+
 func hasPathAncestor(paths map[string]struct{}, rel string) bool {
 	for {
 		i := strings.LastIndex(rel, "/")
@@ -486,6 +679,7 @@ func (s *Store) regularFileSnapshot(envID, rel string) (fileSnapshot, bool) {
 	}
 	return fileSnapshot{
 		source:     host,
+		sourceInfo: fi,
 		executable: fi.Mode().Perm()&0o111 != 0,
 	}, true
 }
@@ -765,12 +959,39 @@ func liveCandidate(root, rel string) (string, error) {
 	return full, nil
 }
 
-func copyTree(src, dst string) error {
-	cmd := osexec.Command("cp", "--reflink=auto", "-a", src+"/.", dst)
-	if err := cmd.Run(); err == nil {
-		return nil
+type materializeCopyBackend uint8
+
+const (
+	materializeFullCopy materializeCopyBackend = iota
+	materializeReflink
+)
+
+func copyTree(src, dst string) (materializeCopyBackend, error) {
+	clone := osexec.Command("cp", "--reflink=always", "-a", src+"/.", dst)
+	if err := clone.Run(); err == nil {
+		return materializeReflink, nil
 	}
-	return copyWalk(src, dst)
+	if err := resetCopyDestination(dst); err != nil {
+		return materializeFullCopy, err
+	}
+	copyCmd := osexec.Command("cp", "--reflink=never", "-a", src+"/.", dst)
+	if err := copyCmd.Run(); err == nil {
+		return materializeFullCopy, nil
+	}
+	if err := resetCopyDestination(dst); err != nil {
+		return materializeFullCopy, err
+	}
+	return materializeFullCopy, copyWalk(src, dst)
+}
+
+func resetCopyDestination(dst string) error {
+	if err := os.RemoveAll(dst); err != nil {
+		return fmt.Errorf("vfs: reset materialization: %w", err)
+	}
+	if err := os.Mkdir(dst, 0o700); err != nil {
+		return fmt.Errorf("vfs: reset materialization: %w", err)
+	}
+	return nil
 }
 
 func copyWalk(src, dst string) error {
@@ -819,4 +1040,11 @@ func copyWalk(src, dst string) error {
 			regularMode(info.Mode().Perm()&0o111 != 0),
 		)
 	})
+}
+
+func boolCount(ok bool) uint64 {
+	if ok {
+		return 1
+	}
+	return 0
 }

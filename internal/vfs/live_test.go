@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 )
@@ -35,6 +36,137 @@ func TestMaterializeIsIdempotent(t *testing.T) {
 	stats := store.Stats()
 	if stats.MaterializeCopies != 1 || stats.MaterializeCopyErrors != 0 || stats.MaterializeCopyDuration <= 0 {
 		t.Fatalf("materialize stats = %+v, want one successful measured copy", stats)
+	}
+	if got := stats.MaterializeOverlays + stats.MaterializeReflinks + stats.MaterializeFullCopies; got != 1 {
+		t.Fatalf("materialize backend total = %d, want one classified materialization: %+v", got, stats)
+	}
+}
+
+func TestMaterializeCoalescesConcurrentCalls(t *testing.T) {
+	store, base := newTestStore(t)
+	t.Cleanup(func() { _ = store.Discard("env-a") })
+	for i := range 1000 {
+		mustWriteFile(t, filepath.Join(base, "fixture", fmt.Sprintf("file-%04d", i)), "x")
+	}
+
+	const callers = 16
+	start := make(chan struct{})
+	dirs := make([]string, callers)
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			dirs[i], errs[i] = store.Materialize("env-a")
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("Materialize caller %d: %v", i, err)
+		}
+		if dirs[i] != dirs[0] {
+			t.Fatalf("Materialize caller %d dir = %q, want %q", i, dirs[i], dirs[0])
+		}
+	}
+	if got := store.Stats().MaterializeCopies; got != 1 {
+		t.Fatalf("materialize copies = %d, want one coalesced copy", got)
+	}
+}
+
+func TestMaterializeBoundsConcurrentCopies(t *testing.T) {
+	const callers = 16
+	store, base := newTestStore(t)
+	t.Cleanup(func() {
+		for i := range callers {
+			_ = store.Discard(fmt.Sprintf("env-%d", i))
+		}
+	})
+	for i := range 500 {
+		mustWriteFile(t, filepath.Join(base, "fixture", fmt.Sprintf("file-%04d", i)), "x")
+	}
+
+	start := make(chan struct{})
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, errs[i] = store.Materialize(fmt.Sprintf("env-%d", i))
+		}()
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("Materialize caller %d: %v", i, err)
+		}
+	}
+
+	stats := store.Stats()
+	if stats.MaterializeCapacity <= 0 {
+		t.Fatalf("materialize capacity = %d, want positive bound", stats.MaterializeCapacity)
+	}
+	if stats.MaterializePeakActive > stats.MaterializeCapacity {
+		t.Fatalf("materialize peak = %d, capacity = %d", stats.MaterializePeakActive, stats.MaterializeCapacity)
+	}
+	if stats.MaterializeCopies != callers {
+		t.Fatalf("materialize copies = %d, want %d distinct environments", stats.MaterializeCopies, callers)
+	}
+}
+
+func TestAbsorbBoundsConcurrentScans(t *testing.T) {
+	const callers = 16
+	store, base := newTestStore(t)
+	for i := range 500 {
+		mustWriteFile(t, filepath.Join(base, "fixture", fmt.Sprintf("file-%04d", i)), "x")
+	}
+	for i := range callers {
+		envID := fmt.Sprintf("env-%d", i)
+		t.Cleanup(func() { _ = store.Discard(envID) })
+		live, err := store.Materialize(envID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(live, "hello.txt"), []byte("world"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	start := make(chan struct{})
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs[i] = store.Absorb(fmt.Sprintf("env-%d", i))
+		}()
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("Absorb caller %d: %v", i, err)
+		}
+	}
+
+	stats := store.Stats()
+	if stats.AbsorbCapacity <= 0 {
+		t.Fatalf("absorb capacity = %d, want positive bound", stats.AbsorbCapacity)
+	}
+	if stats.AbsorbPeakActive > stats.AbsorbCapacity {
+		t.Fatalf("absorb peak = %d, capacity = %d", stats.AbsorbPeakActive, stats.AbsorbCapacity)
+	}
+	if stats.AbsorbScans != callers {
+		t.Fatalf("absorb scans = %d, want %d", stats.AbsorbScans, callers)
 	}
 }
 
@@ -243,6 +375,71 @@ func TestAbsorbPicksUpLiveWrites(t *testing.T) {
 	}
 }
 
+func TestAbsorbPicksUpSameSizeWriteWithRestoredMtime(t *testing.T) {
+	t.Parallel()
+
+	store, base := newTestStore(t)
+	baseInfo, err := os.Stat(filepath.Join(base, "hello.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := store.Materialize("parent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveFile := filepath.Join(live, "hello.txt")
+	if err := os.WriteFile(liveFile, []byte("world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(liveFile, baseInfo.ModTime(), baseInfo.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	mustFork(t, store, "parent", "child")
+	got, err := store.View("child").Read("hello.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "world" {
+		t.Fatalf("child hello.txt = %q, want same-size live write", got)
+	}
+	stats := store.Stats()
+	if stats.AbsorbScans != 1 || stats.AbsorbScanErrors != 0 {
+		t.Fatalf("absorb scan stats = %+v, want one successful content scan", stats)
+	}
+}
+
+func TestAbsorbComparesOnlyChangedStatBuckets(t *testing.T) {
+	store, base := newTestStore(t)
+	for i := range 512 {
+		mustWriteFile(t, filepath.Join(base, "fixture", fmt.Sprintf("file-%04d.txt", i)), "fixture")
+	}
+	live, err := store.Materialize("env-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(live, "fixture", "file-0000.txt"),
+		[]byte("changed"),
+		0o640,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Absorb("env-a"); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Stats().AbsorbContentComparisons; got >= 64 {
+		t.Fatalf("content comparisons = %d, want fewer than one stat bucket", got)
+	}
+	got, err := store.View("env-a").Read("fixture/file-0000.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "changed" {
+		t.Fatalf("changed file = %q, want changed", got)
+	}
+}
+
 func TestAbsorbTombsLiveDeletions(t *testing.T) {
 	t.Parallel()
 
@@ -273,13 +470,18 @@ func TestAbsorbSkipsUnchangedHostFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.mu.Lock()
-	defer store.mu.Unlock()
 	l, ok := store.envs["env-a"]
 	if !ok {
+		store.mu.Unlock()
 		return
 	}
 	if _, ok := l.files["hello.txt"]; ok {
+		store.mu.Unlock()
 		t.Fatal("Absorb copied an unchanged host file into overlay")
+	}
+	store.mu.Unlock()
+	if stats := store.Stats(); stats.AbsorbFastPaths != 1 || stats.AbsorbScans != 0 {
+		t.Fatalf("absorb fast-path stats = %+v, want one metadata-only absorb", stats)
 	}
 }
 

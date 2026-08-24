@@ -46,6 +46,8 @@ type Cmd struct {
 type ExecResult struct {
 	ExitCode int
 	Output   string
+	// PeakRSSBytes 是命令进程树观测到的常驻内存峰值（/proc 轮询采样），0 表示未计量。
+	PeakRSSBytes uint64
 }
 
 // ExecView 是某个环境的命令执行视图。

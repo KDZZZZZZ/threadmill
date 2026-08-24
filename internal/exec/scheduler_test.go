@@ -323,6 +323,37 @@ func TestExternalSandboxUsesPerEnvironmentTemp(t *testing.T) {
 	}
 }
 
+func TestExternalSandboxReusesBuildCacheOnlyWithinEnvironment(t *testing.T) {
+	t.Parallel()
+
+	files := vfs.NewStore(t.TempDir())
+	s := New(Config{Slots: 1, ExternalSandbox: true})
+	t.Cleanup(func() {
+		if err := errors.Join(s.Reap("env-a"), s.Reap("env-b")); err != nil {
+			t.Error(err)
+		}
+	})
+	writeMarker := `cache=$(go env GOCACHE) && mkdir -p "$cache" && touch "$cache/threadmill-marker"`
+	if result, err := s.View("env-a", files).Run(
+		context.Background(), env.Cmd{Command: writeMarker},
+	); err != nil || result.ExitCode != 0 {
+		t.Fatalf("warm cache = %#v, %v", result, err)
+	}
+	if result, err := s.View("env-a", files).Run(context.Background(), env.Cmd{
+		Command: `test -e "$(go env GOCACHE)/threadmill-marker"`,
+	}); err != nil || result.ExitCode != 0 {
+		t.Fatalf("reuse cache = %#v, %v", result, err)
+	}
+	if err := files.Fork("env-a", "env-b"); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := s.View("env-b", files).Run(context.Background(), env.Cmd{
+		Command: `test ! -e "$(go env GOCACHE)/threadmill-marker"`,
+	}); err != nil || result.ExitCode != 0 {
+		t.Fatalf("sibling cache isolation = %#v, %v", result, err)
+	}
+}
+
 func TestExternalSandboxForwardsOnlyNetworkEnvironment(t *testing.T) {
 	networkEnvironment := map[string]string{
 		"all_proxy":           "socks5://127.0.0.1:43001",
