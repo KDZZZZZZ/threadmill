@@ -28,6 +28,8 @@ case "${1:-}" in
     printf 'go1.24.2\n'
     ;;
   install)
+    test "${GONOPROXY:-}" = github.com/KDZZZZZZ/threadmill
+    test "${GONOSUMDB:-}" = github.com/KDZZZZZZ/threadmill
     mkdir -p "$GOBIN"
     cat >"$GOBIN/threadmill" <<'BINARY'
 #!/bin/sh
