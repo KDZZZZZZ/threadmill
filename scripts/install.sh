@@ -5,7 +5,8 @@ umask 077
 
 min_go_version=1.24.2
 bootstrap_go_version=1.27.0
-module=github.com/KDZZZZZZ/threadmill/cmd/threadmill
+module_root=github.com/KDZZZZZZ/threadmill
+module=$module_root/cmd/threadmill
 ref=${THREADMILL_REF:-dev-native}
 install_root=${THREADMILL_INSTALL_DIR:-"${HOME:?HOME is required}/.threadmill"}
 bin_dir=$install_root/bin
@@ -285,6 +286,8 @@ GOBIN="$bin_dir" \
   GOPATH="$install_root/go" \
   GOMODCACHE="$install_root/cache/mod" \
   GOCACHE="$install_root/cache/build" \
+  GONOPROXY="$module_root" \
+  GONOSUMDB="$module_root" \
   GOTOOLCHAIN=auto \
   CGO_ENABLED=0 \
   "$go_bin" install "$module@$ref"
