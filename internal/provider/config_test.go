@@ -1453,15 +1453,23 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 		t.Fatal("workspace manager system_prompt is empty")
 	}
 	for _, want := range []string{
-		"planner 产出的「Help Executor 计划」是任务内拆分的唯一计划来源",
-		"不能静默重命名、合并、拆开或补造 planner 的任务契约",
-		"同一 wave 的全部 ready 单元应在一次编排中并发启动",
-		"manager 只协调，不与 helper 或 executor 竞争实现工作",
-		"`cluster_active_width = 384` 是安全持续水位",
+		"核心职责是编排和维护全局协调图",
+		"manager 决定 root 与 helper 的放置、依赖、准入、去重和增量改图",
+		"planner 的拆分提案是 manager 编排全局图的输入，不是对全局图的直接决定",
+		"普通用户消息与 `[拆分请求]` 是两种不同输入",
+		"普通用户消息不得触发 coordination_provideHelp",
+		"manager 永远不调用、也不声称调用 coordination_requestHelp",
+		"工具成功返回前，不得声称 task、helper 或图变更已经创建",
+		"寒暄和直接问答不要主动介绍内部角色、协调图或 help 协议",
 		"workflow done 不等于验收通过",
 	} {
 		if !strings.Contains(got.Agents.Manager.SystemPrompt, want) {
 			t.Errorf("workspace manager system_prompt missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{"width_class", "target_width", "cluster_active_width"} {
+		if strings.Contains(got.Agents.Manager.SystemPrompt, unwanted) {
+			t.Errorf("workspace manager system_prompt contains planner detail %q", unwanted)
 		}
 	}
 	for _, want := range []string{
