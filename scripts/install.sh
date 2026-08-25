@@ -7,6 +7,7 @@ min_go_version=1.24.2
 bootstrap_go_version=1.27.0
 module_root=github.com/KDZZZZZZ/threadmill
 module=$module_root/cmd/threadmill
+repository=https://github.com/KDZZZZZZ/threadmill
 ref=${THREADMILL_REF:-dev-native}
 install_root=${THREADMILL_INSTALL_DIR:-"${HOME:?HOME is required}/.threadmill"}
 bin_dir=$install_root/bin
@@ -279,6 +280,15 @@ install_runtime_dependencies
 prepare_bwrap
 select_go
 
+install_ref=$ref
+if remote_ref=$(git ls-remote --exit-code "$repository" "refs/heads/$ref"); then
+  install_ref=$(printf '%s\n' "$remote_ref" | awk 'NR == 1 { print $1 }')
+  [ -n "$install_ref" ] || fail "the requested branch resolved to an empty commit"
+else
+  status=$?
+  [ "$status" -eq 2 ] || fail "cannot resolve Threadmill ref $ref"
+fi
+
 step "Installing Threadmill $ref to $bin_path"
 mkdir -p "$bin_dir" "$install_root/cache/mod" "$install_root/cache/build" "$install_root/go"
 chmod 700 "$install_root"
@@ -290,7 +300,7 @@ GOBIN="$bin_dir" \
   GONOSUMDB="$module_root" \
   GOTOOLCHAIN=auto \
   CGO_ENABLED=0 \
-  "$go_bin" install "$module@$ref"
+  "$go_bin" install "$module@$install_ref"
 chmod 755 "$bin_path"
 "$bin_path" -h >/dev/null 2>&1 || fail "installed Threadmill binary failed its smoke test"
 
