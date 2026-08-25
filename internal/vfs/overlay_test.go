@@ -117,6 +117,47 @@ func TestOverlayMaterializeFallsBackAtCapacity(t *testing.T) {
 	}
 }
 
+func TestOverlayMaterializeFallsBackAfterInitialMountFailure(t *testing.T) {
+	root := t.TempDir()
+	base := filepath.Join(root, "base")
+	state := filepath.Join(root, "state")
+	if err := os.MkdirAll(base, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "hello.txt"), []byte("base"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	failingMount := filepath.Join(root, "failing-overlay")
+	if err := os.WriteFile(failingMount, []byte("#!/bin/sh\nexit 1\n"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewPersistentStore(base, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.overlay = &overlayDriver{kind: "fuse-overlayfs", program: failingMount}
+	store.overlaySlots = make(chan struct{}, 1)
+	t.Cleanup(func() { _ = store.Close() })
+
+	live, err := store.Materialize("env-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(live, "hello.txt"))
+	if err != nil || string(got) != "base" {
+		t.Fatalf("fallback hello.txt = %q, %v, want base", got, err)
+	}
+	if store.overlayStateExists("env-a") {
+		t.Fatal("failed initial overlay mount left persistent state")
+	}
+	stats := store.Stats()
+	if stats.MaterializeOverlays != 0 || stats.MaterializeFallbacks != 1 ||
+		stats.OverlayErrorFallbacks != 1 {
+		t.Fatalf("materialize stats = %+v, want one error fallback and no overlay", stats)
+	}
+}
+
 func TestFuseOverlayAbsorbUsesUpperdirDelta(t *testing.T) {
 	driver := detectOverlayDriver()
 	if driver == nil || driver.kind != "fuse-overlayfs" {

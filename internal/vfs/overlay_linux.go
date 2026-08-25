@@ -333,6 +333,20 @@ func (s *Store) createOverlay(
 		live,
 	)
 	if err != nil {
+		if cleanupErr := os.RemoveAll(live); cleanupErr != nil {
+			return "", false, errors.Join(
+				err,
+				errOverlayCleanup,
+				fmt.Errorf("vfs: remove failed overlay mountpoint: %w", cleanupErr),
+			)
+		}
+		if cleanupErr := os.RemoveAll(state); cleanupErr != nil {
+			return "", false, errors.Join(
+				err,
+				errOverlayCleanup,
+				fmt.Errorf("vfs: remove failed overlay state: %w", cleanupErr),
+			)
+		}
 		return "", false, err
 	}
 	mount.release = s.releaseOverlay
@@ -344,7 +358,10 @@ func (s *Store) createOverlay(
 	return live, true, nil
 }
 
-var errOverlayCapacity = errors.New("vfs: overlay capacity reached")
+var (
+	errOverlayCapacity = errors.New("vfs: overlay capacity reached")
+	errOverlayCleanup  = errors.New("vfs: clean failed overlay state")
+)
 
 func (s *Store) acquireOverlay() bool {
 	if s.overlaySlots == nil {
