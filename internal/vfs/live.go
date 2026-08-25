@@ -81,7 +81,7 @@ func (s *Store) Materialize(envID string) (live string, retErr error) {
 		}
 		s.overlayLastFallback = overlayErr.Error()
 		s.mu.Unlock()
-		if s.overlayStateExists(envID) {
+		if errors.Is(overlayErr, errOverlayCleanup) || s.overlayStateExists(envID) {
 			return "", overlayErr
 		}
 	}
