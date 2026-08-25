@@ -15,7 +15,7 @@ sudo_log="$test_root/sudo.log"
 apparmor_ready="$test_root/apparmor-ready"
 mkdir -p "$fake_bin"
 
-for tool in awk bash cat chmod dirname git grep id mkdir mktemp rm sed sh uname; do
+for tool in awk bash cat chmod dirname grep id mkdir mktemp rm sed sh uname; do
   ln -s "$(command -v "$tool")" "$fake_bin/$tool"
 done
 
@@ -30,6 +30,7 @@ case "${1:-}" in
   install)
     test "${GONOPROXY:-}" = github.com/KDZZZZZZ/threadmill
     test "${GONOSUMDB:-}" = github.com/KDZZZZZZ/threadmill
+    test "$*" = "install github.com/KDZZZZZZ/threadmill/cmd/threadmill@1111111111111111111111111111111111111111"
     mkdir -p "$GOBIN"
     cat >"$GOBIN/threadmill" <<'BINARY'
 #!/bin/sh
@@ -42,6 +43,12 @@ BINARY
     exit 1
     ;;
 esac
+EOF
+cat >"$fake_bin/git" <<'EOF'
+#!/bin/sh
+set -eu
+test "$*" = "ls-remote --exit-code https://github.com/KDZZZZZZ/threadmill refs/heads/dev-native"
+printf '1111111111111111111111111111111111111111\trefs/heads/dev-native\n'
 EOF
 cat >"$fake_bin/bwrap" <<'EOF'
 #!/bin/sh
@@ -89,7 +96,7 @@ TOOL
     ;;
 esac
 EOF
-chmod 755 "$fake_bin/go" "$fake_bin/bwrap" "$fake_bin/sudo" \
+chmod 755 "$fake_bin/go" "$fake_bin/git" "$fake_bin/bwrap" "$fake_bin/sudo" \
   "$fake_bin/sysctl" "$fake_bin/cp" "$fake_bin/apparmor_parser" "$fake_bin/apt-get"
 printf '# existing profile\n' >"$profile"
 
