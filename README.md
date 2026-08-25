@@ -4,7 +4,7 @@ Threadmill 是轻量级 Agent OS。
 
 ## 安装
 
-Linux x86-64/ARM64 使用一键安装。它把 Threadmill、必要时使用的私有 Go 工具链和构建缓存放在 `~/.threadmill`，检查并安装 `git`、`bash`、`bubblewrap`、`fuse-overlayfs`，并把 `~/.threadmill/bin` 幂等写入当前 shell 的启动文件。VFS 会按当前权限和文件系统自动选择高性能后端：原生 OverlayFS、FUSE OverlayFS、reflink 或兼容复制：
+Linux x86-64/ARM64 使用一键安装。它会请求 `sudo` 权限来安装运行时依赖，并在 Ubuntu AppArmor 限制 user namespace 时启用系统提供的 `bwrap` profile；沙箱探测不通过则安装失败。Threadmill、必要时使用的私有 Go 工具链和构建缓存放在 `~/.threadmill`，`~/.threadmill/bin` 会幂等写入当前 shell 的启动文件。VFS 会按当前权限和文件系统自动选择高性能后端：原生 OverlayFS、FUSE OverlayFS、reflink 或兼容复制：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/KDZZZZZZ/threadmill/dev-native/scripts/install.sh | sh
