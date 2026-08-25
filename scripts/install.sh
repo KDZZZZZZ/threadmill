@@ -18,10 +18,6 @@ step() {
   printf '==> %s\n' "$1"
 }
 
-warn() {
-  printf 'WARNING: %s\n' "$1" >&2
-}
-
 fail() {
   printf 'ERROR: %s\n' "$1" >&2
   exit 1
@@ -75,6 +71,13 @@ run_as_root() {
   else
     fail "installing runtime dependencies requires root or sudo"
   fi
+}
+
+require_admin_access() {
+  [ "$(id -u)" -eq 0 ] && return 0
+  command -v sudo >/dev/null 2>&1 || fail "installation requires root or sudo"
+  step "Requesting administrator access for runtime setup"
+  sudo -v || fail "administrator access is required to install Threadmill"
 }
 
 install_runtime_dependencies() {
@@ -213,6 +216,29 @@ probe_bwrap() {
     -- bash -c true >/dev/null 2>&1
 }
 
+prepare_bwrap() {
+  if probe_bwrap; then
+    step "Sandbox dependency ready: bwrap"
+    return
+  fi
+
+  if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)" = 1 ]; then
+    command -v apt-get >/dev/null 2>&1 ||
+      fail "AppArmor blocks bwrap; install and enable the distribution bwrap profile"
+    step "Enabling the distribution AppArmor profile for bwrap"
+    run_as_root apt-get update
+    run_as_root apt-get install -y apparmor-profiles
+    run_as_root cp \
+      /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+      /etc/apparmor.d/bwrap-userns-restrict
+    run_as_root apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+  fi
+
+  probe_bwrap ||
+    fail "bwrap cannot create the required user namespace; refusing to install a command runner that cannot execute commands"
+  step "Sandbox dependency ready: bwrap"
+}
+
 pick_profile() {
   if [ -n "$profile_override" ]; then
     printf '%s\n' "$profile_override"
@@ -247,7 +273,9 @@ configure_path() {
   path_action=added
 }
 
+require_admin_access
 install_runtime_dependencies
+prepare_bwrap
 select_go
 
 step "Installing Threadmill $ref to $bin_path"
@@ -265,15 +293,6 @@ chmod 755 "$bin_path"
 
 configure_path
 
-if probe_bwrap; then
-  step "Sandbox dependency ready: bwrap"
-else
-  warn "bwrap is installed but cannot create the required user namespace"
-  if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)" = 1 ]; then
-    warn "AppArmor restricts unprivileged user namespaces on this host; install a bwrap AppArmor policy instead of disabling the restriction globally"
-  fi
-  warn "the TUI will open, but Agent commands will fail closed until bwrap works or an external sandbox is explicitly configured"
-fi
 step "VFS acceleration ready: fuse-overlayfs; privileged runs automatically prefer native OverlayFS"
 
 step "Threadmill installed"
