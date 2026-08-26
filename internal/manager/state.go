@@ -16,6 +16,7 @@ type statePaths struct {
 	ReactDir        string
 	ProgressDir     string
 	VFSDir          string
+	CacheDir        string
 	LogFile         string
 }
 
@@ -47,6 +48,7 @@ func openStatePaths(projectRoot string) (statePaths, error) {
 		ReactDir:        filepath.Join(projectDir, "checkpoints", "tasks"),
 		ProgressDir:     filepath.Join(projectDir, "progress"),
 		VFSDir:          filepath.Join(projectDir, "vfs"),
+		CacheDir:        filepath.Join(projectDir, "cmdcache"),
 		LogFile:         filepath.Join(projectDir, "threadmill.log"),
 	}, nil
 }

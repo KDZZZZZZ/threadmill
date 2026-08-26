@@ -65,6 +65,31 @@ type ExecConfig struct {
 	OutputCapKB     int    `yaml:"output_cap_kb"` // 0 时调度器默认 256KB
 	ContainerImage  string `yaml:"container_image"`
 	ExternalSandbox bool   `yaml:"external_sandbox"`
+	// Cache 配置命令结果缓存：依赖文件版本一致的 agent 复用彼此的执行结果与产物。
+	Cache ExecCacheConfig `yaml:"cache"`
+}
+
+// ExecCacheConfig 配置命令结果缓存。
+//
+// 依赖靠系统调用追踪推断，不靠手写规则也不靠命令名黑名单。追踪不可用时
+// 缓存整体关闭：宁可不命中，也不能在依赖不明的情况下复用结果。
+type ExecCacheConfig struct {
+	// Enabled 打开缓存。
+	Enabled bool `yaml:"enabled"`
+	// MaxBytes 是产物存储上限，超出按最近最少使用回收；0 时取 2GiB。
+	MaxBytes int64 `yaml:"max_bytes"`
+	// MaxReadSet 是单条命令允许的最大依赖数；0 时取 20000。
+	// 读集再大，校验成本就会盖过收益。
+	MaxReadSet int `yaml:"max_read_set"`
+	// VerifySampleRate 是命中后仍照常执行、用来对账的比例。
+	// 读集是观测得来的，不是证明出来的：某次执行没走到的分支，它的依赖
+	// 就不在集合里。抽样对账是发现这类静默误命中的唯一手段。
+	VerifySampleRate float64 `yaml:"verify_sample_rate"`
+	// CacheFailures 决定非零退出码的结果是否入缓存。
+	// 超时与沙箱错误无论如何都不入缓存：它们反映的是环境，不是命令的结果。
+	CacheFailures bool `yaml:"cache_failures"`
+	// DisableTrace 关掉系统调用追踪，等同于关掉缓存。用于排查追踪本身的开销。
+	DisableTrace bool `yaml:"disable_trace"`
 }
 
 // LLMConfig 配置一个 OpenAI-compatible Responses API Provider。
@@ -374,6 +399,19 @@ func (c *ExecConfig) validate() error {
 	}
 	if c.Slots == 0 {
 		c.Slots = runtime.NumCPU()
+	}
+	return c.Cache.validate()
+}
+
+func (c ExecCacheConfig) validate() error {
+	if c.MaxBytes < 0 {
+		return fmt.Errorf("%w: exec.cache.max_bytes must not be negative", ErrInvalidConfig)
+	}
+	if c.MaxReadSet < 0 {
+		return fmt.Errorf("%w: exec.cache.max_read_set must not be negative", ErrInvalidConfig)
+	}
+	if c.VerifySampleRate < 0 || c.VerifySampleRate > 1 {
+		return fmt.Errorf("%w: exec.cache.verify_sample_rate must be between 0 and 1", ErrInvalidConfig)
 	}
 	return nil
 }

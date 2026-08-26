@@ -45,11 +45,17 @@ func probeBwrap() bool {
 	return cmd.Run() == nil
 }
 
-func runBwrap(ctx context.Context, live, tempDir, command string, capBytes int, track func(int)) (env.ExecResult, error) {
-	args := bashArgs(command)
-	cmd := osexec.CommandContext(
-		ctx,
-		"bwrap",
+func runBwrap(
+	ctx context.Context,
+	live, tempDir, command string,
+	capBytes int,
+	track func(int),
+	trace *traceRun,
+) (env.ExecResult, error) {
+	// 追踪器跑在沙箱内，作为该 PID 命名空间的 1 号进程追踪自己的后代；
+	// Yama ptrace_scope=1 允许这种父子关系。
+	args := trace.wrap(bashArgs(command))
+	bwrapArgs := []string{
 		"--unshare-user",
 		"--unshare-pid",
 		"--die-with-parent",
@@ -68,8 +74,9 @@ func runBwrap(ctx context.Context, live, tempDir, command string, capBytes int, 
 		"--proc", "/proc",
 		"--chdir", "/",
 		"--",
-		args[0], args[1], args[2],
-	)
+	}
+	bwrapArgs = append(bwrapArgs, args...)
+	cmd := osexec.CommandContext(ctx, "bwrap", bwrapArgs...)
 	cmd.Env = networkSandboxEnv("/tmp", "/tmp")
 	return collect(ctx, cmd, capBytes, track)
 }
