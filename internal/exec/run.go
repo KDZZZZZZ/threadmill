@@ -73,8 +73,9 @@ func runExternalSandbox(
 	live, tempDir, command string,
 	capBytes int,
 	track func(int),
+	trace *traceRun,
 ) (env.ExecResult, error) {
-	args := bashArgs(command)
+	args := trace.wrap(bashArgs(command))
 	cmd := osexec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = live
 	cmd.Env = networkSandboxEnv(tempDir, tempDir)

@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/KDZZZZZZ/threadmill/internal/cmdcache"
 	"github.com/KDZZZZZZ/threadmill/internal/env"
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
@@ -44,6 +45,12 @@ type Config struct {
 	HeavyThreshold time.Duration
 	// MemoryBudgetBytes 按历史峰值 RSS 做记账准入；0 关闭。
 	MemoryBudgetBytes int64
+	// Cache 打开命令结果缓存：依赖文件版本一致的环境可以复用彼此的执行
+	// 结果与产物。nil 表示关闭。
+	Cache *cmdcache.Cache
+	// DisableTrace 关闭系统调用追踪。追踪不可用时缓存仍能工作，
+	// 只是退化成整树指纹键：命中率低，但绝不会错命中。
+	DisableTrace bool
 }
 
 // Scheduler 用信号量限制并发，并把命令跑进某个 env 的 live 目录。
@@ -61,6 +68,9 @@ type Scheduler struct {
 	runtimes map[string]string
 	counters schedulerCounters
 	costs    *costTable
+
+	cache   *cmdcache.Cache
+	tracing bool
 
 	heavy          chan struct{}
 	heavyThreshold time.Duration
@@ -114,6 +124,10 @@ type Stats struct {
 	HeavyPeakQueued      int           `json:"heavy_peak_queued"`
 	HeavyPeakActive      int           `json:"heavy_peak_active"`
 	HeavyWaitDuration    time.Duration `json:"heavy_wait_duration"`
+	// Cache 是命令结果缓存的累计计数；未启用时为零值。
+	Cache cmdcache.Stats `json:"cache"`
+	// DependencyTracing 表示读集推断是否可用。为假时缓存退化成整树指纹键。
+	DependencyTracing bool `json:"dependency_tracing"`
 }
 
 // New 创建调度器。Slots <= 0 时用 runtime.NumCPU()。
@@ -147,6 +161,8 @@ func New(cfg Config) *Scheduler {
 		s.heavyThreshold = defaultHeavyThreshold
 	}
 	s.memBudget = cfg.MemoryBudgetBytes
+	s.cache = cfg.Cache
+	s.tracing = cfg.Cache != nil && !cfg.DisableTrace && tracerPath() != ""
 	if cfg.ExternalSandbox {
 		s.sandbox = sandboxExternal
 	} else {
@@ -195,6 +211,8 @@ func (s *Scheduler) Stats() Stats {
 		HeavyPeakQueued:      c.heavyPeakQueued,
 		HeavyPeakActive:      c.heavyPeakActive,
 		HeavyWaitDuration:    c.heavyWaitDuration,
+		Cache:                s.cache.Stats(),
+		DependencyTracing:    s.tracing,
 	}
 }
 
@@ -249,6 +267,25 @@ func (v execView) Run(ctx context.Context, spec env.Cmd) (result env.ExecResult,
 	live, err := v.files.Materialize(v.envID)
 	if err != nil {
 		return env.ExecResult{}, err
+	}
+	// 缓存查找同样在拿槽之前，而且是这个特性的收益所在：命中的命令完全不消耗
+	// 执行槽位，别的 agent 的命令因此更早开跑。
+	key := v.sched.cacheKey(spec.Command)
+	hit := v.sched.lookupCache(live, key)
+	verifying := false
+	if hit != nil {
+		switch {
+		case v.sched.cache.ShouldVerify():
+			// 抽样对账：这次照常执行，跑完和缓存条目比对。
+			v.sched.cache.RecordVerification()
+			verifying = true
+		case v.sched.cache.Replay(live, hit) == nil:
+			v.sched.requestServedFromCache()
+			return cachedResult(hit), nil
+		default:
+			// 回放失败就照常执行。缓存可以不命中，但不能让命令跑不起来。
+			hit = nil
+		}
 	}
 	heavy, estRSS := v.sched.commandClass(spec.Command)
 	if !v.sched.reserveMemory(ctx, estRSS) {
@@ -308,13 +345,27 @@ func (v execView) Run(ctx context.Context, spec env.Cmd) (result env.ExecResult,
 		defer cancel()
 	}
 	var out env.ExecResult
+	var trace *traceRun
 	if v.sched.run != nil {
 		out, runErr = v.sched.run(ctx, live, spec)
 	} else {
-		out, runErr = v.sched.runSandboxed(ctx, live, spec.Command, v.envID)
+		out, trace, runErr = v.sched.runSandboxed(ctx, live, spec.Command, v.envID, v.sched.tracing)
 	}
-	v.sched.costs.record(spec.Command, time.Since(started), out.PeakRSSBytes)
+	took := time.Since(started)
+	v.sched.costs.record(spec.Command, took, out.PeakRSSBytes)
+	fresh := v.sched.storeTrace(ctx, live, key, trace, out, runErr, took)
+	if verifying {
+		v.sched.reconcileVerification(key, hit, fresh)
+	}
 	return out, runErr
+}
+
+// requestServedFromCache 记一次由缓存直接满足的请求。
+// 有意不动 started：这条命令没有真的跑起来，也没有占用执行槽位。
+func (s *Scheduler) requestServedFromCache() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.counters.completed++
 }
 
 // CostStats 返回按命令指纹累计的时长与 RSS 峰值画像，供调度分层与容量规划使用。
@@ -414,31 +465,56 @@ func (c *schedulerCounters) recordError(err error) {
 	}
 }
 
-func (s *Scheduler) runSandboxed(ctx context.Context, live, command, envID string) (env.ExecResult, error) {
+// runSandboxed 在隔离环境里执行命令，并在请求时一并产出系统调用追踪。
+//
+// 返回的 traceRun 携带追踪文件路径与沙箱路径映射；调用方负责解析并删除它。
+// docker 后端不支持追踪：它以 --cap-drop=ALL 和 no-new-privileges 启动，
+// ptrace 被挡住，而放宽隔离换缓存不是可接受的交换。
+func (s *Scheduler) runSandboxed(
+	ctx context.Context,
+	live, command, envID string,
+	tracing bool,
+) (env.ExecResult, *traceRun, error) {
 	defer s.pruneDeadProcessGroups(envID)
+	tracer := ""
+	if tracing {
+		tracer = tracerPath()
+	}
 	switch s.sandbox {
 	case sandboxBwrap:
 		runtimeDir, err := s.runtimeDir(envID, live)
 		if err != nil {
-			return env.ExecResult{}, err
+			return env.ExecResult{}, nil, err
 		}
-		return runBwrap(ctx, live, runtimeDir, command, s.outputCap, func(pgid int) {
+		// bwrap 把 live 树绑在 /，追踪到的路径天然就是工作区相对路径。
+		trace, err := newTraceRun(tracer, live, runtimeDir, "/", "/tmp")
+		if err != nil {
+			return env.ExecResult{}, nil, err
+		}
+		result, err := runBwrap(ctx, live, runtimeDir, command, s.outputCap, func(pgid int) {
 			s.track(envID, pgid)
-		})
+		}, trace)
+		return result, trace, err
 	case sandboxDocker:
-		return runDocker(ctx, live, command, s.image, s.outputCap, func(pgid int) {
+		result, err := runDocker(ctx, live, command, s.image, s.outputCap, func(pgid int) {
 			s.track(envID, pgid)
 		})
+		return result, nil, err
 	case sandboxExternal:
 		runtimeDir, err := s.runtimeDir(envID, live)
 		if err != nil {
-			return env.ExecResult{}, err
+			return env.ExecResult{}, nil, err
 		}
-		return runExternalSandbox(ctx, live, runtimeDir, command, s.outputCap, func(pgid int) {
+		trace, err := newTraceRun(tracer, live, runtimeDir, live, runtimeDir)
+		if err != nil {
+			return env.ExecResult{}, nil, err
+		}
+		result, err := runExternalSandbox(ctx, live, runtimeDir, command, s.outputCap, func(pgid int) {
 			s.track(envID, pgid)
-		})
+		}, trace)
+		return result, trace, err
 	default:
-		return env.ExecResult{}, ErrSandboxUnavailable
+		return env.ExecResult{}, nil, ErrSandboxUnavailable
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
+	"github.com/KDZZZZZZ/threadmill/internal/cmdcache"
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	"github.com/KDZZZZZZ/threadmill/internal/coordination"
 	"github.com/KDZZZZZZ/threadmill/internal/event"
@@ -133,6 +134,22 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 	if file.Memory.SoftMemoryLimitMB > 0 {
 		debug.SetMemoryLimit(int64(file.Memory.SoftMemoryLimitMB) << 20)
 	}
+	// 命令结果缓存跨进程共享：缓存目录挂在项目状态目录下，同一项目的另一个
+	// Threadmill 进程指向同一份产物存储。构造失败不该让整个进程起不来，
+	// 缓存只是加速，不是正确性的一部分。
+	var commandCache *cmdcache.Cache
+	if file.Exec.Cache.Enabled {
+		commandCache, err = cmdcache.New(cmdcache.Config{
+			Dir:              paths.CacheDir,
+			MaxBytes:         file.Exec.Cache.MaxBytes,
+			MaxReadSet:       file.Exec.Cache.MaxReadSet,
+			CacheFailures:    file.Exec.Cache.CacheFailures,
+			VerifySampleRate: file.Exec.Cache.VerifySampleRate,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	s := &Manager{
 		graph:     graph,
@@ -152,6 +169,8 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 			OutputCapKB:     file.Exec.OutputCapKB,
 			ContainerImage:  file.Exec.ContainerImage,
 			ExternalSandbox: file.Exec.ExternalSandbox,
+			Cache:           commandCache,
+			DisableTrace:    file.Exec.Cache.DisableTrace,
 		}),
 	}
 	s.graph.SetProgressStore(progress)

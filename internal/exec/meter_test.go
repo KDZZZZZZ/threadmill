@@ -34,7 +34,7 @@ func TestCollectMeasuresPeakRSS(t *testing.T) {
 	}
 	// 让子 shell 分配 ~24MB 并停留 400ms，验证采样会沿命令进程树向下统计。
 	cmd := "bash -c 'data=$(head -c 24M /dev/zero | base64); sleep 0.4' & wait"
-	result, err := runExternalSandbox(context.Background(), t.TempDir(), t.TempDir(), cmd, 1<<20, nil)
+	result, err := runExternalSandbox(context.Background(), t.TempDir(), t.TempDir(), cmd, 1<<20, nil, nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}

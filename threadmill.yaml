@@ -6,6 +6,10 @@ llm:
   context_window: 128000
 exec:
   slots: 64
+  cache:
+    enabled: true
+    cache_failures: true
+    verify_sample_rate: 0.01
 memory:
   curation:
     deep_audit_max_nodes: 64
