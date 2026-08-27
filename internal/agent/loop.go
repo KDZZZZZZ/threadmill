@@ -76,24 +76,29 @@ type Loop struct {
 	memory        env.MemoryView
 	curation      CurationConfig
 
-	mu                       sync.Mutex
-	queue                    []UserMessage
-	messages                 []Message
-	usedToolCallIDs          map[string]struct{}
-	subscribedSubgraphs      []string
-	fixedSubscribedSubgraphs []string
-	memoryBlockRev           int64
-	memoryBlockSubs          []string
-	memoryBlockText          string
-	agentID                  string
-	running                  bool
-	compactPrompt            string
-	compactJSONReminder      string
-	dropContextReminder      string
-	organizeQueryInstruction string
-	reactCommitted           bool
-	turnCancel               context.CancelFunc
-	turnPreempted            bool
+	mu                        sync.Mutex
+	queue                     []UserMessage
+	messages                  []Message
+	usedToolCallIDs           map[string]struct{}
+	subscribedSubgraphs       []string
+	fixedSubscribedSubgraphs  []string
+	stableSubscribedSubgraphs []string
+	memoryBlockRev            int64
+	memoryBlockSubs           []string
+	memoryStableBlockText     string
+	memoryBlockText           string
+	agentID                   string
+	cacheKey                  string
+	running                   bool
+	compactPrompt             string
+	compactJSONReminder       string
+	dropContextReminder       string
+	organizeQueryInstruction  string
+	memoryViewDefault         int
+	memoryViewLevels          map[string]int
+	reactCommitted            bool
+	turnCancel                context.CancelFunc
+	turnPreempted             bool
 }
 
 // NewLoop 校验并复制配置，创建一个尚未运行的 ReAct 循环。
@@ -140,6 +145,7 @@ func NewLoop(config Config) (*Loop, error) {
 		subscribedSubgraphs:      []string{},
 		fixedSubscribedSubgraphs: []string{},
 		agentID:                  agentID,
+		cacheKey:                 agentID,
 	}
 	loop.provider = eventProvider{inner: config.Provider, loop: loop}
 
@@ -376,8 +382,20 @@ func (l *Loop) runReact(ctx context.Context, input UserMessage, resume bool) (st
 
 // generate 调用 Provider 并执行模型生命周期钩子。
 func (l *Loop) generate(ctx context.Context) (AssistantMessage, error) {
-	request := l.assembleRequest()
-	request, err := l.hooks.assembleRequest(ctx, request)
+	request, err := l.requestWithHooks(ctx)
+	if err != nil {
+		return AssistantMessage{}, err
+	}
+	if l.shouldCompactBeforeRequest(request) {
+		if err := compactAndMaybeCurate(ctx, l, keepRecentBudget(l.contextWindow)); err != nil {
+			return AssistantMessage{}, err
+		}
+		request, err = l.requestWithHooks(ctx)
+		if err != nil {
+			return AssistantMessage{}, err
+		}
+	}
+	request, err = l.materializeStateBlocks(request)
 	if err != nil {
 		return AssistantMessage{}, err
 	}
@@ -391,6 +409,24 @@ func (l *Loop) generate(ctx context.Context) (AssistantMessage, error) {
 	response, providerErr := l.provider.Generate(ctx, cloneRequest(request))
 	hookErr := l.hooks.afterModel(ctx, request, response, providerErr)
 	return response, errors.Join(providerErr, hookErr)
+}
+
+func (l *Loop) requestWithHooks(ctx context.Context) (Request, error) {
+	return l.hooks.assembleRequest(ctx, l.assembleRequest())
+}
+
+func (l *Loop) shouldCompactBeforeRequest(request Request) bool {
+	if l == nil || l.contextWindow <= 0 ||
+		estimateRequestTokens(request) < softContextThreshold(l.contextWindow) {
+		return false
+	}
+	l.mu.Lock()
+	_, hasCompact := l.tools[compactMemoryToolName]
+	memory := l.memory
+	messages := cloneMessages(l.messages)
+	l.mu.Unlock()
+	return hasCompact && memory != nil &&
+		keepRecentIndex(messages, keepRecentBudget(l.contextWindow)) > 0
 }
 
 // next 从队首取消息；队列为空时等待入队通知或上下文取消。
@@ -491,10 +527,14 @@ func (p eventProvider) Generate(ctx context.Context, request Request) (Assistant
 	started := time.Now()
 	message, err := p.inner.Generate(ctx, request)
 	tokens := 0
+	inputTokens := 0
 	cachedTokens := 0
+	cacheWriteTokens := 0
 	if message.Usage != nil {
 		tokens = message.Usage.TotalTokens
+		inputTokens = message.Usage.InputTokens
 		cachedTokens = message.Usage.CachedTokens
+		cacheWriteTokens = message.Usage.CacheWriteTokens
 	}
 	end := event.ModelEnd(
 		p.loop.agentID,
@@ -505,6 +545,8 @@ func (p eventProvider) Generate(ctx context.Context, request Request) (Assistant
 		cachedTokens,
 		err,
 	)
+	end.InputTokens = inputTokens
+	end.CacheWriteTokens = cacheWriteTokens
 	end.Retries = retries
 	p.loop.publish(ctx, end)
 	return message, err

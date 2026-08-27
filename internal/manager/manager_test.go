@@ -21,9 +21,17 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
-// stateBlocksText 合并请求的状态块文本（记忆与协调图投影），供断言投影内容。
+// stateBlocksText 合并请求的稳定投影和已物化/待物化状态，供断言投影内容。
 func stateBlocksText(request agent.Request) string {
 	var b strings.Builder
+	for _, block := range request.StableBlocks {
+		b.WriteString(block.Text)
+	}
+	for _, message := range request.Messages {
+		if message.ContextBlockID != "" {
+			b.WriteString(message.Content)
+		}
+	}
 	for _, block := range request.StateBlocks {
 		b.WriteString(block.Text)
 	}
@@ -623,7 +631,6 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 	var managerReportMemory string
 	var managerAfterGraphMemory string
 	var rootExecutorMemory string
-	leakedManagerMemory := false
 	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
 		sys := request.SystemPrompt
 		switch {
@@ -669,9 +676,6 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 			}
 			return agent.AssistantMessage{Content: "已建任务"}, nil
 		case strings.Contains(sys, "你是 planner"):
-			mu.Lock()
-			leakedManagerMemory = leakedManagerMemory || strings.Contains(sys, "USER MESSAGE")
-			mu.Unlock()
 			if strings.Contains(lastUser(request.Messages), "CHILD INFO") {
 				return agent.AssistantMessage{Content: "child plan"}, nil
 			}
@@ -681,7 +685,6 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 				return response, nil
 			}
 			mu.Lock()
-			leakedManagerMemory = leakedManagerMemory || strings.Contains(sys, "USER MESSAGE")
 			if strings.Contains(lastUser(request.Messages), "[join pending]") {
 				rootExecutorMemory = stateBlocksText(request)
 			}
@@ -691,9 +694,6 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 			}
 			return agent.AssistantMessage{Content: "root did"}, nil
 		default:
-			mu.Lock()
-			leakedManagerMemory = leakedManagerMemory || strings.Contains(sys, "USER MESSAGE")
-			mu.Unlock()
 			if strings.Contains(lastUser(request.Messages), "child did") {
 				return agent.AssistantMessage{Content: "CHILD REPORT"}, nil
 			}
@@ -756,8 +756,8 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 	if strings.Contains(rootExecutorMemory, "CHILD REPORT") {
 		t.Fatalf("root executor prompt leaked candidate report: %q", rootExecutorMemory)
 	}
-	if leakedManagerMemory {
-		t.Fatal("manager-only memory leaked into task role system prompt")
+	if !strings.Contains(rootExecutorMemory, "[User Message] USER MESSAGE") {
+		t.Fatalf("root executor prompt = %q, want original user request", rootExecutorMemory)
 	}
 	joined := strings.Join(replies, "\n")
 	if !strings.Contains(joined, "已建任务") || !strings.Contains(joined, "任务已完成") {
@@ -765,13 +765,13 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 	}
 }
 
-func TestManagerBuildsMinimalTaskPackageFromTaskInfo(t *testing.T) {
+func TestManagerBuildsTaskPackageFromTaskInfoWithoutEagerRecall(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	created := false
-	var organizerQuery string
+	var organizerCalled bool
 	var plannerMemory string
 	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
 		sys := request.SystemPrompt
@@ -780,15 +780,8 @@ func TestManagerBuildsMinimalTaskPackageFromTaskInfo(t *testing.T) {
 		case strings.Contains(sys, "你是记忆压缩器"):
 			return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
 		case strings.Contains(sys, "你是 subgraph organizer"):
-			organizerQuery = query
-			if !hasToolResult(request.Messages) {
-				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-					ID:        "select-needed",
-					Name:      "memory_add_to_subgraph",
-					Arguments: json.RawMessage(`{"subgraph_id":"task-1-package","node_ids":["needed"]}`),
-				}}}, nil
-			}
-			return agent.AssistantMessage{Content: "organized"}, nil
+			organizerCalled = true
+			return agent.AssistantMessage{Content: "unexpected"}, nil
 		case strings.Contains(sys, "你是 manager"):
 			if strings.Contains(query, "[任务报告]") {
 				return agent.AssistantMessage{Content: "done"}, nil
@@ -836,17 +829,16 @@ func TestManagerBuildsMinimalTaskPackageFromTaskInfo(t *testing.T) {
 	if err := mgr.WaitIdle(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(organizerQuery, "use NEED_TOKEN") || !strings.Contains(organizerQuery, "task-1-package") {
-		t.Fatalf("organizer query = %q, want task info and package ID", organizerQuery)
+	if organizerCalled {
+		t.Fatal("organizer ran before a role explicitly requested missing history")
 	}
-	if strings.Contains(organizerQuery, coordination.ManagerMemorySubgraphID) {
-		t.Fatalf("organizer query = %q, contains manager-only subgraph", organizerQuery)
+	if !strings.Contains(plannerMemory, "[Task Info] task-1: use NEED_TOKEN") {
+		t.Fatalf("planner memory = %q, want protected task info", plannerMemory)
 	}
-	if !strings.Contains(plannerMemory, "NEEDED FACT NEED_TOKEN") {
-		t.Fatalf("planner memory = %q, want selected fact", plannerMemory)
-	}
-	if strings.Contains(plannerMemory, "NOISE FACT") {
-		t.Fatalf("planner memory = %q, contains unselected noise", plannerMemory)
+	for _, unwanted := range []string{"NEEDED FACT NEED_TOKEN", "NOISE FACT"} {
+		if strings.Contains(plannerMemory, unwanted) {
+			t.Fatalf("planner memory = %q, contains unrequested history %q", plannerMemory, unwanted)
+		}
 	}
 }
 
@@ -1308,7 +1300,7 @@ func (f stubProvider) Generate(ctx context.Context, request agent.Request) (agen
 
 func lastUser(messages []agent.Message) string {
 	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == agent.RoleUser {
+		if messages[i].Role == agent.RoleUser && messages[i].ContextBlockID == "" {
 			return messages[i].Content
 		}
 	}
@@ -1385,5 +1377,94 @@ func TestFormatReport(t *testing.T) {
 	want = "[任务报告] task-1 · failed · 耗时 1s\n目标: goal\n流程错误:\nplanner boom"
 	if got != want {
 		t.Fatalf("failed report = %q, want %q", got, want)
+	}
+}
+
+func TestManagerHoldsQueuedRootUntilReleased(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var mu sync.Mutex
+	plannerCalled := false
+	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
+		sys := request.SystemPrompt
+		query := lastUser(request.Messages)
+		switch {
+		case strings.Contains(sys, "你是记忆压缩器"):
+			return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
+		case strings.Contains(sys, "你是 manager"):
+			if strings.Contains(query, "[任务报告]") || hasToolResult(request.Messages) {
+				return agent.AssistantMessage{Content: "已处理"}, nil
+			}
+			policy := coordination.RunPolicyHeld
+			callID := "hold"
+			if strings.Contains(query, "RELEASE") {
+				policy = coordination.RunPolicyEnabled
+				callID = "release"
+			}
+			args, err := json.Marshal(coordination.PendingSubgraph{
+				Roots: []coordination.PendingRoot{{Info: "HELD INFO", RunPolicy: policy}},
+			})
+			if err != nil {
+				return agent.AssistantMessage{}, err
+			}
+			return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+				ID:        callID,
+				Name:      "coordination_replacePending",
+				Arguments: args,
+			}}}, nil
+		case strings.Contains(sys, "你是 planner"):
+			mu.Lock()
+			plannerCalled = true
+			mu.Unlock()
+			return agent.AssistantMessage{Content: "plan"}, nil
+		case strings.Contains(sys, "你是 executor"):
+			return agent.AssistantMessage{Content: "did"}, nil
+		default:
+			return agent.AssistantMessage{Content: "REPORT"}, nil
+		}
+	})
+
+	mgr, err := Open(ctx, Options{
+		Root:     t.TempDir(),
+		File:     loadRepoConfig(t),
+		Provider: provider,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer mgr.Close()
+
+	mgr.Send("QUEUE IT")
+	if err := mgr.WaitIdle(ctx); err != nil {
+		t.Fatalf("WaitIdle() error = %v", err)
+	}
+	snap := mgr.Snapshot()
+	if len(snap.Tasks) != 1 || snap.Tasks[0].Outcome != coordination.OutcomeActive {
+		t.Fatalf("tasks = %#v, want one active root", snap.Tasks)
+	}
+	if snap.Tasks[0].RunPolicy != coordination.RunPolicyHeld {
+		t.Fatalf("run policy = %q, want %q", snap.Tasks[0].RunPolicy, coordination.RunPolicyHeld)
+	}
+	mu.Lock()
+	started := plannerCalled
+	mu.Unlock()
+	if started {
+		t.Fatal("held root started; want it to stay queued until released")
+	}
+
+	mgr.Send("RELEASE")
+	if err := mgr.WaitIdle(ctx); err != nil {
+		t.Fatalf("WaitIdle() after release error = %v", err)
+	}
+	snap = mgr.Snapshot()
+	if snap.Tasks[0].Outcome != coordination.OutcomeDone {
+		t.Fatalf("outcome = %q, want done after release", snap.Tasks[0].Outcome)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !plannerCalled {
+		t.Fatal("released root never ran")
 	}
 }

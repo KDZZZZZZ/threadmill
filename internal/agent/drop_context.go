@@ -167,6 +167,11 @@ func estimateRequestTokens(request Request) int {
 	for _, message := range request.Messages {
 		total += estimateTokens(message)
 	}
+	for _, definition := range request.Tools {
+		total += estimateTextTokens(definition.Name)
+		total += estimateTextTokens(definition.Description)
+		total += estimateTextTokens(string(definition.InputSchema))
+	}
 	return total
 }
 

@@ -2383,3 +2383,44 @@ func mustTool(t *testing.T, tools []agenttool.Tool, name string) agenttool.Tool 
 	t.Fatalf("tool %q not registered", name)
 	return nil
 }
+
+func TestReplacePendingRejectsRunPolicyChangeOnStartedRoot(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "root"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := snap.Tasks[0]
+	plannerStarted := make(chan struct{})
+	plannerRelease := make(chan struct{})
+	done := runAsync(t, graph, func(Task) (Roles, error) {
+		return Roles{
+			Planner:  gatedAsker(plannerStarted, plannerRelease),
+			Executor: instantAsker(),
+			Verifier: instantAsker(),
+		}, nil
+	}, root.ID)
+	waitChan(t, plannerStarted)
+	before := graph.Snapshot()
+
+	_, err = graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "root", RunPolicy: RunPolicyHeld}},
+	})
+	if !errors.Is(err, ErrGraphBusy) {
+		close(plannerRelease)
+		t.Fatalf("ReplacePending() run policy error = %v, want %v", err, ErrGraphBusy)
+	}
+	if after := graph.Snapshot(); !reflect.DeepEqual(after, before) {
+		close(plannerRelease)
+		t.Fatalf("graph changed after rejected run policy:\nafter  = %#v\nbefore = %#v", after, before)
+	}
+
+	close(plannerRelease)
+	if err := waitErr(t, done); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}

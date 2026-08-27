@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -12,6 +13,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -50,6 +53,10 @@ type Stats struct {
 	Stores           uint64        `json:"stores"`
 	Rejected         uint64        `json:"rejected"`
 	ReplayErrors     uint64        `json:"replay_errors"`
+	ArtifactReflinks uint64        `json:"artifact_reflinks"`
+	ReflinkBytes     uint64        `json:"reflink_bytes"`
+	ArtifactCopies   uint64        `json:"artifact_copies"`
+	CopiedBytes      uint64        `json:"copied_bytes"`
 	Verifications    uint64        `json:"verifications"`
 	VerifyMismatches uint64        `json:"verify_mismatches"`
 	SavedDuration    time.Duration `json:"saved_duration"`
@@ -478,7 +485,13 @@ func (c *Cache) replayFile(live string, change Change) error {
 	if err != nil {
 		return fmt.Errorf("cmdcache: replay %q: %w", change.Path, err)
 	}
-	defer source.Close()
+	sourceInfo, err := source.Stat()
+	if err != nil {
+		return errors.Join(
+			fmt.Errorf("cmdcache: stat artifact %q: %w", change.Path, err),
+			source.Close(),
+		)
+	}
 	// 回放即使用：更新 blob 的时间戳，让热产物在容量裁剪里活下来。
 	now := time.Now()
 	_ = os.Chtimes(c.blobs.path(change.Digest), now, now)
@@ -489,15 +502,15 @@ func (c *Cache) replayFile(live string, change Change) error {
 	}
 	temp, err := os.CreateTemp(filepath.Dir(full), ".tmcache-")
 	if err != nil {
-		return fmt.Errorf("cmdcache: replay %q: %w", change.Path, err)
+		return errors.Join(
+			fmt.Errorf("cmdcache: replay %q: %w", change.Path, err),
+			source.Close(),
+		)
 	}
 	staged := temp.Name()
 	defer os.Remove(staged)
-	if _, err := io.Copy(temp, source); err != nil {
-		temp.Close()
-		return fmt.Errorf("cmdcache: replay %q: %w", change.Path, err)
-	}
-	if err := temp.Close(); err != nil {
+	reflinked, materializeErr := cloneOrCopy(temp, source)
+	if err := errors.Join(materializeErr, source.Close(), temp.Close()); err != nil {
 		return fmt.Errorf("cmdcache: replay %q: %w", change.Path, err)
 	}
 	if err := os.Chmod(staged, mode); err != nil {
@@ -512,7 +525,35 @@ func (c *Cache) replayFile(live string, change Change) error {
 	if err := os.Rename(staged, full); err != nil {
 		return fmt.Errorf("cmdcache: replay %q: %w", change.Path, err)
 	}
+	c.mu.Lock()
+	if reflinked {
+		c.stats.ArtifactReflinks++
+		c.stats.ReflinkBytes += uint64(sourceInfo.Size())
+	} else {
+		c.stats.ArtifactCopies++
+		c.stats.CopiedBytes += uint64(sourceInfo.Size())
+	}
+	c.mu.Unlock()
 	return nil
+}
+
+func cloneOrCopy(target, source *os.File) (bool, error) {
+	if err := unix.IoctlFileClone(int(target.Fd()), int(source.Fd())); err == nil {
+		return true, nil
+	}
+	if err := target.Truncate(0); err != nil {
+		return false, fmt.Errorf("reset copy target: %w", err)
+	}
+	if _, err := target.Seek(0, io.SeekStart); err != nil {
+		return false, fmt.Errorf("seek copy target: %w", err)
+	}
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return false, fmt.Errorf("seek artifact: %w", err)
+	}
+	if _, err := io.Copy(target, source); err != nil {
+		return false, fmt.Errorf("copy artifact: %w", err)
+	}
+	return false, nil
 }
 
 // RecordVerification 记一次抽样对账。

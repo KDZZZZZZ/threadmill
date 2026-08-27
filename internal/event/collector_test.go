@@ -243,14 +243,39 @@ func TestCollectorAccumulatesCachedTokens(t *testing.T) {
 	t.Parallel()
 
 	collector := NewCollector()
-	collector.Handle(context.Background(), ModelEnd(
+	first := ModelEnd(
 		"planner", "gpt-5", time.Now().Add(-time.Millisecond), 0, 1500, 800, nil,
-	))
-	collector.Handle(context.Background(), ModelEnd(
+	)
+	first.InputTokens = 1000
+	first.CacheWriteTokens = 50
+	collector.Handle(context.Background(), first)
+	second := ModelEnd(
 		"verifier", "gpt-5", time.Now().Add(-time.Millisecond), 0, 500, 0, nil,
-	))
+	)
+	second.InputTokens = 1000
+	collector.Handle(context.Background(), second)
 	got := collector.Snapshot()
-	if got.Tokens != 2000 || got.CachedTokens != 800 {
-		t.Fatalf("usage = tokens %d cached %d, want 2000/800", got.Tokens, got.CachedTokens)
+	if got.Tokens != 2000 || got.InputTokens != 2000 || got.CachedTokens != 800 ||
+		got.CacheWriteTokens != 50 || got.CacheHitRate != 0.4 {
+		t.Fatalf("usage = %#v, want total/input/cached/write/rate 2000/2000/800/50/0.4", got)
+	}
+}
+
+func TestCollectorAccumulatesHiddenMemoryCacheUsage(t *testing.T) {
+	t.Parallel()
+
+	collector := NewCollector()
+	ev := MemoryEnd("executor", "compact_memory", "compact-1", time.Now().Add(-time.Millisecond), nil)
+	ev.Tokens = 120
+	ev.InputTokens = 100
+	ev.CachedTokens = 80
+	ev.CacheWriteTokens = 10
+	collector.Handle(context.Background(), ev)
+
+	got := collector.Snapshot()
+	if got.MemoryTokens != 120 || got.MemoryInputTokens != 100 ||
+		got.MemoryCachedTokens != 80 || got.MemoryCacheWriteTokens != 10 ||
+		got.TotalCacheHitRate != 0.8 {
+		t.Fatalf("memory cache usage = %#v, want 120/100/80/10/0.8", got)
 	}
 }

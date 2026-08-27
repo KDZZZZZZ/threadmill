@@ -6,14 +6,15 @@ import (
 	"fmt"
 )
 
-// InjectSubscribedMemory 把当前订阅子图里的节点作为记忆状态块注入请求尾部。
+// InjectSubscribedMemory 把任务启动包注入稳定前缀，其他记忆投影注入请求尾部。
 func InjectSubscribedMemory(loop *Loop) AssembleRequestHook {
 	return func(ctx context.Context, request Request) (Request, error) {
-		text, err := loop.subscribedMemoryBlock(ctx)
+		blocks, err := loop.subscribedMemoryBlocks(ctx)
 		if err != nil {
 			return request, err
 		}
-		request.SetBlock("memory", text)
+		request.SetStableBlock("memory", blocks.Stable)
+		request.SetBlock("memory", blocks.Mutable)
 		return request, nil
 	}
 }
@@ -28,24 +29,33 @@ type revisionPeek interface {
 // organizer 提交无关边/元数据之外的情况也不会产生新投影字节。
 // ponytail: revision 只是失效提示，多算属于误报且无害；只有绕过 Store 的显式 API、
 // 以相同 revision 提交节点变化才可能读到旧文本（生产写路径都会递增 revision）。
-func (l *Loop) subscribedMemoryBlock(ctx context.Context) (string, error) {
+func (l *Loop) subscribedMemoryBlocks(ctx context.Context) (memoryProjection, error) {
 	l.mu.Lock()
-	subs := append([]string(nil), l.fixedSubscribedSubgraphs...)
-	subs = uniqueIDs(append(subs, l.subscribedSubgraphs...))
+	stable := uniqueIDs(l.stableSubscribedSubgraphs)
+	mutable := append([]string(nil), l.fixedSubscribedSubgraphs...)
+	mutable = uniqueIDs(append(mutable, l.subscribedSubgraphs...))
+	subs := uniqueIDs(append(append([]string(nil), stable...), mutable...))
 	cachedRev := l.memoryBlockRev
 	cachedSubs := l.memoryBlockSubs
+	cachedStableText := l.memoryStableBlockText
 	cachedText := l.memoryBlockText
 	memory := l.memory
 	l.mu.Unlock()
 
 	if peek, ok := memory.(revisionPeek); ok &&
 		cachedSubs != nil && sameStrings(cachedSubs, subs) && peek.Revision() == cachedRev {
-		return cachedText, nil
+		return memoryProjection{Stable: cachedStableText, Mutable: cachedText}, nil
 	}
 
 	out, err := l.execHidden(ctx, injectSubscribedMemoryToolName, json.RawMessage(`{}`))
 	if err != nil {
-		return "", err
+		return memoryProjection{}, err
+	}
+	projection := memoryProjection{Mutable: out.Content}
+	if len(out.Details) > 0 {
+		if err := json.Unmarshal(out.Details, &projection); err != nil {
+			return memoryProjection{}, fmt.Errorf("decode memory projection: %w", err)
+		}
 	}
 	rev := int64(-1)
 	if peek, ok := memory.(revisionPeek); ok {
@@ -54,9 +64,19 @@ func (l *Loop) subscribedMemoryBlock(ctx context.Context) (string, error) {
 	l.mu.Lock()
 	l.memoryBlockRev = rev
 	l.memoryBlockSubs = subs
-	l.memoryBlockText = out.Content
+	l.memoryStableBlockText = projection.Stable
+	l.memoryBlockText = projection.Mutable
 	l.mu.Unlock()
-	return out.Content, nil
+	return projection, nil
+}
+
+// subscribedMemoryBlock 保留合并投影视图，供无需区分缓存层的调用方使用。
+func (l *Loop) subscribedMemoryBlock(ctx context.Context) (string, error) {
+	blocks, err := l.subscribedMemoryBlocks(ctx)
+	if err != nil {
+		return "", err
+	}
+	return joinMemoryBlocks(blocks.Stable, blocks.Mutable), nil
 }
 
 func sameStrings(a, b []string) bool {

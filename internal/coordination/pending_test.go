@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
@@ -333,6 +334,9 @@ func TestReplacePendingRejectsCompletedTaskChanges(t *testing.T) {
 			if !errors.Is(err, ErrInvalidPending) {
 				t.Fatalf("ReplacePending() error = %v, want %v", err, ErrInvalidPending)
 			}
+			if !strings.Contains(err.Error(), "append a new root") {
+				t.Fatalf("ReplacePending() error = %v, want recovery guidance", err)
+			}
 			if after := graph.Snapshot(); !reflect.DeepEqual(after, before) {
 				t.Fatalf("completed graph changed:\nafter  = %#v\nbefore = %#v", after, before)
 			}
@@ -457,5 +461,68 @@ func TestReplacePendingPreservesCompletedSpawnWhenAddingRoot(t *testing.T) {
 	repair := got.Tasks[2]
 	if repair.Outcome != OutcomeActive || repair.SpawnedFrom != "" || repair.Info != "repair" {
 		t.Fatalf("repair root = %#v", repair)
+	}
+}
+
+func TestReplacePendingHoldsAndReleasesRoot(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "ready now"}, {Info: "next wave", RunPolicy: RunPolicyHeld}},
+	})
+	if err != nil {
+		t.Fatalf("ReplacePending() error = %v", err)
+	}
+	if snap.Tasks[0].RunPolicy != RunPolicyEnabled {
+		t.Fatalf("first root run policy = %q, want %q", snap.Tasks[0].RunPolicy, RunPolicyEnabled)
+	}
+	if snap.Tasks[1].RunPolicy != RunPolicyHeld {
+		t.Fatalf("second root run policy = %q, want %q", snap.Tasks[1].RunPolicy, RunPolicyHeld)
+	}
+
+	snap, err = graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "ready now"}, {Info: "next wave"}},
+	})
+	if err != nil {
+		t.Fatalf("ReplacePending() error = %v", err)
+	}
+	if snap.Tasks[1].RunPolicy != RunPolicyHeld {
+		t.Fatalf("omitted run policy = %q, want held to survive", snap.Tasks[1].RunPolicy)
+	}
+
+	snap, err = graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{
+			{Info: "ready now"},
+			{Info: "next wave", RunPolicy: RunPolicyEnabled},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReplacePending() error = %v", err)
+	}
+	if snap.Tasks[1].RunPolicy != RunPolicyEnabled {
+		t.Fatalf("released run policy = %q, want %q", snap.Tasks[1].RunPolicy, RunPolicyEnabled)
+	}
+}
+
+func TestReplacePendingRejectsUnknownRunPolicy(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	if _, err := graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "root"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := graph.Snapshot()
+
+	_, err := graph.ReplacePending(context.Background(), PendingSubgraph{
+		Roots: []PendingRoot{{Info: "root"}, {Info: "next", RunPolicy: "paused"}},
+	})
+	if !errors.Is(err, ErrInvalidPending) {
+		t.Fatalf("error = %v, want %v", err, ErrInvalidPending)
+	}
+	if after := graph.Snapshot(); !reflect.DeepEqual(after, before) {
+		t.Fatalf("graph changed after rejected run policy:\nafter  = %#v\nbefore = %#v", after, before)
 	}
 }

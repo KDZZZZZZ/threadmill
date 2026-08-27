@@ -228,6 +228,9 @@ func (t fileTool) edit(raw json.RawMessage) (Output, error) {
 	if err != nil {
 		return Output{}, err
 	}
+	if updated == string(data) {
+		return Output{}, fmt.Errorf("edit: no changes")
+	}
 	if err := t.files.Write(args.Path, []byte(updated)); err != nil {
 		return Output{}, fmt.Errorf("%s: %w", t.name, err)
 	}

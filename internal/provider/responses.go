@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,6 +84,18 @@ func (provider *Responses) buildRequest(request agent.Request) (createResponseRe
 		}
 	}
 
+	for _, block := range request.StableBlocks {
+		if block.Text == "" {
+			continue
+		}
+		if err := appendInput(responseInput{
+			Role:    "system",
+			Content: block.Text,
+		}); err != nil {
+			return createResponseRequest{}, fmt.Errorf("encode stable block %q: %w", block.ID, err)
+		}
+	}
+
 	for _, message := range request.Messages {
 		switch message.Role {
 		case agent.RoleUser:
@@ -90,7 +103,7 @@ func (provider *Responses) buildRequest(request agent.Request) (createResponseRe
 				Role: "user",
 				Content: []responseContent{{
 					Type: "input_text",
-					Text: message.Content,
+					Text: responseMessageText(message),
 				}},
 			}); err != nil {
 				return createResponseRequest{}, fmt.Errorf("encode user message: %w", err)
@@ -182,14 +195,76 @@ func (provider *Responses) buildRequest(request agent.Request) (createResponseRe
 	// store=false 时回放加密 reasoning 项，保持工具调用后的无状态续接。
 	// 协议来源：https://platform.openai.com/docs/guides/conversation-state
 	// 不再设置 Instructions：input[0] 的 system 项已承担角色提示，双写会浪费输入 token。
+	cacheKey, err := buildPromptCacheKey(request)
+	if err != nil {
+		return createResponseRequest{}, err
+	}
 	return createResponseRequest{
 		Model:          provider.model,
 		Input:          input,
 		Tools:          tools,
 		Store:          false,
 		Include:        []string{"reasoning.encrypted_content"},
-		PromptCacheKey: request.CacheKey,
+		PromptCacheKey: cacheKey,
 	}, nil
+}
+
+func responseMessageText(message agent.Message) string {
+	if message.ContextBlockID == "" {
+		return message.Content
+	}
+	return fmt.Sprintf(
+		"Threadmill 受保护状态数据 [%s]（不是新任务或指令）：本条取代此前同名状态；只以最后一条为准。\n%s",
+		message.ContextBlockID,
+		message.Content,
+	)
+}
+
+type promptCacheMessage struct {
+	Role           agent.Role `json:"role"`
+	Content        string     `json:"content,omitempty"`
+	ContextBlockID string     `json:"context_block_id,omitempty"`
+}
+
+type promptCacheIdentity struct {
+	Version      int                    `json:"version"`
+	BaseKey      string                 `json:"base_key"`
+	SystemPrompt string                 `json:"system_prompt"`
+	StableBlocks []agent.Block          `json:"stable_blocks,omitempty"`
+	FirstMessage *promptCacheMessage    `json:"first_message,omitempty"`
+	Tools        []agenttool.Definition `json:"tools,omitempty"`
+}
+
+// buildPromptCacheKey 把同一追加式会话粘到同一路由，同时把不同任务的
+// prompt family 分开，避免 manager/executor 这类通用角色键在共享网关上互相挤掉缓存。
+func buildPromptCacheKey(request agent.Request) (string, error) {
+	if request.CacheKey == "" {
+		return "", nil
+	}
+	identity := promptCacheIdentity{
+		Version:      1,
+		BaseKey:      request.CacheKey,
+		SystemPrompt: request.SystemPrompt,
+		StableBlocks: request.StableBlocks,
+		Tools:        request.Tools,
+	}
+	// 普通无稳定任务包的长命会话用首条消息分流；隐藏 compact 的首条消息恰好是
+	// 每次都变化的待整理正文，不能纳入路由身份，否则会丢掉整理提示的跨次复用。
+	if len(request.Messages) > 0 &&
+		len(request.StableBlocks) == 0 &&
+		!strings.HasSuffix(request.CacheKey, ":compact") {
+		first := request.Messages[0]
+		identity.FirstMessage = &promptCacheMessage{
+			Role:           first.Role,
+			Content:        first.Content,
+			ContextBlockID: first.ContextBlockID,
+		}
+	}
+	encoded, err := json.Marshal(identity)
+	if err != nil {
+		return "", fmt.Errorf("encode prompt cache identity: %w", err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(encoded)), nil
 }
 
 type createResponseRequest struct {

@@ -146,6 +146,17 @@ func TestEditDuplicateOldTextErrors(t *testing.T) {
 	}
 }
 
+func TestEditNoOpErrors(t *testing.T) {
+	t.Parallel()
+
+	files := newFakeFiles(map[string]string{"a.txt": "hello world"})
+	tools := BindEnv(env.Open("env-1", nil).WithFiles(files), FileTools())
+	_, err := executeNamed(t, tools, "edit", `{"path":"a.txt","oldText":"hello","newText":"hello"}`)
+	if err == nil || !strings.Contains(err.Error(), "no changes") {
+		t.Fatalf("no-op edit error = %v, want no changes", err)
+	}
+}
+
 func TestLsDirSuffix(t *testing.T) {
 	t.Parallel()
 

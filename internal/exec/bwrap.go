@@ -9,6 +9,8 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/env"
 )
 
+const bwrapWorkspace = "/workspace"
+
 func probeBwrap() bool {
 	if _, err := osexec.LookPath("bwrap"); err != nil {
 		return false
@@ -26,7 +28,10 @@ func probeBwrap() bool {
 		"--unshare-user",
 		"--unshare-pid",
 		"--die-with-parent",
-		"--bind", dir, "/",
+		"--tmpfs", "/",
+		"--dir", bwrapWorkspace,
+		"--bind", dir, bwrapWorkspace,
+		"--bind", filepath.Join(dir, "tmp"), "/tmp",
 		"--ro-bind-try", "/usr", "/usr",
 		"--ro-bind-try", "/bin", "/bin",
 		"--ro-bind-try", "/lib", "/lib",
@@ -38,7 +43,7 @@ func probeBwrap() bool {
 		"--ro-bind-try", "/etc/pki", "/etc/pki",
 		"--dev", "/dev",
 		"--proc", "/proc",
-		"--chdir", "/",
+		"--chdir", bwrapWorkspace,
 		"--",
 		"bash", "-c", "true",
 	)
@@ -59,7 +64,9 @@ func runBwrap(
 		"--unshare-user",
 		"--unshare-pid",
 		"--die-with-parent",
-		"--bind", live, "/",
+		"--tmpfs", "/",
+		"--dir", bwrapWorkspace,
+		"--bind", live, bwrapWorkspace,
 		"--bind", tempDir, "/tmp",
 		"--ro-bind-try", "/usr", "/usr",
 		"--ro-bind-try", "/bin", "/bin",
@@ -72,7 +79,7 @@ func runBwrap(
 		"--ro-bind-try", "/etc/pki", "/etc/pki",
 		"--dev", "/dev",
 		"--proc", "/proc",
-		"--chdir", "/",
+		"--chdir", bwrapWorkspace,
 		"--",
 	}
 	bwrapArgs = append(bwrapArgs, args...)

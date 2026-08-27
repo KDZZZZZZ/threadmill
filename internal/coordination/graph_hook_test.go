@@ -38,6 +38,11 @@ func TestInjectCoordinationGraphAppendsLatestSnapshot(t *testing.T) {
 
 // requestBlock 返回请求里指定 ID 的状态块文本；不存在时返回空串。
 func requestBlock(request agent.Request, id string) string {
+	for i := len(request.Messages) - 1; i >= 0; i-- {
+		if request.Messages[i].ContextBlockID == id {
+			return request.Messages[i].Content
+		}
+	}
 	for _, block := range request.StateBlocks {
 		if block.ID == id {
 			return block.Text

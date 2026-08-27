@@ -146,7 +146,7 @@ func run(spawns int, delay time.Duration, slots, files int, timeout time.Duratio
 
 // fleetProvider 按角色脚本返回模型消息；用系统提示词关键词区分角色。
 // 同时按相邻请求的字节前缀重叠合成 usage，让事件流携带可对比的
-// cached_tokens/tokens 比率（mock 不产生真实计费）。
+// cached_tokens/input_tokens 比率（mock 不产生真实计费）。
 type fleetProvider struct {
 	delay     time.Duration
 	mu        sync.Mutex
@@ -370,7 +370,7 @@ func (r *cacheReporter) Handle(_ context.Context, ev event.RuntimeEvent) {
 		total = &cacheTotals{}
 		r.tally[ev.AgentID] = total
 	}
-	total.input += uint64(max(ev.Tokens, 0))
+	total.input += uint64(max(ev.InputTokens, 0))
 	total.cached += uint64(max(ev.CachedTokens, 0))
 }
 

@@ -26,7 +26,8 @@ func InjectCoordinationGraph(graph *Graph) agent.Hooks {
 				if err != nil {
 					return request, fmt.Errorf("encode coordination graph: %w", err)
 				}
-				extra := "当前协调图（JSON：tasks[].id/info/outcome/sequence，edges[].from/to 为节点关联）：\n" + string(payload)
+				extra := "当前协调图（JSON：tasks 含 ID/Info/Outcome/RunPolicy 与角色节点，edges 含 From/To/Kind）。" +
+					"root 按 tasks 出现顺序串行执行，RunPolicy=held 的 root 留在队列里不启动并挡住其后全部 root；唯一的并行面是 task 内部的辅助任务：\n" + string(payload)
 				request.SetBlock("coordination", extra)
 				return request, nil
 			},

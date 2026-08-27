@@ -25,7 +25,9 @@ func TestHiddenCostProviderForwardsStreamActivity(t *testing.T) {
 			}
 			sink(false)
 			sink(true)
-			return AssistantMessage{Usage: &Usage{TotalTokens: 7}}, nil
+			return AssistantMessage{Usage: &Usage{
+				InputTokens: 5, CachedTokens: 3, CacheWriteTokens: 1, TotalTokens: 7,
+			}}, nil
 		}),
 		activity: func(text bool) { got = append(got, text) },
 	}
@@ -37,6 +39,10 @@ func TestHiddenCostProviderForwardsStreamActivity(t *testing.T) {
 	}
 	if provider.tokens != 7 {
 		t.Fatalf("tokens = %d, want 7", provider.tokens)
+	}
+	if provider.inputTokens != 5 || provider.cachedTokens != 3 || provider.cacheWriteTokens != 1 {
+		t.Fatalf("cache usage = input %d cached %d write %d, want 5/3/1",
+			provider.inputTokens, provider.cachedTokens, provider.cacheWriteTokens)
 	}
 }
 

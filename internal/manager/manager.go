@@ -465,8 +465,13 @@ func (s *Manager) runReady(ctx context.Context) error {
 
 	var root coordination.Task
 	for _, task := range s.graph.Snapshot().Tasks {
-		if task.SpawnedFrom != "" || task.Outcome != coordination.OutcomeActive || task.RunPolicy != coordination.RunPolicyEnabled {
+		if task.SpawnedFrom != "" || task.Outcome != coordination.OutcomeActive {
 			continue
+		}
+		// root 串行执行且后继 root 的环境从队头 fork：队头 held 时整条队列停住，
+		// 不能越过它启动后面的 root，否则会 fork 到一个还没运行过的环境。
+		if task.RunPolicy == coordination.RunPolicyHeld {
+			return nil
 		}
 		root = task
 		break
@@ -600,6 +605,11 @@ func (s *Manager) logSnapshot() {
 		"model_stream_idle", snapshot.Events.ModelStreamIdle,
 		"model_retries", snapshot.Events.ModelRetries,
 		"tokens", snapshot.Events.Tokens,
+		"input_tokens", snapshot.Events.InputTokens,
+		"cached_tokens", snapshot.Events.CachedTokens,
+		"cache_write_tokens", snapshot.Events.CacheWriteTokens,
+		"cache_hit_rate", snapshot.Events.CacheHitRate,
+		"total_cache_hit_rate", snapshot.Events.TotalCacheHitRate,
 		"total_tokens", snapshot.Events.Tokens+snapshot.Events.MemoryTokens,
 		"tool_completed", snapshot.Events.Tool.Completed,
 		"tool_errors", snapshot.Events.Tool.Errors,
@@ -614,6 +624,9 @@ func (s *Manager) logSnapshot() {
 		"memory_ops_errors", snapshot.Events.Memory.Errors,
 		"memory_ops_active", snapshot.Events.Memory.Active,
 		"memory_ops_tokens", snapshot.Events.MemoryTokens,
+		"memory_input_tokens", snapshot.Events.MemoryInputTokens,
+		"memory_cached_tokens", snapshot.Events.MemoryCachedTokens,
+		"memory_cache_write_tokens", snapshot.Events.MemoryCacheWriteTokens,
 		"memory_ops_retries", snapshot.Events.MemoryRetries,
 		"memory_stream_chunks", snapshot.Events.MemoryStreamChunks,
 		"memory_stream_idle", snapshot.Events.MemoryStreamIdle,

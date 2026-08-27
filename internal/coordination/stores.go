@@ -32,21 +32,74 @@ func (s Stores) ProjectManagerTaskInfos(tasks []Task) error {
 	if s.Memory == nil {
 		return ErrNilStore
 	}
+	graph := s.Memory.Load(ManagerEnvID)
+	sources := make([]ctxgraph.Node, 0, len(tasks))
 	nodes := make([]ctxgraph.Node, 0, len(tasks))
 	for _, task := range tasks {
 		if task.Info == "" {
 			continue
 		}
-		nodes = append(nodes, ctxgraph.Node{
-			ID:             "task-info-" + task.ID,
+		nodes = append(nodes, taskInfoNode(task))
+		if task.SpawnedFrom != "" || hasNodeID(graph, taskUserInputNodeID(task.ID)) {
+			continue
+		}
+		user, ok := userMessageForTask(graph, task.ID)
+		if !ok {
+			continue
+		}
+		sources = append(sources, ctxgraph.Node{
+			ID:             taskUserInputNodeID(task.ID),
 			Kind:           ctxgraph.NodeKindDirective,
-			Statement:      "[Task Info] " + task.ID + ": " + task.Info,
+			Statement:      user.Statement,
 			Status:         ctxgraph.NodeStatusAccepted,
-			SourceRefs:     []string{"task:" + task.ID},
+			SourceRefs:     append([]string(nil), user.SourceRefs...),
 			CreatorAgentID: "system",
 		})
 	}
+	if err := s.Memory.AppendNodes(ManagerEnvID, taskSourcesSubgraph(), sources); err != nil {
+		return err
+	}
 	return s.Memory.AppendNodes(ManagerEnvID, ManagerMemorySubgraph(), nodes)
+}
+
+func taskUserInputNodeID(taskID string) string {
+	return "task-user-input-" + taskID
+}
+
+func hasNodeID(graph ctxgraph.Graph, id string) bool {
+	for _, node := range graph.Nodes {
+		if node.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func userMessageForTask(graph ctxgraph.Graph, taskID string) (ctxgraph.Node, bool) {
+	end := len(graph.Nodes)
+	for i, node := range graph.Nodes {
+		if node.ID == "task-info-"+taskID {
+			end = i
+			break
+		}
+	}
+	for i := end - 1; i >= 0; i-- {
+		if graph.Nodes[i].CreatorAgentID == "user" {
+			return graph.Nodes[i], true
+		}
+	}
+	return ctxgraph.Node{}, false
+}
+
+func taskInfoNode(task Task) ctxgraph.Node {
+	return ctxgraph.Node{
+		ID:             "task-info-" + task.ID,
+		Kind:           ctxgraph.NodeKindDirective,
+		Statement:      "[Task Info] " + task.ID + ": " + task.Info,
+		Status:         ctxgraph.NodeStatusAccepted,
+		SourceRefs:     []string{"task:" + task.ID},
+		CreatorAgentID: "system",
+	}
 }
 
 // ProjectManagerTaskReport 把 task 报告投影到 manager 固定子图。

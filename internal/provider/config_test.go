@@ -873,6 +873,22 @@ func TestRepositoryManagerPromptDoesNotPrequeueDuplicateRepairs(t *testing.T) {
 	}
 }
 
+func TestRepositoryManagerEndsTurnBeforePollingNewTask(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"task 只有在 manager 当前回合结束后才开始执行",
+		"不要在同一回合用 organize_subgraph 轮询刚创建 task 的进度",
+		"task 报告会主动唤醒 manager",
+	} {
+		if !strings.Contains(config.Agents.Manager.SystemPrompt, want) {
+			t.Fatalf("manager prompt can deadlock task startup; missing %q", want)
+		}
+	}
+}
+
 func TestRepositoryPlannerPromptBatchesReadyWork(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
@@ -884,6 +900,50 @@ func TestRepositoryPlannerPromptBatchesReadyWork(t *testing.T) {
 	} {
 		if !strings.Contains(config.Agents.Planner.SystemPrompt, want) {
 			t.Errorf("planner prompt does not batch ready work %q", want)
+		}
+	}
+}
+
+func TestRepositoryPlannerPromptUsesIPDLoop(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"S0 契约展开",
+		"S1 完成流程",
+		"S2 多轴候选",
+		"S3 写入矩阵",
+		"S4 解耦决策",
+		"S5 依赖闭包",
+		"S6 叶判定",
+		"S7 审计举证",
+		"A1 交付物轴",
+		"A5 接缝轴",
+		"I1 覆盖唯一",
+		"I2 写入隔离",
+		"I3 独立可判定",
+		"`split: none` 需逐轴否证",
+	} {
+		if !strings.Contains(config.Agents.Planner.SystemPrompt, want) {
+			t.Fatalf("planner prompt missing IPD requirement %q", want)
+		}
+	}
+}
+
+func TestRepositoryManagerPromptUsesIPDAudit(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"planner 的 IPD 审计",
+		"I1/I2/I3",
+		"当前 ready frontier",
+		"不要把多个互补单元压成一个泛化 helper",
+	} {
+		if !strings.Contains(config.Agents.Manager.SystemPrompt, want) {
+			t.Fatalf("manager prompt missing IPD admission rule %q", want)
 		}
 	}
 }
@@ -1511,7 +1571,7 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 			t.Fatalf("manager tools include file/exec %q", name)
 		}
 	}
-	if got.Tools["read"].Description != "读取工作区文本文件。offset 是从 1 起的行号，limit 是最大行数。约 2000 行或 50KB 截断；截断时给出下一个 offset。" {
+	if got.Tools["read"].Description != "读取工作区相对路径中的文本文件。offset 是从 1 起的行号，limit 是最大行数。约 2000 行或 50KB 截断；截断时给出下一个 offset。" {
 		t.Fatalf("tools.read.description = %q", got.Tools["read"].Description)
 	}
 }

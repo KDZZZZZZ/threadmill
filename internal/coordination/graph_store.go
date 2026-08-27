@@ -141,6 +141,11 @@ func (g *Graph) stateLocked() graphState {
 
 func (g *Graph) applyStateLocked(state graphState) {
 	g.tasks = append([]Task(nil), state.Tasks...)
+	for i := range g.tasks {
+		if g.tasks[i].RunPolicy == "" {
+			g.tasks[i].RunPolicy = RunPolicyEnabled
+		}
+	}
 	g.edges = append([]Edge(nil), state.Edges...)
 	g.nextID = state.NextID
 	g.helps = cloneHelpStates(state.Helps)

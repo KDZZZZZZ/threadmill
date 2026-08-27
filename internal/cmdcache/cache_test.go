@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func newCache(t *testing.T, cfg Config) *Cache {
@@ -215,6 +217,76 @@ func TestReplayRestoresArtifacts(t *testing.T) {
 	}
 	if info.Mode()&0o111 == 0 {
 		t.Fatal("executable bit must survive replay")
+	}
+	stats := cache.Stats()
+	if stats.ArtifactReflinks+stats.ArtifactCopies != 1 {
+		t.Fatalf("artifact replay stats = %+v, want one materialized file", stats)
+	}
+	if stats.ReflinkBytes+stats.CopiedBytes != uint64(len("ELF-ish")) {
+		t.Fatalf("artifact replay bytes = %+v, want %d", stats, len("ELF-ish"))
+	}
+}
+
+func TestReplayReflinksArtifactsWhenSupported(t *testing.T) {
+	root := t.TempDir()
+	cache := newCache(t, Config{Dir: filepath.Join(root, "cache")})
+	recorded := filepath.Join(root, "recorded")
+	target := filepath.Join(root, "target")
+	for _, dir := range []string{recorded, target} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, dir, "main.go", "package main", 0o644)
+	}
+	writeFile(t, recorded, "app", "binary", 0o755)
+
+	obs := observation(map[string]ReadKind{"main.go": ReadFile}, "app")
+	entry, err := cache.Store(recorded, testKey, obs, Result{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := cache.blobs.open(entry.Writes[0].Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe, err := os.CreateTemp(target, ".reflink-probe-")
+	if err != nil {
+		source.Close()
+		t.Fatal(err)
+	}
+	cloneErr := unix.IoctlFileClone(int(probe.Fd()), int(source.Fd()))
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(probe.Name()); err != nil {
+		t.Fatal(err)
+	}
+	if cloneErr != nil {
+		t.Skipf("reflink unavailable on test filesystem: %v", cloneErr)
+	}
+
+	if err := cache.Replay(target, entry); err != nil {
+		t.Fatal(err)
+	}
+	stats := cache.Stats()
+	if stats.ArtifactReflinks != 1 || stats.ArtifactCopies != 0 {
+		t.Fatalf("artifact replay stats = %+v, want one reflink and no copies", stats)
+	}
+	if stats.ReflinkBytes != uint64(len("binary")) || stats.CopiedBytes != 0 {
+		t.Fatalf("artifact replay bytes = %+v, want reflink bytes only", stats)
+	}
+	if err := os.WriteFile(filepath.Join(target, "app"), []byte("changed"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(cache.blobs.path(entry.Writes[0].Digest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stored) != "binary" {
+		t.Fatalf("mutating the clone changed its CAS source: %q", stored)
 	}
 }
 

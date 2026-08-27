@@ -578,11 +578,15 @@ func TestNewTeamUsesFileAgentsAndSharesOrganizer(t *testing.T) {
 	if err := team.Bind(env.Open("env-1", store.View("env-1"))); err != nil {
 		t.Fatalf("Bind() error = %v", err)
 	}
+	team.BindCheckpoints(nil, "task-42")
 	if _, err := team.Planner.Ask(context.Background(), "start"); err != nil {
 		t.Fatalf("Planner.Ask() error = %v", err)
 	}
 	if request.SystemPrompt != "yaml plan" {
 		t.Fatalf("planner prompt = %q, want yaml plan", request.SystemPrompt)
+	}
+	if request.CacheKey != "yaml-planner" {
+		t.Fatalf("planner cache key = %q, want stable role key yaml-planner", request.CacheKey)
 	}
 }
 
@@ -655,11 +659,11 @@ func TestTeamBindUsesYamlPluginsAgainstEnvStore(t *testing.T) {
 	if !strings.Contains(request.SystemPrompt, "yaml plan") {
 		t.Fatalf("planner prompt = %q, want yaml plan", request.SystemPrompt)
 	}
-	if !strings.Contains(request.WirePrompt(), "local fact") {
-		t.Fatalf("planner wire prompt missing env memory: %q", request.WirePrompt())
+	if !strings.Contains(blockText(request, "memory"), "local fact") {
+		t.Fatalf("planner request missing env memory: %#v", request.Messages)
 	}
-	if strings.Contains(request.WirePrompt(), "global fact") {
-		t.Fatalf("planner wire prompt used global memory: %q", request.WirePrompt())
+	if strings.Contains(blockText(request, "memory"), "global fact") {
+		t.Fatalf("planner request used global memory: %#v", request.Messages)
 	}
 	if !hasRequestTool(request.Tools, organizeSubgraphToolName) {
 		t.Fatal("yaml organize_subgraph missing")

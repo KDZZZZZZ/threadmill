@@ -15,6 +15,7 @@ import (
 const (
 	ManagerEnvID            = "manager"
 	ManagerMemorySubgraphID = "system-manager"
+	taskSourcesSubgraphID   = "system-task-sources"
 )
 
 // ManagerMemorySubgraph 是 manager 独占的用户消息、task info 和报告视图。
@@ -34,6 +35,15 @@ func TaskPackageSubgraph(taskID string) ctxgraph.Subgraph {
 		Name:    "task startup package",
 		Summary: "执行任务所需的最小初始记忆与所有 join 报告",
 		Kind:    ctxgraph.SubgraphKindPackage,
+	}
+}
+
+func taskSourcesSubgraph() ctxgraph.Subgraph {
+	return ctxgraph.Subgraph{
+		ID:      taskSourcesSubgraphID,
+		Name:    "task source requests",
+		Summary: "root task 创建时对应的原始用户请求",
+		Kind:    ctxgraph.SubgraphKindSystem,
 	}
 }
 
@@ -76,9 +86,36 @@ func Assemble(
 		if stores.Memory == nil {
 			return Roles{}, ErrNilStore
 		}
+		managerSources := stores.Memory.Load(ManagerEnvID).NodesInSubgraphs(
+			[]string{taskSourcesSubgraphID},
+		)
+		inheritedSources := stores.Memory.Load(task.Env.ID).NodesInSubgraphs(
+			[]string{taskSourcesSubgraphID},
+		)
+		if len(inheritedSources) > 0 {
+			if err := stores.Memory.DropSubgraph(task.Env.ID, taskSourcesSubgraphID); err != nil {
+				return Roles{}, err
+			}
+		}
 		pack := TaskPackageSubgraph(task.ID)
 		if err := stores.Memory.EnsureSubgraph(task.Env.ID, pack); err != nil {
 			return Roles{}, err
+		}
+		if task.SpawnedFrom == "" {
+			for _, source := range managerSources {
+				if source.ID != taskUserInputNodeID(task.ID) {
+					continue
+				}
+				if err := stores.Memory.AppendNode(task.Env.ID, pack, source); err != nil {
+					return Roles{}, err
+				}
+				break
+			}
+		}
+		if task.Info != "" {
+			if err := stores.Memory.AppendNode(task.Env.ID, pack, taskInfoNode(task)); err != nil {
+				return Roles{}, err
+			}
 		}
 		e, err := openEnv(stores, task.Env.ID)
 		if err != nil {
@@ -96,17 +133,10 @@ func Assemble(
 		}
 		team.BindCheckpoints(checkpoints, task.ID)
 		for _, loop := range []*agent.Loop{team.Planner, team.Executor, team.Verifier} {
-			loop.SetFixedSubscribedSubgraphs([]string{pack.ID})
+			loop.SetStableSubscribedSubgraphs([]string{pack.ID})
 		}
 		if err := team.Bind(e); err != nil {
 			return Roles{}, err
-		}
-		var prepare func(context.Context) error
-		organizer := agents.SubgraphOrganizer
-		if organizer.ID != "" || organizer.SystemPrompt != "" || len(organizer.Tools) > 0 || len(organizer.Hooks) > 0 {
-			prepare = func(ctx context.Context) error {
-				return team.PrepareTaskContext(ctx, e.Memory, task.Info, pack.ID)
-			}
 		}
 		return Roles{
 			Planner:  team.Planner,
@@ -167,7 +197,6 @@ func Assemble(
 					},
 				}, nil
 			},
-			Prepare: prepare,
 		}, nil
 	}
 }
