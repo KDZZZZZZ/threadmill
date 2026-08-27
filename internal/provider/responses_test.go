@@ -29,10 +29,9 @@ func TestResponsesGenerateCallsResponsesAPI(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := map[string]any{
-			"model":        "gpt-5",
-			"instructions": "system prompt",
-			"store":        false,
-			"include":      []any{"reasoning.encrypted_content"},
+			"model":   "gpt-5",
+			"store":   false,
+			"include": []any{"reasoning.encrypted_content"},
 			"input": []any{
 				map[string]any{
 					"role":    "system",
@@ -218,6 +217,37 @@ func TestResponsesGenerateReplaysProviderOutput(t *testing.T) {
 	}
 	if got.Content != "sunny" {
 		t.Fatalf("Generate().Content = %q, want sunny", got.Content)
+	}
+}
+
+func TestResponsesGenerateSendsPromptCacheKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var got struct {
+			PromptCacheKey string `json:"prompt_cache_key"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got.PromptCacheKey != "task-1:planner" {
+			t.Fatalf("prompt_cache_key = %q, want task-1:planner", got.PromptCacheKey)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+  "status":"completed",
+  "output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+}`))
+	}))
+	defer server.Close()
+
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := model.Generate(context.Background(), agent.Request{
+		CacheKey: "task-1:planner",
+		Messages: []agent.Message{{Role: agent.RoleUser, Content: "hi"}},
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
