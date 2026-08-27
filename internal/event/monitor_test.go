@@ -57,13 +57,17 @@ func TestMonitorLogsErrorLevel(t *testing.T) {
 func TestMonitorLogsCachedTokens(t *testing.T) {
 	var output bytes.Buffer
 	logger := logging.New(logging.Config{Output: &output, JSON: true})
-	Monitor(logger)(context.Background(), ModelEnd("planner", "gpt-5", time.Time{}, 0, 1500, 800, nil))
+	ev := ModelEnd("planner", "gpt-5", time.Time{}, 0, 1500, 800, nil)
+	ev.InputTokens = 1000
+	ev.CacheWriteTokens = 64
+	Monitor(logger)(context.Background(), ev)
 
 	var got map[string]any
 	if err := json.Unmarshal(output.Bytes(), &got); err != nil {
 		t.Fatalf("decode log: %v", err)
 	}
-	if got["tokens"] != float64(1500) || got["cached_tokens"] != float64(800) {
+	if got["tokens"] != float64(1500) || got["input_tokens"] != float64(1000) ||
+		got["cached_tokens"] != float64(800) || got["cache_write_tokens"] != float64(64) {
 		t.Fatalf("usage log = %#v", got)
 	}
 }

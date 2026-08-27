@@ -17,9 +17,10 @@ type PendingSpawn struct {
 	Info string `json:"info"`
 }
 
-// PendingRoot 是一个期望的根任务。
+// PendingRoot 是一个期望的根任务。RunPolicy 省略表示保持现状；新建 root 默认 enabled。
 type PendingRoot struct {
-	Info string `json:"info"`
+	Info      string `json:"info"`
+	RunPolicy string `json:"run_policy,omitempty"`
 }
 
 // PendingSubgraph 是尚未执行切片的完整期望状态；Run 中也可改尚未开始的节点。
@@ -95,6 +96,9 @@ func runningSliceUnchanged(current, next *Graph, running *runner) error {
 		if before.Info != after.Info {
 			return fmt.Errorf("%w: task %q info already in use", ErrGraphBusy, id)
 		}
+		if before.RunPolicy != after.RunPolicy {
+			return fmt.Errorf("%w: task %q run policy already in use", ErrGraphBusy, id)
+		}
 	}
 
 	beforeEdges := make(map[Edge]struct{}, len(current.edges))
@@ -142,7 +146,11 @@ func completedTasksUnchanged(current, next *Graph) error {
 		if !ok || !sameTask(task, candidate) || !sameEdges(
 			incidentEdges(current, task), incidentEdges(next, task),
 		) {
-			return fmt.Errorf("%w: completed task %q is immutable", ErrInvalidPending, task.ID)
+			return fmt.Errorf(
+				"%w: completed task %q is immutable; preserve completed roots with empty info placeholders, omit completed helpers from spawns, and append a new root for follow-up work",
+				ErrInvalidPending,
+				task.ID,
+			)
 		}
 	}
 	return nil
@@ -196,6 +204,16 @@ func (g *Graph) applyPendingLocked(next PendingSubgraph) error {
 	if len(next.Roots) < len(roots) {
 		return fmt.Errorf("%w: cannot remove root tasks", ErrUnspawnRoot)
 	}
+	for _, want := range next.Roots {
+		switch strings.TrimSpace(want.RunPolicy) {
+		case "", RunPolicyEnabled, RunPolicyHeld:
+		default:
+			return fmt.Errorf(
+				"%w: root run_policy must be %q or %q",
+				ErrInvalidPending, RunPolicyEnabled, RunPolicyHeld,
+			)
+		}
+	}
 	for i, want := range next.Roots {
 		if strings.TrimSpace(want.Info) != "" {
 			continue
@@ -214,6 +232,9 @@ func (g *Graph) applyPendingLocked(next PendingSubgraph) error {
 			continue
 		}
 		g.setInfoLocked(roots[i].ID, want.Info)
+		if policy := strings.TrimSpace(want.RunPolicy); policy != "" {
+			g.setRunPolicyLocked(roots[i].ID, policy)
+		}
 	}
 
 	type spawnKey struct {
@@ -295,6 +316,16 @@ func (g *Graph) setInfoLocked(id, info string) {
 	for i := range g.tasks {
 		if g.tasks[i].ID == id {
 			g.tasks[i].Info = info
+			return
+		}
+	}
+}
+
+// setRunPolicyLocked 改写某个 task 的启动策略；held 的 root 留在队列里但不启动。
+func (g *Graph) setRunPolicyLocked(id, policy string) {
+	for i := range g.tasks {
+		if g.tasks[i].ID == id {
+			g.tasks[i].RunPolicy = policy
 			return
 		}
 	}

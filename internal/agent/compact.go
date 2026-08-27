@@ -94,10 +94,14 @@ func organizeWithModel(
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("organizing memory: %w", err)
 		}
+		cacheKey := agentID
+		if transcript, ok := TranscriptFromContext(ctx); ok && transcript.CacheKey != "" {
+			cacheKey = transcript.CacheKey
+		}
 		response, err := provider.Generate(ctx, Request{
 			SystemPrompt: compactSystemPrompt(ctx),
 			Messages:     requestMessages,
-			CacheKey:     agentID + ":compact",
+			CacheKey:     cacheKey + ":compact",
 		})
 		if err != nil {
 			return nil, fmt.Errorf("organizing memory: %w", err)
@@ -321,6 +325,10 @@ func normalizeStatus(status string) string {
 func serializeConversation(messages []Message) string {
 	parts := make([]string, 0, len(messages))
 	for _, message := range messages {
+		if message.ContextBlockID != "" {
+			// 状态块来自记忆/协调投影，不要再把投影本身整理回记忆图。
+			continue
+		}
 		switch message.Role {
 		case RoleUser:
 			if text := strings.TrimSpace(message.Content); text != "" {
@@ -409,7 +417,8 @@ func recentCutPoint(messages []Message, index int) int {
 }
 
 func isCutPoint(message Message) bool {
-	return message.Role == RoleUser || message.Role == RoleAssistant
+	return message.ContextBlockID == "" &&
+		(message.Role == RoleUser || message.Role == RoleAssistant)
 }
 
 func estimateTokens(message Message) int {

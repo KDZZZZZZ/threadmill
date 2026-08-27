@@ -34,8 +34,8 @@ func TestBashCwdStaysInsideLiveDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	pwd := strings.TrimSpace(res.Output)
-	if pwd != live && !strings.HasPrefix(pwd, live+string(os.PathSeparator)) && pwd != "/" {
-		t.Fatalf("pwd = %q, want live dir %q (or sandbox root /)", pwd, live)
+	if pwd != live && !strings.HasPrefix(pwd, live+string(os.PathSeparator)) && pwd != bwrapWorkspace {
+		t.Fatalf("pwd = %q, want live dir %q (or sandbox workspace %s)", pwd, live, bwrapWorkspace)
 	}
 
 	outside := filepath.Join(t.TempDir(), "escape.txt")
@@ -49,6 +49,43 @@ func TestBashCwdStaysInsideLiveDir(t *testing.T) {
 		t.Fatal("command wrote outside the live dir")
 	}
 	_ = escaped
+}
+
+func TestBwrapKeepsProjectBelowFilesystemRoot(t *testing.T) {
+	if !probeBwrap() {
+		t.Skip("bwrap unavailable")
+	}
+	if _, err := osexec.LookPath("go"); err != nil {
+		t.Skip("go unavailable")
+	}
+
+	base := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(base, "go.mod"),
+		[]byte("module example.com/threadmill/sandbox\n\ngo 1.22\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(base, "hello.go"),
+		[]byte("package hello\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(Config{Slots: 1})
+	files := vfs.NewStore(base)
+	result, err := s.View("env-a", files).Run(context.Background(), env.Cmd{
+		Command: `test "$PWD" = /workspace && test ! -e ./proc/tty/driver && go test ./...`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("sandbox project-root check = %#v, want exit 0", result)
+	}
 }
 
 func TestSandboxHidesHostSecrets(t *testing.T) {

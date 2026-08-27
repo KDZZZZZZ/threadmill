@@ -44,7 +44,9 @@ type RuntimeEvent struct {
 	Tools            int           `json:"tools,omitempty"`
 	ToolCalls        int           `json:"tool_calls,omitempty"`
 	Tokens           int           `json:"tokens,omitempty"`
+	InputTokens      int           `json:"input_tokens,omitempty"`
 	CachedTokens     int           `json:"cached_tokens,omitempty"`
+	CacheWriteTokens int           `json:"cache_write_tokens,omitempty"`
 	Retries          int           `json:"retries,omitempty"`
 	RetryReason      string        `json:"retry_reason,omitempty"`
 	Delta            string        `json:"delta,omitempty"`

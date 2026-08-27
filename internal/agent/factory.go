@@ -25,6 +25,8 @@ const (
 	memoryNodesInToolName         = "memory_nodes_in"
 	memoryAddToSubgraphToolName   = "memory_add_to_subgraph"
 	memoryDropFromContextToolName = "memory_drop_from_context"
+	memoryExpandToolName          = "memory_expand"
+	memoryCollapseToolName        = "memory_collapse"
 
 	fileReadToolName  = "read"
 	fileWriteToolName = "write"
@@ -62,6 +64,8 @@ var knownFileTools = map[string]struct{}{
 	memoryNodesInToolName:         {},
 	memoryAddToSubgraphToolName:   {},
 	memoryDropFromContextToolName: {},
+	memoryExpandToolName:          {},
+	memoryCollapseToolName:        {},
 	agenttool.MemoryApplyName:     {},
 	fileReadToolName:              {},
 	fileWriteToolName:             {},
@@ -147,32 +151,6 @@ type Team struct {
 	Executor  *Loop
 	Verifier  *Loop
 	Organizer *Loop
-}
-
-// PrepareTaskContext 让整理 Agent 按 Task Info 把最小必要节点加入指定启动包。
-func (t *Team) PrepareTaskContext(
-	ctx context.Context,
-	memory env.MemoryView,
-	taskInfo, subgraphID string,
-) error {
-	if t == nil || t.Organizer == nil {
-		return fmt.Errorf("prepare task context: nil organizer")
-	}
-	if memory == nil {
-		return fmt.Errorf("prepare task context: nil memory")
-	}
-	query := "为下面的 Task Info 准备任务启动包。先按系统提示中的审核规则检查相关节点：缺证据锚的完成声明标 disputed、被带证据新节点取代的旧结论标 superseded，修改用 memory_apply 批量提交；然后再选节点。" +
-		"必须包含原始目标、逐字契约（精确 API 名、方法签名、输出字符串、字段、退出码）与全部硬约束对应的节点，并纳入带证据锚（命令、测试名、退出码）的最新验证结论与未决缺陷；" +
-		"如果已有子图混有大量无关节点，不要整图加入。保留节点原有归属，只把必要节点加入目标子图。\n\n" +
-		"Task Info: " + strings.TrimSpace(taskInfo)
-	return organizeMemory(
-		ctx,
-		t.Organizer,
-		memory,
-		"organize_task_context",
-		query,
-		subgraphID,
-	)
 }
 
 // Validate 拒绝空白 ID、负的步数，以及未知或重复的 tool/hook 名。
@@ -480,6 +458,7 @@ func bindLoopTools(loop *Loop, e env.Env) error {
 	// 不清会把上一个环境的记忆文本泄漏给新环境。
 	loop.memoryBlockRev = 0
 	loop.memoryBlockSubs = nil
+	loop.memoryStableBlockText = ""
 	loop.memoryBlockText = ""
 	if organizer := organizerFromTool(loop.tools[organizeSubgraphToolName]); organizer != nil {
 		loop.mu.Unlock()
@@ -675,6 +654,10 @@ func toolsFromNames(
 			out = append(out, OrganizeSubgraphTool(organizer))
 		case memoryDropFromContextToolName:
 			out = append(out, DropFromContextTool(loop))
+		case memoryExpandToolName:
+			out = append(out, MemoryExpandTool(loop))
+		case memoryCollapseToolName:
+			out = append(out, MemoryCollapseTool(loop))
 		default:
 			if memory == nil {
 				memory = memoryToolsByName()

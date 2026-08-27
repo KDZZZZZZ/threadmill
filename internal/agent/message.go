@@ -52,19 +52,22 @@ type AssistantMessage struct {
 
 // Message 是模型下一次生成时可见的一条历史消息。
 type Message struct {
-	Role         Role
-	Content      string
-	Thinking     string
-	ToolCalls    []agenttool.Call
-	ToolResult   *agenttool.Result
-	ModelData    json.RawMessage
-	Usage        *Usage
-	Timestamp    int64
-	StopReason   StopReason
-	ErrorMessage string
-	API          string
-	Provider     string
-	Model        string
+	Role    Role
+	Content string
+	// ContextBlockID 标记由可变状态块物化出的追加式上下文消息。
+	// 同一 ID 的后一条消息取代前一条；字段会随 ReAct checkpoint 保存。
+	ContextBlockID string
+	Thinking       string
+	ToolCalls      []agenttool.Call
+	ToolResult     *agenttool.Result
+	ModelData      json.RawMessage
+	Usage          *Usage
+	Timestamp      int64
+	StopReason     StopReason
+	ErrorMessage   string
+	API            string
+	Provider       string
+	Model          string
 }
 
 // cloneAssistantMessage 深拷贝助手消息中的工具调用。

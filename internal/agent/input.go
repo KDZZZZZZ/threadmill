@@ -8,24 +8,37 @@ import (
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
-// Block 是插在消息历史之后的一段状态文本（记忆投影、协调图投影等 C3 块）。
+// Block 是按稳定性插入模型请求的一段结构化文本。
 type Block struct {
 	ID   string // 例如 "memory"、"coordination"
 	Text string
 }
 
 // Request 是一次模型生成所需的静态 Agent 配置和动态上下文快照。
-// wire 顺序是 静态前缀（C0 角色提示 + tools）→ append-only 历史（Messages）
-// → 易变状态（StateBlocks）→ 当轮尾部（Suffix）；把易变块移到历史之后，
-// 其变动只会作废尾部缓存，不再打掉整段前缀。
+// wire 顺序是 静态角色提示 → 任务内不变的块（StableBlocks）→
+// append-only 历史（Messages）→ 易变状态（StateBlocks）→ 当轮尾部（Suffix）。
+// Loop 在真正请求模型前把 StateBlocks 物化成追加式 user 数据历史；后一份同 ID
+// 状态取代前一份，从而既保留最新状态语义，也让后一请求逐字继承前一请求的输入前缀。
 type Request struct {
 	SystemPrompt string
+	StableBlocks []Block
 	Messages     []Message
 	StateBlocks  []Block
 	Suffix       string
 	Tools        []agenttool.Definition
 	// CacheKey 进入 Responses 的 prompt_cache_key，让同一 Agent 的请求粘在同一个缓存路由上。
 	CacheKey string
+}
+
+// SetStableBlock 按 ID 覆盖或追加在一次任务内不变的前缀块。
+func (r *Request) SetStableBlock(id, text string) {
+	for i := range r.StableBlocks {
+		if r.StableBlocks[i].ID == id {
+			r.StableBlocks[i].Text = text
+			return
+		}
+	}
+	r.StableBlocks = append(r.StableBlocks, Block{ID: id, Text: text})
 }
 
 // SetBlock 按 ID 覆盖或追加状态块，使 hook 顺序无关且幂等。
@@ -41,9 +54,14 @@ func (r *Request) SetBlock(id, text string) {
 
 // WirePrompt 拼接角色提示、全部状态块和尾段，供只读消费者（角色识别、token 估算）使用。
 func (r Request) WirePrompt() string {
-	parts := make([]string, 0, len(r.StateBlocks)+2)
+	parts := make([]string, 0, len(r.StableBlocks)+len(r.StateBlocks)+2)
 	if r.SystemPrompt != "" {
 		parts = append(parts, r.SystemPrompt)
+	}
+	for _, block := range r.StableBlocks {
+		if block.Text != "" {
+			parts = append(parts, block.Text)
+		}
 	}
 	for _, block := range r.StateBlocks {
 		if block.Text != "" {
@@ -64,8 +82,11 @@ func cloneRequest(request Request) Request {
 	}
 	blocks := make([]Block, len(request.StateBlocks))
 	copy(blocks, request.StateBlocks)
+	stableBlocks := make([]Block, len(request.StableBlocks))
+	copy(stableBlocks, request.StableBlocks)
 	return Request{
 		SystemPrompt: request.SystemPrompt,
+		StableBlocks: stableBlocks,
 		Messages:     cloneMessages(request.Messages),
 		StateBlocks:  blocks,
 		Suffix:       request.Suffix,
@@ -79,6 +100,14 @@ func (l *Loop) SetSubscribedSubgraphs(ids []string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.subscribedSubgraphs = append([]string(nil), ids...)
+}
+
+// SetStableSubscribedSubgraphs 设置一次任务内不变、可作为缓存前缀的记忆订阅。
+func (l *Loop) SetStableSubscribedSubgraphs(ids []string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.stableSubscribedSubgraphs = uniqueIDs(ids)
+	l.memoryBlockSubs = nil
 }
 
 // SetFixedSubscribedSubgraphs 设置运行时固定订阅；普通订阅和 checkpoint 不会覆盖它。
@@ -118,8 +147,62 @@ func (l *Loop) assembleRequest() Request {
 		SystemPrompt: l.agentConfig.systemPrompt,
 		Messages:     cloneMessages(l.messages),
 		Tools:        definitions,
-		CacheKey:     l.agentID,
+		CacheKey:     l.cacheKey,
 	}
+}
+
+// materializeStateBlocks 把 replaceable tail 转成有覆盖语义的追加式历史。
+// 状态未变时复用已有消息，状态变化时只追加一条；不原地改写旧消息。
+func (l *Loop) materializeStateBlocks(request Request) (Request, error) {
+	if len(request.StateBlocks) == 0 {
+		return request, nil
+	}
+
+	l.mu.Lock()
+	changed := false
+	for _, block := range request.StateBlocks {
+		latest, found := latestContextBlock(l.messages, block.ID)
+		if block.Text == "" && !found {
+			continue
+		}
+		content := materializedStateBlock(block)
+		if found && latest == content {
+			continue
+		}
+		l.messages = append(l.messages, Message{
+			Role:           RoleUser,
+			Content:        content,
+			ContextBlockID: block.ID,
+			Timestamp:      timestampMillis(),
+		})
+		changed = true
+	}
+	request.Messages = cloneMessages(l.messages)
+	request.StateBlocks = nil
+	l.mu.Unlock()
+
+	if changed {
+		if err := l.persistReact(); err != nil {
+			return Request{}, err
+		}
+	}
+	return request, nil
+}
+
+func latestContextBlock(messages []Message, id string) (string, bool) {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].ContextBlockID == id {
+			return messages[i].Content, true
+		}
+	}
+	return "", false
+}
+
+func materializedStateBlock(block Block) string {
+	if block.Text == "" {
+		return "（当前为空）"
+	}
+	return block.Text
 }
 
 func formatMemory(nodes []ctxgraph.Node) string {

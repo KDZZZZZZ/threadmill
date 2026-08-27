@@ -55,8 +55,14 @@ func Monitor(logger *slog.Logger) Handler {
 		if ev.Tokens > 0 {
 			attrs = append(attrs, "tokens", ev.Tokens)
 		}
+		if ev.InputTokens > 0 {
+			attrs = append(attrs, "input_tokens", ev.InputTokens)
+		}
 		if ev.CachedTokens > 0 {
 			attrs = append(attrs, "cached_tokens", ev.CachedTokens)
+		}
+		if ev.CacheWriteTokens > 0 {
+			attrs = append(attrs, "cache_write_tokens", ev.CacheWriteTokens)
 		}
 		if ev.Retries > 0 {
 			attrs = append(attrs, "retries", ev.Retries)

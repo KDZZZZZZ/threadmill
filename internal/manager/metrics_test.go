@@ -29,13 +29,17 @@ func TestManagerMetricsAndIdleSnapshotCoverRuntimeAndSubsystems(t *testing.T) {
 				}
 				return agent.AssistantMessage{
 					Content: `{"nodes":[]}`,
-					Usage:   &agent.Usage{TotalTokens: 5},
+					Usage: &agent.Usage{
+						InputTokens: 4, CachedTokens: 3, CacheWriteTokens: 1, TotalTokens: 5,
+					},
 				}, nil
 			}
 			return agent.AssistantMessage{
 				Content: "hello",
 				Model:   "metrics-model",
-				Usage:   &agent.Usage{TotalTokens: 7},
+				Usage: &agent.Usage{
+					InputTokens: 6, CachedTokens: 4, CacheWriteTokens: 1, TotalTokens: 7,
+				},
 			}, nil
 		}),
 		Logger: logging.New(logging.Config{Output: &logs, JSON: true}),
@@ -72,12 +76,20 @@ func TestManagerMetricsAndIdleSnapshotCoverRuntimeAndSubsystems(t *testing.T) {
 		`"model_delta_bytes":`,
 		`"model_stream_chunks":`,
 		`"model_stream_idle":`,
+		`"input_tokens":6`,
+		`"cached_tokens":4`,
+		`"cache_write_tokens":1`,
+		`"cache_hit_rate":`,
+		`"total_cache_hit_rate":`,
 		`"tool_max":`,
 		`"tool_active":0`,
 		`"task_max":`,
 		`"memory_ops_max":`,
 		`"memory_ops_active":0`,
 		`"memory_ops_tokens":5`,
+		`"memory_input_tokens":4`,
+		`"memory_cached_tokens":3`,
+		`"memory_cache_write_tokens":1`,
 		`"memory_ops_retries":1`,
 		`"memory_stream_chunks":`,
 		`"memory_stream_idle":`,

@@ -256,6 +256,28 @@ func TestObservationRejectsReadWriteConflict(t *testing.T) {
 	}
 }
 
+func TestObservationRejectsAppendWithoutExplicitRead(t *testing.T) {
+	obs := parseFixture(t, `1 openat(AT_FDCWD</>, "report.txt", O_WRONLY|O_CREAT|O_APPEND, 0666) = 3</report.txt>
+`)
+	if obs.Cacheable() {
+		t.Fatal("append depends on the destination's prior content and must not be cacheable")
+	}
+	if got := obs.Reads["report.txt"]; got != ReadFile {
+		t.Fatalf("report.txt read kind = %v, want ReadFile", got)
+	}
+}
+
+func TestObservationAllowsExclusiveCreate(t *testing.T) {
+	obs := parseFixture(t, `1 openat(AT_FDCWD</>, "object.tmp", O_WRONLY|O_CREAT|O_EXCL, 0666) = 3</object.tmp>
+`)
+	if !obs.Cacheable() {
+		t.Fatal("successful exclusive create has an exact absent precondition and should be cacheable")
+	}
+	if got := obs.Reads["object.tmp"]; got != ReadAbsent {
+		t.Fatalf("object.tmp read kind = %v, want ReadAbsent", got)
+	}
+}
+
 func TestObservationRejectsNetworkAndEscape(t *testing.T) {
 	network := Observation{Reads: map[string]ReadKind{}, Writes: map[string]struct{}{}, Network: true}
 	if network.Cacheable() {
@@ -295,6 +317,18 @@ func TestParseTraceDoesNotTreatHostMountWriteAsEscape(t *testing.T) {
 	}
 	if len(obs.Writes) != 0 {
 		t.Fatalf("writes = %v, want empty", obs.Writes)
+	}
+}
+
+func TestParseTraceExcludesHostMountsBelowDedicatedWorkspace(t *testing.T) {
+	obs, err := ParseTrace(strings.NewReader(
+		`1 openat(AT_FDCWD</workspace>, "/dev/null", O_WRONLY|O_CREAT|O_TRUNC, 0666) = 3</dev/null>
+`), "/workspace", "/tmp", traceLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(obs.Escaped) != 0 || !obs.Cacheable() {
+		t.Fatalf("dedicated workspace classified /dev/null as escape: %+v", obs)
 	}
 }
 

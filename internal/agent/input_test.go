@@ -83,13 +83,20 @@ func TestAssembleRequestInjectsUnionMemoryFromSubscribedSubgraphs(t *testing.T) 
 	if strings.Contains(request.WirePrompt(), "only in c") {
 		t.Fatal("wire prompt included a node from an unsubscribed subgraph")
 	}
-	if len(request.Messages) != 1 || request.Messages[0].Content != "start" {
-		t.Fatalf("messages = %#v, want the original user message only", request.Messages)
+	if len(request.Messages) != 2 || request.Messages[0].Content != "start" ||
+		request.Messages[1].ContextBlockID != "memory" {
+		t.Fatalf("messages = %#v, want user message plus materialized memory", request.Messages)
 	}
 }
 
-// blockText 返回请求里指定 ID 的状态块文本；不存在时返回空串。
+// blockText 返回请求里指定 ID 的最新状态文本；兼容 hook 尚未物化和
+// Loop 已经把状态追加进历史两种观察点。
 func blockText(request Request, id string) string {
+	for i := len(request.Messages) - 1; i >= 0; i-- {
+		if request.Messages[i].ContextBlockID == id {
+			return request.Messages[i].Content
+		}
+	}
 	for _, block := range request.StateBlocks {
 		if block.ID == id {
 			return block.Text

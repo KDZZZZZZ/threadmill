@@ -32,6 +32,7 @@ func (s *stubProvider) Generate(_ context.Context, request Request) (AssistantMe
 
 func compactPromptCtx(prompt, reminder string) context.Context {
 	return WithTranscript(context.Background(), Transcript{
+		CacheKey:            "executor",
 		CompactPrompt:       prompt,
 		CompactJSONReminder: reminder,
 	})
@@ -82,6 +83,9 @@ func TestCompactHistoryUsesOneModelRequestAndKeepsTail(t *testing.T) {
 	}
 	if provider.last.SystemPrompt != "yaml compact" {
 		t.Fatalf("system prompt = %q, want yaml compact", provider.last.SystemPrompt)
+	}
+	if provider.last.CacheKey != "executor:compact" {
+		t.Fatalf("cache key = %q, want stable role key executor:compact", provider.last.CacheKey)
 	}
 	if len(provider.last.Tools) != 0 {
 		t.Fatalf("tools = %#v, want none", provider.last.Tools)

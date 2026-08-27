@@ -326,7 +326,7 @@ func (p *traceParser) consume(line string) {
 			role = roles.rest
 		}
 		if isOpen(name) {
-			role = openRole(tokens.flags)
+			role = openRole(name, tokens.flags)
 		}
 		p.record(name, abs, role, tokens.flags, errno, failed, roles.metadata)
 	}
@@ -391,6 +391,10 @@ func (p *traceParser) recordRead(rel, flags, errno string, failed, metadata bool
 	}
 	kind := ReadFile
 	switch {
+	case !failed && strings.Contains(flags, "O_CREAT") && strings.Contains(flags, "O_EXCL"):
+		// 独占创建成功足以证明路径在执行前不存在；保留这条精确负依赖，
+		// 不能在执行后反过来哈希刚创建的产物。
+		kind = ReadAbsent
 	case failed && (errno == "ENOENT" || errno == "ENOTDIR"):
 		kind = ReadAbsent
 	case strings.Contains(flags, "O_DIRECTORY"):
@@ -575,7 +579,10 @@ func isOpen(name string) bool {
 }
 
 // openRole 按 open 标志判定这次打开是读还是写。
-func openRole(flags string) pathRole {
+func openRole(name, flags string) pathRole {
+	if name == "creat" {
+		return roleWrite
+	}
 	writing := strings.Contains(flags, "O_WRONLY") ||
 		strings.Contains(flags, "O_RDWR") ||
 		strings.Contains(flags, "O_CREAT") ||
@@ -584,10 +591,9 @@ func openRole(flags string) pathRole {
 	if !writing {
 		return roleRead
 	}
-	// O_RDWR 但不新建不截断：内容既是输入也是输出。
-	if strings.Contains(flags, "O_RDWR") &&
-		!strings.Contains(flags, "O_CREAT") &&
-		!strings.Contains(flags, "O_TRUNC") {
+	// 不截断的写会保留或追加旧内容，所以目标同时是输入。独占创建也
+	// 记成读写，但 recordRead 会把成功打开编码成精确的“不存在”依赖。
+	if !strings.Contains(flags, "O_TRUNC") {
 		return roleRead | roleWrite
 	}
 	return roleWrite
@@ -636,10 +642,11 @@ func underPath(abs, root string) bool {
 	return abs == root || strings.HasPrefix(abs, root+"/")
 }
 
-// underHostMount 只在 live 树被绑到 `/` 时生效：那时宿主的只读绑定盖在
-// 工作区之上，必须按前缀排除，否则 /usr 下几百次动态库探测会灌进读集。
+// underHostMount 识别显式挂进沙箱的工具链、设备和内核目录。
+// live 在 `/` 或独立 `/workspace` 时都必须排除这些路径；但若调用方确实把
+// workspace 放进某个同名前缀，工作区自身优先，不能误判成宿主挂载。
 func underHostMount(root, abs string) bool {
-	if root != "/" {
+	if root != "/" && underPath(abs, root) {
 		return false
 	}
 	for _, prefix := range hostMountPrefixes {

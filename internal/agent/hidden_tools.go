@@ -24,9 +24,12 @@ type hidden interface {
 type Transcript struct {
 	Messages            []Message
 	Subscribed          []string
+	StableSubscribed    []string
+	MutableSubscribed   []string
 	Provider            Provider
 	ContextWindow       int
 	AgentID             string
+	CacheKey            string
 	CompactPrompt       string
 	CompactJSONReminder string
 }
@@ -133,6 +136,11 @@ type injectSubscribedMemoryTool struct {
 	memory env.MemoryView
 }
 
+type memoryProjection struct {
+	Stable  string `json:"stable"`
+	Mutable string `json:"mutable"`
+}
+
 var (
 	_ agenttool.Tool      = injectSubscribedMemoryTool{}
 	_ agenttool.EnvBinder = injectSubscribedMemoryTool{}
@@ -169,8 +177,44 @@ func (t injectSubscribedMemoryTool) Execute(ctx context.Context, call agenttool.
 	if !ok {
 		return agenttool.Output{}, fmt.Errorf("%s: missing transcript", injectSubscribedMemoryToolName)
 	}
-	content := formatMemory(t.memory.Snapshot().NodesInSubgraphs(transcript.Subscribed))
-	return agenttool.Output{Content: content}, nil
+	graph := t.memory.Snapshot()
+	stableNodes := graph.NodesInSubgraphs(transcript.StableSubscribed)
+	stableIDs := make(map[string]struct{}, len(stableNodes))
+	for _, node := range stableNodes {
+		if node.ID != "" {
+			stableIDs[node.ID] = struct{}{}
+		}
+	}
+	mutableNodes := graph.NodesInSubgraphs(transcript.MutableSubscribed)
+	filtered := mutableNodes[:0]
+	for _, node := range mutableNodes {
+		if _, duplicate := stableIDs[node.ID]; duplicate && node.ID != "" {
+			continue
+		}
+		filtered = append(filtered, node)
+	}
+	projection := memoryProjection{
+		Stable:  formatMemory(stableNodes),
+		Mutable: formatMemory(filtered),
+	}
+	details, err := json.Marshal(projection)
+	if err != nil {
+		return agenttool.Output{}, fmt.Errorf("encode memory projection: %w", err)
+	}
+	return agenttool.Output{
+		Content: joinMemoryBlocks(projection.Stable, projection.Mutable),
+		Details: details,
+	}, nil
+}
+
+func joinMemoryBlocks(stable, mutable string) string {
+	if stable == "" {
+		return mutable
+	}
+	if mutable == "" {
+		return stable
+	}
+	return stable + "\n" + mutable
 }
 
 func hiddenMemoryTools() []agenttool.Tool {
@@ -200,10 +244,13 @@ func unwrapEventProvider(p Provider) Provider {
 // hiddenCostProvider keeps organizer calls out of the visible model stream while
 // retaining their token and retry cost on the enclosing memory operation.
 type hiddenCostProvider struct {
-	inner    Provider
-	tokens   int
-	retries  int
-	activity func(bool)
+	inner            Provider
+	tokens           int
+	inputTokens      int
+	cachedTokens     int
+	cacheWriteTokens int
+	retries          int
+	activity         func(bool)
 }
 
 func (p *hiddenCostProvider) Generate(ctx context.Context, request Request) (AssistantMessage, error) {
@@ -214,6 +261,9 @@ func (p *hiddenCostProvider) Generate(ctx context.Context, request Request) (Ass
 	message, err := p.inner.Generate(ctx, request)
 	if message.Usage != nil {
 		p.tokens += message.Usage.TotalTokens
+		p.inputTokens += message.Usage.InputTokens
+		p.cachedTokens += message.Usage.CachedTokens
+		p.cacheWriteTokens += message.Usage.CacheWriteTokens
 	}
 	return message, err
 }
@@ -221,14 +271,19 @@ func (p *hiddenCostProvider) Generate(ctx context.Context, request Request) (Ass
 func (l *Loop) snapshotTranscript() Transcript {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	subscribed := append([]string(nil), l.fixedSubscribedSubgraphs...)
-	subscribed = uniqueIDs(append(subscribed, l.subscribedSubgraphs...))
+	stable := uniqueIDs(l.stableSubscribedSubgraphs)
+	mutable := append([]string(nil), l.fixedSubscribedSubgraphs...)
+	mutable = uniqueIDs(append(mutable, l.subscribedSubgraphs...))
+	subscribed := uniqueIDs(append(append([]string(nil), stable...), mutable...))
 	return Transcript{
 		Messages:            cloneMessages(l.messages),
 		Subscribed:          subscribed,
+		StableSubscribed:    stable,
+		MutableSubscribed:   mutable,
 		Provider:            unwrapEventProvider(l.provider),
 		ContextWindow:       l.contextWindow,
 		AgentID:             l.agentID,
+		CacheKey:            l.cacheKey,
 		CompactPrompt:       l.compactPrompt,
 		CompactJSONReminder: l.compactJSONReminder,
 	}
@@ -252,6 +307,9 @@ func (l *Loop) execHidden(ctx context.Context, name string, args json.RawMessage
 	defer func() {
 		end := event.MemoryEnd(l.agentID, name, callID, started, err)
 		end.Tokens = cost.tokens
+		end.InputTokens = cost.inputTokens
+		end.CachedTokens = cost.cachedTokens
+		end.CacheWriteTokens = cost.cacheWriteTokens
 		end.Retries = cost.retries
 		l.publish(ctx, end)
 	}()

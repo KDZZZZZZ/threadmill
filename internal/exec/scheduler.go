@@ -268,31 +268,134 @@ func (v execView) Run(ctx context.Context, spec env.Cmd) (result env.ExecResult,
 	if err != nil {
 		return env.ExecResult{}, err
 	}
-	// 缓存查找同样在拿槽之前，而且是这个特性的收益所在：命中的命令完全不消耗
-	// 执行槽位，别的 agent 的命令因此更早开跑。
-	key := v.sched.cacheKey(spec.Command)
-	hit := v.sched.lookupCache(live, key)
-	verifying := false
-	if hit != nil {
-		switch {
-		case v.sched.cache.ShouldVerify():
-			// 抽样对账：这次照常执行，跑完和缓存条目比对。
-			v.sched.cache.RecordVerification()
-			verifying = true
-		case v.sched.cache.Replay(live, hit) == nil:
-			v.sched.requestServedFromCache()
-			return cachedResult(hit), nil
-		default:
-			// 回放失败就照常执行。缓存可以不命中，但不能让命令跑不起来。
-			hit = nil
+
+	var segments []commandSegment
+	if v.sched.cacheEnabled() {
+		segments = splitCacheCommand(spec.Command)
+	}
+	segmented := len(segments) > 0
+	if !segmented {
+		segments = []commandSegment{{command: spec.Command}}
+	}
+	var combined capBuffer
+	combined.cap = v.sched.outputCap
+	lastExit := 0
+	admitted := false
+	var started time.Time
+	var release func(error)
+	defer func() {
+		if !admitted {
+			return
+		}
+		v.sched.costs.record(spec.Command, time.Since(started), result.PeakRSSBytes)
+		release(runErr)
+	}()
+
+segmentLoop:
+	for _, segment := range segments {
+		if !segment.runnable(lastExit) {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			if !admitted {
+				v.sched.requestRejected(time.Since(requested), false, err)
+			}
+			runErr = err
+			return result, runErr
+		}
+		command := segment.cacheCommand(lastExit)
+		// 缓存查找在拿槽之前；分段命中会先回放产物，后段立即看得到。
+		key := v.sched.cacheKey(command)
+		hit := v.sched.lookupCache(live, key)
+		verifying := false
+		if hit != nil {
+			switch {
+			case v.sched.cache.ShouldVerify():
+				v.sched.cache.RecordVerification()
+				verifying = true
+			case v.sched.cache.Replay(live, hit) == nil:
+				out := cachedResult(hit)
+				lastExit = out.ExitCode
+				result.ExitCode = lastExit
+				if segmented {
+					if _, err := combined.Write([]byte(out.Output)); err != nil {
+						runErr = fmt.Errorf("exec: combine cached output: %w", err)
+						return result, runErr
+					}
+				} else {
+					result = out
+				}
+				if lastExit < 0 {
+					break segmentLoop
+				}
+				continue
+			default:
+				hit = nil
+			}
+		}
+		if !admitted {
+			ctx, started, release, err = v.admit(ctx, requested, spec)
+			if err != nil {
+				return result, err
+			}
+			admitted = true
+		}
+
+		segmentSpec := spec
+		segmentSpec.Command = command
+		segmentStarted := time.Now()
+		var out env.ExecResult
+		var trace *traceRun
+		if v.sched.run != nil {
+			out, runErr = v.sched.run(ctx, live, segmentSpec)
+		} else {
+			out, trace, runErr = v.sched.runSandboxed(ctx, live, command, v.envID, v.sched.tracing)
+		}
+		took := time.Since(segmentStarted)
+		fresh := v.sched.storeTrace(ctx, live, key, trace, out, runErr, took)
+		if verifying {
+			v.sched.reconcileVerification(key, hit, fresh)
+		}
+		lastExit = out.ExitCode
+		result.ExitCode = lastExit
+		result.PeakRSSBytes = max(result.PeakRSSBytes, out.PeakRSSBytes)
+		if segmented {
+			if _, err := combined.Write([]byte(out.Output)); err != nil {
+				runErr = fmt.Errorf("exec: combine output: %w", err)
+				return result, runErr
+			}
+			result.Output = combined.String()
+		} else {
+			result = out
+		}
+		if runErr != nil {
+			return result, runErr
+		}
+		if lastExit < 0 {
+			break
 		}
 	}
+	if !admitted {
+		v.sched.requestServedFromCache()
+	}
+	if segmented {
+		result.Output = combined.String()
+	}
+	return result, nil
+}
+
+func (v execView) admit(
+	ctx context.Context,
+	requested time.Time,
+	spec env.Cmd,
+) (context.Context, time.Time, func(error), error) {
 	heavy, estRSS := v.sched.commandClass(spec.Command)
 	if !v.sched.reserveMemory(ctx, estRSS) {
-		v.sched.requestRejected(time.Since(requested), false, ctx.Err())
-		return env.ExecResult{}, ctx.Err()
+		err := ctx.Err()
+		v.sched.requestRejected(time.Since(requested), false, err)
+		return ctx, time.Time{}, nil, err
 	}
-	defer v.sched.releaseMemory(estRSS)
+	heavyAcquired := false
 	if heavy {
 		heavyQueued := false
 		heavyRequested := time.Now()
@@ -305,15 +408,13 @@ func (v execView) Run(ctx context.Context, spec env.Cmd) (result env.ExecResult,
 			case <-v.sched.heavy:
 			case <-ctx.Done():
 				v.sched.heavyRequestRejected(time.Since(heavyRequested))
+				v.sched.releaseMemory(estRSS)
 				v.sched.requestRejected(time.Since(requested), false, ctx.Err())
-				return env.ExecResult{}, ctx.Err()
+				return ctx, time.Time{}, nil, ctx.Err()
 			}
 		}
+		heavyAcquired = true
 		v.sched.heavyRequestStarted(time.Since(heavyRequested), heavyQueued)
-		defer func() {
-			v.sched.heavy <- struct{}{}
-			v.sched.heavyRequestCompleted()
-		}()
 	}
 	queued := false
 	select {
@@ -324,40 +425,38 @@ func (v execView) Run(ctx context.Context, spec env.Cmd) (result env.ExecResult,
 		select {
 		case <-v.sched.slots:
 		case <-ctx.Done():
+			if heavyAcquired {
+				v.sched.heavy <- struct{}{}
+				v.sched.heavyRequestCompleted()
+			}
+			v.sched.releaseMemory(estRSS)
 			v.sched.requestRejected(time.Since(requested), true, ctx.Err())
-			return env.ExecResult{}, ctx.Err()
+			return ctx, time.Time{}, nil, ctx.Err()
 		}
 	}
-	defer func() { v.sched.slots <- struct{}{} }()
 	v.sched.requestStarted(time.Since(requested), queued)
 	started := time.Now()
-	defer func() {
-		v.sched.requestCompleted(time.Since(started), runErr)
-	}()
-
 	timeout := spec.Timeout
 	if timeout == 0 {
 		timeout = v.sched.timeout
 	}
+	var cancel context.CancelFunc
 	if timeout > 0 {
-		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
 	}
-	var out env.ExecResult
-	var trace *traceRun
-	if v.sched.run != nil {
-		out, runErr = v.sched.run(ctx, live, spec)
-	} else {
-		out, trace, runErr = v.sched.runSandboxed(ctx, live, spec.Command, v.envID, v.sched.tracing)
+	release := func(runErr error) {
+		if cancel != nil {
+			cancel()
+		}
+		v.sched.requestCompleted(time.Since(started), runErr)
+		v.sched.slots <- struct{}{}
+		if heavyAcquired {
+			v.sched.heavy <- struct{}{}
+			v.sched.heavyRequestCompleted()
+		}
+		v.sched.releaseMemory(estRSS)
 	}
-	took := time.Since(started)
-	v.sched.costs.record(spec.Command, took, out.PeakRSSBytes)
-	fresh := v.sched.storeTrace(ctx, live, key, trace, out, runErr, took)
-	if verifying {
-		v.sched.reconcileVerification(key, hit, fresh)
-	}
-	return out, runErr
+	return ctx, started, release, nil
 }
 
 // requestServedFromCache 记一次由缓存直接满足的请求。
@@ -486,8 +585,9 @@ func (s *Scheduler) runSandboxed(
 		if err != nil {
 			return env.ExecResult{}, nil, err
 		}
-		// bwrap 把 live 树绑在 /，追踪到的路径天然就是工作区相对路径。
-		trace, err := newTraceRun(tracer, live, runtimeDir, "/", "/tmp")
+		// live 位于独立的 /workspace；/proc 等系统挂载不再落进项目根，
+		// 追踪器仍可用同一个前缀把访问映射回工作区相对路径。
+		trace, err := newTraceRun(tracer, live, runtimeDir, bwrapWorkspace, "/tmp")
 		if err != nil {
 			return env.ExecResult{}, nil, err
 		}

@@ -65,6 +65,202 @@ func TestAssembleUsesYamlToolsHooksAndPrompt(t *testing.T) {
 	}
 }
 
+func TestAssembleInjectsTaskInfoIntoEveryRole(t *testing.T) {
+	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
+	ctxgraph.Update(ctxgraph.Copy{})
+
+	requests := make(map[string]agent.Request)
+	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
+		for _, role := range []string{"planner", "executor", "verifier"} {
+			if strings.Contains(request.SystemPrompt, role+" role") {
+				requests[role] = request
+				return agent.AssistantMessage{Content: role + " done"}, nil
+			}
+		}
+		return agent.AssistantMessage{}, fmt.Errorf("unknown role prompt %q", request.SystemPrompt)
+	})
+
+	stores := Stores{Memory: ctxgraph.NewStore()}
+	roles, err := Assemble(
+		stores,
+		provider,
+		agent.FileAgents{
+			Planner: agent.FileAgent{
+				SystemPrompt: "planner role",
+				Hooks:        []string{"inject_subscribed_memory"},
+			},
+			Executor: agent.FileAgent{
+				SystemPrompt: "executor role",
+				Hooks:        []string{"inject_subscribed_memory"},
+			},
+			Verifier: agent.FileAgent{
+				SystemPrompt: "verifier role",
+				Hooks:        []string{"inject_subscribed_memory"},
+			},
+		},
+		nil,
+		0,
+		nil,
+	)(Task{ID: "task-1", Info: "literal acceptance oracle", Env: Env{ID: "env-1"}})
+	if err != nil {
+		t.Fatalf("Assemble() error = %v", err)
+	}
+
+	for role, asker := range map[string]Asker{
+		"planner":  roles.Planner,
+		"executor": roles.Executor,
+		"verifier": roles.Verifier,
+	} {
+		if _, err := asker.Ask(context.Background(), role+" input"); err != nil {
+			t.Fatalf("%s Ask() error = %v", role, err)
+		}
+		want := "[Task Info] task-1: literal acceptance oracle"
+		prompt := requests[role].WirePrompt()
+		if !strings.Contains(prompt, want) {
+			t.Errorf("%s wire prompt does not contain %q: %q", role, want, prompt)
+		}
+		if !requestBlockContains(requests[role].StableBlocks, want) {
+			t.Errorf("%s task package is not in the stable prefix: %#v", role, requests[role].StableBlocks)
+		}
+		if requestBlockContains(requests[role].StateBlocks, want) {
+			t.Errorf("%s task package remained in the dynamic tail: %#v", role, requests[role].StateBlocks)
+		}
+	}
+}
+
+func requestBlockContains(blocks []agent.Block, text string) bool {
+	for _, block := range blocks {
+		if strings.Contains(block.Text, text) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestAssembleInjectsOriginalUserRequestIntoRootOnly(t *testing.T) {
+	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
+	ctxgraph.Update(ctxgraph.Copy{})
+
+	stores := Stores{Memory: ctxgraph.NewStore()}
+	first := Task{ID: "task-1", Info: "first scoped contract", Env: Env{ID: "env-1"}}
+	second := Task{ID: "task-2", Info: "second scoped contract", Env: Env{ID: "env-2", ParentID: "env-1"}}
+	helper := Task{
+		ID:          "task-3",
+		Info:        "helper scoped contract",
+		Env:         Env{ID: "env-3", ParentID: "env-1"},
+		SpawnedFrom: first.ID,
+	}
+	if err := stores.ProjectManagerUserMessage("FIRST-REQUEST"); err != nil {
+		t.Fatal(err)
+	}
+	if err := stores.ProjectManagerTaskInfos([]Task{first}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stores.ProjectManagerUserMessage("SECOND-REQUEST"); err != nil {
+		t.Fatal(err)
+	}
+	if err := stores.ProjectManagerTaskInfos([]Task{first, second, helper}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stores.Memory.Fork(ManagerEnvID, first.Env.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := stores.Memory.DropSubgraph(first.Env.ID, ManagerMemorySubgraphID); err != nil {
+		t.Fatal(err)
+	}
+	if err := stores.Memory.Fork(first.Env.ID, second.Env.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := stores.Memory.Fork(first.Env.ID, helper.Env.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
+		return agent.AssistantMessage{Content: request.WirePrompt()}, nil
+	})
+	assemble := Assemble(
+		stores,
+		provider,
+		agent.FileAgents{Planner: agent.FileAgent{
+			SystemPrompt: "planner role",
+			Hooks:        []string{"inject_subscribed_memory"},
+		}},
+		nil,
+		0,
+		nil,
+	)
+
+	tests := []struct {
+		name     string
+		task     Task
+		want     []string
+		unwanted []string
+	}{
+		{
+			name:     "first root keeps its creation request",
+			task:     first,
+			want:     []string{"[User Message] FIRST-REQUEST", "[Task Info] task-1: first scoped contract"},
+			unwanted: []string{"SECOND-REQUEST"},
+		},
+		{
+			name:     "later root uses the later request",
+			task:     second,
+			want:     []string{"[User Message] SECOND-REQUEST", "[Task Info] task-2: second scoped contract"},
+			unwanted: []string{"FIRST-REQUEST"},
+		},
+		{
+			name:     "helper receives only its scoped contract",
+			task:     helper,
+			want:     []string{"[Task Info] task-3: helper scoped contract"},
+			unwanted: []string{"FIRST-REQUEST", "SECOND-REQUEST"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			roles, err := assemble(test.task)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prompt, err := roles.Planner.Ask(context.Background(), "plan")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range test.want {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("prompt does not contain %q: %q", want, prompt)
+				}
+			}
+			for _, unwanted := range test.unwanted {
+				if strings.Contains(prompt, unwanted) {
+					t.Errorf("prompt contains %q: %q", unwanted, prompt)
+				}
+			}
+		})
+	}
+}
+
+func TestAssembleDoesNotStartOrganizerForTaskPackage(t *testing.T) {
+	stores := Stores{Memory: ctxgraph.NewStore()}
+	roles, err := Assemble(
+		stores,
+		stubProvider(func(context.Context, agent.Request) (agent.AssistantMessage, error) {
+			return agent.AssistantMessage{Content: "done"}, nil
+		}),
+		agent.FileAgents{
+			SubgraphOrganizer: agent.FileAgent{SystemPrompt: "organizer role"},
+		},
+		nil,
+		0,
+		nil,
+	)(Task{ID: "task-1", Info: "self-contained task", Env: Env{ID: "env-1"}})
+	if err != nil {
+		t.Fatalf("Assemble() error = %v", err)
+	}
+	if roles.Prepare != nil {
+		t.Fatal("Assemble() configured eager organizer work for a mechanically complete task package")
+	}
+}
+
 func TestAssembleBindsVFSFiles(t *testing.T) {
 	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
 	ctxgraph.Update(ctxgraph.Copy{})

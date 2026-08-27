@@ -55,10 +55,17 @@ type MetricsSnapshot struct {
 	Task                      OperationMetrics `json:"task"`
 	Memory                    OperationMetrics `json:"memory"`
 	Tokens                    uint64           `json:"tokens"`
+	InputTokens               uint64           `json:"input_tokens"`
 	CachedTokens              uint64           `json:"cached_tokens"`
+	CacheWriteTokens          uint64           `json:"cache_write_tokens"`
+	CacheHitRate              float64          `json:"cache_hit_rate"` // KindModel 请求
 	ToolCalls                 uint64           `json:"tool_calls"`
 	ModelRetries              uint64           `json:"model_retries"`
 	MemoryTokens              uint64           `json:"memory_tokens"`
+	MemoryInputTokens         uint64           `json:"memory_input_tokens"`
+	MemoryCachedTokens        uint64           `json:"memory_cached_tokens"`
+	MemoryCacheWriteTokens    uint64           `json:"memory_cache_write_tokens"`
+	TotalCacheHitRate         float64          `json:"total_cache_hit_rate"`
 	MemoryRetries             uint64           `json:"memory_retries"`
 	MemoryOrganizerRuns       uint64           `json:"memory_organizer_runs"`
 	MemoryOrganizerCandidates uint64           `json:"memory_organizer_candidates"`
@@ -179,10 +186,15 @@ type Collector struct {
 	modelFlights              map[string]modelFlight
 	memoryFlights             map[string]modelFlight
 	tokens                    uint64
+	inputTokens               uint64
 	cachedTokens              uint64
+	cacheWriteTokens          uint64
 	toolCalls                 uint64
 	modelRetries              uint64
 	memoryTokens              uint64
+	memoryInputTokens         uint64
+	memoryCachedTokens        uint64
+	memoryCacheWriteTokens    uint64
 	memoryRetries             uint64
 	memoryOrganizerRuns       uint64
 	memoryOrganizerCandidates uint64
@@ -277,7 +289,9 @@ func (c *Collector) Handle(_ context.Context, ev RuntimeEvent) {
 		if ev.Kind == KindModel {
 			delete(c.modelFlights, ev.AgentID)
 			c.tokens += uint64(max(ev.Tokens, 0))
+			c.inputTokens += uint64(max(ev.InputTokens, 0))
 			c.cachedTokens += uint64(max(ev.CachedTokens, 0))
+			c.cacheWriteTokens += uint64(max(ev.CacheWriteTokens, 0))
 			c.toolCalls += uint64(max(ev.ToolCalls, 0))
 			if _, ok := c.memoryOrganizerFlights[ev.AgentID]; ok {
 				c.memoryOrganizerFlights[ev.AgentID] += uint64(max(ev.Tokens, 0))
@@ -286,6 +300,9 @@ func (c *Collector) Handle(_ context.Context, ev RuntimeEvent) {
 		if ev.Kind == KindMemory {
 			delete(c.memoryFlights, ev.AgentID)
 			c.memoryTokens += uint64(max(ev.Tokens, 0))
+			c.memoryInputTokens += uint64(max(ev.InputTokens, 0))
+			c.memoryCachedTokens += uint64(max(ev.CachedTokens, 0))
+			c.memoryCacheWriteTokens += uint64(max(ev.CacheWriteTokens, 0))
 			c.memoryRetries += uint64(max(ev.Retries, 0))
 			if ev.MemoryOrganized {
 				c.memoryOrganizerRuns++
@@ -328,16 +345,32 @@ func (c *Collector) Snapshot() MetricsSnapshot {
 	now := time.Now()
 	modelStreamIdle := streamIdle(now, c.modelFlights)
 	memoryStreamIdle := streamIdle(now, c.memoryFlights)
+	cacheHitRate := 0.0
+	if c.inputTokens > 0 {
+		cacheHitRate = float64(c.cachedTokens) / float64(c.inputTokens)
+	}
+	totalCacheHitRate := 0.0
+	totalInputTokens := c.inputTokens + c.memoryInputTokens
+	if totalInputTokens > 0 {
+		totalCacheHitRate = float64(c.cachedTokens+c.memoryCachedTokens) / float64(totalInputTokens)
+	}
 	return MetricsSnapshot{
 		Model:                     c.model.snapshot(),
 		Tool:                      c.tool.snapshot(),
 		Task:                      c.task.snapshot(),
 		Memory:                    c.memory.snapshot(),
 		Tokens:                    c.tokens,
+		InputTokens:               c.inputTokens,
 		CachedTokens:              c.cachedTokens,
+		CacheWriteTokens:          c.cacheWriteTokens,
+		CacheHitRate:              cacheHitRate,
 		ToolCalls:                 c.toolCalls,
 		ModelRetries:              c.modelRetries,
 		MemoryTokens:              c.memoryTokens,
+		MemoryInputTokens:         c.memoryInputTokens,
+		MemoryCachedTokens:        c.memoryCachedTokens,
+		MemoryCacheWriteTokens:    c.memoryCacheWriteTokens,
+		TotalCacheHitRate:         totalCacheHitRate,
 		MemoryRetries:             c.memoryRetries,
 		MemoryOrganizerRuns:       c.memoryOrganizerRuns,
 		MemoryOrganizerCandidates: c.memoryOrganizerCandidates,

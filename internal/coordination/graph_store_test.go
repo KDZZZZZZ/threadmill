@@ -2,6 +2,7 @@ package coordination
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -70,5 +71,29 @@ func TestOpenGraphRestoresRunOutcome(t *testing.T) {
 	got := second.Snapshot()
 	if len(got.Tasks) != 1 || got.Tasks[0].Outcome != OutcomeDone {
 		t.Fatalf("restored tasks = %#v, want one done task", got.Tasks)
+	}
+}
+
+func TestOpenGraphTreatsMissingRunPolicyAsEnabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "graph.json")
+	legacy := `{"revision":1,"next_id":1,"tasks":[{"ID":"task-1","Info":"legacy","Env":{"ID":"env-1","ParentID":""},` +
+		`"Planner":{"ID":"task-1:planner","TaskID":"task-1","Role":"planner"},` +
+		`"Executor":{"ID":"task-1:executor","TaskID":"task-1","Role":"executor"},` +
+		`"Verifier":{"ID":"task-1:verifier","TaskID":"task-1","Role":"verifier"},` +
+		`"Outcome":"active"}],"edges":[]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := OpenGraph(path)
+	if err != nil {
+		t.Fatalf("OpenGraph() error = %v", err)
+	}
+	tasks := graph.Snapshot().Tasks
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %#v, want the restored root", tasks)
+	}
+	if tasks[0].RunPolicy != RunPolicyEnabled {
+		t.Fatalf("run policy = %q, want %q so restored roots keep running", tasks[0].RunPolicy, RunPolicyEnabled)
 	}
 }

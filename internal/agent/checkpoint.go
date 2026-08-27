@@ -150,7 +150,7 @@ func (l *Loop) restoreCheckpoint() (bool, error) {
 
 func checkpointUser(messages []Message) UserMessage {
 	for _, message := range messages {
-		if message.Role == RoleUser {
+		if message.Role == RoleUser && message.ContextBlockID == "" {
 			return UserMessage{Content: message.Content, Timestamp: message.Timestamp}
 		}
 	}

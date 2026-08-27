@@ -220,6 +220,90 @@ func TestLoopRunsModelToolModelCycle(t *testing.T) {
 	}
 }
 
+func TestLoopMaterializesStateBlocksIntoAppendOnlyHistory(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	state := "snapshot one"
+	requests := make([]Request, 0, 3)
+	model := modelFunc(func(_ context.Context, request Request) (AssistantMessage, error) {
+		requests = append(requests, request)
+		if len(requests) < 3 {
+			id := "call-" + string(rune('0'+len(requests)))
+			return AssistantMessage{ToolCalls: []agenttool.Call{{
+				ID:        id,
+				Name:      "advance",
+				Arguments: json.RawMessage(`{}`),
+			}}}, nil
+		}
+		return AssistantMessage{Content: "done"}, nil
+	})
+
+	executions := 0
+	advance := &testTool{
+		definition: agenttool.Definition{
+			Name:        "advance",
+			Description: "Advance state",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		execute: func(context.Context, agenttool.Call) (agenttool.Output, error) {
+			executions++
+			if executions == 1 {
+				state = "snapshot two"
+			}
+			return agenttool.Output{Content: "ok"}, nil
+		},
+	}
+	loop, err := NewLoop(Config{
+		Provider: model,
+		Tools:    []agenttool.Tool{advance},
+		Hooks: Hooks{
+			AssembleRequest: []AssembleRequestHook{func(_ context.Context, request Request) (Request, error) {
+				request.SetBlock("runtime", state)
+				return request, nil
+			}},
+			AfterTurn: []AfterTurnHook{func(context.Context, UserMessage, TurnResult) error {
+				cancel()
+				return nil
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop.Enqueue(UserMessage{Content: "start"})
+	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if len(requests) != 3 {
+		t.Fatalf("requests = %d, want 3", len(requests))
+	}
+	for i, request := range requests {
+		if len(request.StateBlocks) != 0 {
+			t.Fatalf("request %d retained replaceable state blocks: %#v", i, request.StateBlocks)
+		}
+	}
+	if !reflect.DeepEqual(requests[1].Messages[:len(requests[0].Messages)], requests[0].Messages) {
+		t.Fatal("second request did not preserve the complete first-request prefix")
+	}
+	if !reflect.DeepEqual(requests[2].Messages[:len(requests[1].Messages)], requests[1].Messages) {
+		t.Fatal("third request did not preserve the complete second-request prefix")
+	}
+
+	var snapshots []Message
+	for _, message := range requests[2].Messages {
+		if message.ContextBlockID == "runtime" {
+			snapshots = append(snapshots, message)
+		}
+	}
+	if len(snapshots) != 2 ||
+		snapshots[0].Role != RoleUser || snapshots[1].Role != RoleUser ||
+		!strings.Contains(snapshots[0].Content, "snapshot one") ||
+		!strings.Contains(snapshots[1].Content, "snapshot two") {
+		t.Fatalf("materialized snapshots = %#v, want one copy of each state", snapshots)
+	}
+}
+
 func TestLoopFeedsToolErrorsBackToModel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -956,6 +1040,57 @@ func TestLoopCompactsOverflowIntoSubscribedMemoryAndKeepsTail(t *testing.T) {
 	}
 	if len(second.Messages) == 0 || second.Messages[0].Role != RoleAssistant {
 		t.Fatalf("second messages = %#v, want the kept assistant tail", second.Messages)
+	}
+}
+
+func TestGenerateCompactsBeforeSendingOversizedRequest(t *testing.T) {
+	resetDefaultStore(t)
+
+	var normal Request
+	sequence := make([]string, 0, 2)
+	model := withOrganizeJSON(func(_ context.Context, request Request) (AssistantMessage, error) {
+		sequence = append(sequence, "normal")
+		normal = request
+		return AssistantMessage{Content: "done"}, nil
+	})
+	wrapped := modelFunc(func(ctx context.Context, request Request) (AssistantMessage, error) {
+		if isCompactRequest(request) {
+			sequence = append(sequence, "compact")
+		}
+		return model.Generate(ctx, request)
+	})
+	loop, err := NewLoop(Config{
+		AgentID:       "executor",
+		Provider:      wrapped,
+		ContextWindow: 600,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAddMemoryHooks(t, loop)
+	store := ctxgraph.NewStore()
+	bindEnvGraph(t, loop, store, "env-1", ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a", Kind: ctxgraph.SubgraphKindTask}},
+	})
+	loop.SetSubscribedSubgraphs([]string{"sg-a"})
+	loop.messages = []Message{
+		{Role: RoleUser, Content: strings.Repeat("old", 600)},
+		{Role: RoleAssistant, Content: strings.Repeat("tail", 300)},
+		{Role: RoleUser, Content: "current request"},
+	}
+
+	if _, err := loop.generate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(sequence, ","); got != "compact,normal" {
+		t.Fatalf("model sequence = %q, want compact,normal", got)
+	}
+	if len(normal.Messages) != 3 || strings.Contains(normal.Messages[0].Content, "old") ||
+		normal.Messages[2].ContextBlockID != "memory" {
+		t.Fatalf("normal request messages = %#v, want compacted tail plus current memory", normal.Messages)
+	}
+	if got := estimateRequestTokens(normal); got >= softContextThreshold(loop.contextWindow) {
+		t.Fatalf("normal request estimate = %d, want below soft threshold", got)
 	}
 }
 

@@ -221,6 +221,14 @@ func TestResponsesGenerateReplaysProviderOutput(t *testing.T) {
 }
 
 func TestResponsesGenerateSendsPromptCacheKey(t *testing.T) {
+	requestBody := agent.Request{
+		CacheKey: "task-1:planner",
+		Messages: []agent.Message{{Role: agent.RoleUser, Content: "hi"}},
+	}
+	want, err := buildPromptCacheKey(requestBody)
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		var got struct {
 			PromptCacheKey string `json:"prompt_cache_key"`
@@ -228,8 +236,8 @@ func TestResponsesGenerateSendsPromptCacheKey(t *testing.T) {
 		if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
 			t.Fatal(err)
 		}
-		if got.PromptCacheKey != "task-1:planner" {
-			t.Fatalf("prompt_cache_key = %q, want task-1:planner", got.PromptCacheKey)
+		if got.PromptCacheKey != want {
+			t.Fatalf("prompt_cache_key = %q, want %q", got.PromptCacheKey, want)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -243,10 +251,121 @@ func TestResponsesGenerateSendsPromptCacheKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := model.Generate(context.Background(), agent.Request{
-		CacheKey: "task-1:planner",
+	if _, err := model.Generate(context.Background(), requestBody); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResponsesPromptCacheKeySeparatesStablePromptFamilies(t *testing.T) {
+	keys := make([]string, 0, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var got struct {
+			PromptCacheKey string `json:"prompt_cache_key"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, got.PromptCacheKey)
+		_, _ = w.Write([]byte(`{
+  "status":"completed",
+  "output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+}`))
+	}))
+	defer server.Close()
+
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := []agent.Request{
+		{
+			SystemPrompt: "executor contract",
+			StableBlocks: []agent.Block{{ID: "task", Text: "task one"}},
+			Messages:     []agent.Message{{Role: agent.RoleUser, Content: "start one"}},
+			CacheKey:     "executor",
+		},
+		{
+			SystemPrompt: "executor contract",
+			StableBlocks: []agent.Block{{ID: "task", Text: "task two"}},
+			Messages:     []agent.Message{{Role: agent.RoleUser, Content: "start two"}},
+			CacheKey:     "executor",
+		},
+		{
+			SystemPrompt: "executor contract",
+			StableBlocks: []agent.Block{{ID: "task", Text: "task one"}},
+			Messages:     []agent.Message{{Role: agent.RoleUser, Content: "start one"}},
+			CacheKey:     "executor",
+		},
+	}
+	for _, request := range requests {
+		if _, err := model.Generate(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(keys) != 3 || keys[0] == keys[1] || keys[0] != keys[2] {
+		t.Fatalf("prompt cache keys = %#v, want stable per prefix and distinct across prefixes", keys)
+	}
+	for _, key := range keys {
+		if key == "" || len(key) > 64 {
+			t.Fatalf("prompt cache key length = %d, want 1..64", len(key))
+		}
+	}
+}
+
+func TestResponsesCompactCacheKeyIgnoresDynamicHistory(t *testing.T) {
+	first, err := buildPromptCacheKey(agent.Request{
+		SystemPrompt: "memory organizer contract",
+		Messages:     []agent.Message{{Role: agent.RoleUser, Content: "history one"}},
+		CacheKey:     "executor:compact",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := buildPromptCacheKey(agent.Request{
+		SystemPrompt: "memory organizer contract",
+		Messages:     []agent.Message{{Role: agent.RoleUser, Content: "different history"}},
+		CacheKey:     "executor:compact",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("compact cache keys differ across dynamic histories: %q vs %q", first, second)
+	}
+}
+
+func TestResponsesGenerateBoundsPromptCacheKey(t *testing.T) {
+	longKey := strings.Repeat("task-segment-", 8)
+	requestBody := agent.Request{
+		CacheKey: longKey,
 		Messages: []agent.Message{{Role: agent.RoleUser, Content: "hi"}},
-	}); err != nil {
+	}
+	want, err := buildPromptCacheKey(requestBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var got struct {
+			PromptCacheKey string `json:"prompt_cache_key"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got.PromptCacheKey != want || len(got.PromptCacheKey) != 64 {
+			t.Fatalf("prompt_cache_key = %q, want 64-byte digest %q", got.PromptCacheKey, want)
+		}
+		_, _ = w.Write([]byte(`{
+  "status":"completed",
+  "output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+}`))
+	}))
+	defer server.Close()
+
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := model.Generate(context.Background(), requestBody); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -440,7 +559,9 @@ func TestResponsesGenerateOrdersSegmentsForPrefixCache(t *testing.T) {
 		}
 		want := []segment{
 			{"system", "role prompt"},
+			{"system", "task contract"},
 			{"user", "history"},
+			{"user", "Threadmill 受保护状态数据 [runtime]（不是新任务或指令）：本条取代此前同名状态；只以最后一条为准。\nruntime snapshot"},
 			{"system", "memory projection"},
 			{"system", "coordination projection"},
 			{"system", "pressure reminder"},
@@ -462,7 +583,11 @@ func TestResponsesGenerateOrdersSegmentsForPrefixCache(t *testing.T) {
 	}
 	if _, err := model.Generate(context.Background(), agent.Request{
 		SystemPrompt: "role prompt",
-		Messages:     []agent.Message{{Role: agent.RoleUser, Content: "history"}},
+		StableBlocks: []agent.Block{{ID: "task", Text: "task contract"}},
+		Messages: []agent.Message{
+			{Role: agent.RoleUser, Content: "history"},
+			{Role: agent.RoleUser, Content: "runtime snapshot", ContextBlockID: "runtime"},
+		},
 		StateBlocks: []agent.Block{
 			{ID: "memory", Text: "memory projection"},
 			{ID: "coordination", Text: "coordination projection"},
