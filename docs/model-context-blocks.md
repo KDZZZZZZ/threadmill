@@ -111,6 +111,11 @@ memory_block = formatMemory(visible_nodes)
 
 `NodesInSubgraphs` 按图中 `Nodes` 的顺序取并集并按 ID 去重；它**不会按 `status` 过滤**，所以 `superseded`/`outdated` 节点只要仍属于订阅子图，仍会带状态标签发送。`formatMemory` 只发送节点的 `kind`、`status` 和 `statement`。因此，图已经提交但请求正在生成时，不会回写正在进行的请求；它只会从下一次模型请求开始可见。工具调用或生命周期 hook 提交图后，当前工具结果仍先进入 `Messages`，下一次 `generate` 才同时看到新记忆和该结果。实现入口见 [`internal/agent/input.go`](../internal/agent/input.go) 与 [`internal/agent/hidden_tools.go`](../internal/agent/hidden_tools.go)。
 
+Phase 3 起该投影带 memo：`Loop.subscribedMemoryBlock` 以 `(EnvView.Revision(), 有效订阅列表)` 为键复用上次的投影文本，命中时跳过隐藏工具执行。两条必须记住的边界：
+
+- **revision 只是失效提示**。绕过显式 API、以相同 revision 提交节点变化的裸 `Store.Save` 会读到旧文本；生产写路径都会递增 revision。
+- **memo 必须随 `Bind` 失效**。`Graph.Clone` 保留 `Revision`，所以 `Fork` 出的子环境与父环境 revision 相同，而订阅列表跨 `Bind` 保留；不清 memo 就会把上一个环境的记忆文本泄漏给新环境。`bindLoopTools` 换 `loop.memory` 时一并清空 memo，`TestSubscribedMemoryBlockInvalidatesOnBind` 锁定该行为。这正是本文后面「`scope` 至少要隔离 Agent/环境」的具体落点。
+
 ### 订阅选择器什么时候变
 
 | 触发事件 | 变化的状态 | 影响范围与可见时机 |
@@ -224,8 +229,8 @@ memory_node_chunk_key = (
 | C0/C1 | `M-02 工具 schema` | `coordination_replacePending`、`coordination_provideHelp`、`organize_subgraph` 的 name、description 和 JSON Schema。描述可被顶层 `tools` 覆盖。 |
 | C1 | `M-03 记忆块结构` | 固定订阅 `system-manager`；渲染为 `记忆：` 加 `- [kind/status] statement`。 |
 | C3 | `M-04 manager 记忆节点` | `system-manager` 中的用户消息、Task Info、任务报告和候选任务报告；manager compact 生成的节点只有在归属当前订阅子图时才进入该块。 |
-| C3 | `M-05 协调图静态说明` | `当前协调图（JSON：tasks[].id/info/outcome/sequence，edges[].from/to 为节点关联）：` 等固定说明文字。审计时该字符串还宣传了一个 `Snapshot` 里不存在的 `helps 为拆分请求` 字段（`internal/coordination/graph.go` 的 `Snapshot` 只有 `revision/executing/tasks/edges`），属真实的 prompt/schema 不一致，已随 Phase 3 从说明文字中删除。 |
-| C5 | `M-06 协调图快照` | 每轮重新取得的 `revision`、`executing`、`tasks`、`edges` JSON；当前快照结构没有 `helps` 字段，help 请求正文会在 manager 用户消息中出现。字节缓存意义上等价 C5：`Revision` 与 `Executing` 是逐请求易变字段，manager 的这段投影几乎每次请求都变。Phase 3 起注入前会剥掉这两个字段并把 tasks/edges 排序，投影在内容不变时逐字节稳定，重新回到 C3 的稳定度。 |
+| C3 | `M-05 协调图静态说明` | `当前协调图（JSON：tasks[].id/info/outcome/sequence，edges[].from/to 为节点关联）：` 等固定说明文字。审计时该字符串还宣传了一个 `Snapshot` 里不存在的 `helps 为拆分请求` 字段（`internal/coordination/graph.go` 的 `Snapshot` 只有 `revision/executing/tasks/edges`），属真实的 prompt/schema 不一致，已随 Phase 3 从说明文字中删除。同一句里的 `sequence` 也不是 JSON 字段——`Task` 上没有该字段，`Sequence()` 是返回三个角色节点的方法，不参与序列化；且字段名实际以 Go 字段名大写序列化（`ID`/`Info`/`Outcome`），与说明文字的小写写法不一致。这两处尚未修，属已知的说明文字与 payload 偏差。 |
+| C5 | `M-06 协调图快照` | 每轮重新取得的 `revision`、`executing`、`tasks`、`edges` JSON；当前快照结构没有 `helps` 字段，help 请求正文会在 manager 用户消息中出现。字节缓存意义上等价 C5：`Revision` 与 `Executing` 是逐请求易变字段，manager 的这段投影几乎每次请求都变。Phase 3 起注入前会剥掉这两个字段（`Snapshot.PromptProjection`），投影在内容不变时逐字节稳定，重新回到 C3 的稳定度。不对 tasks/edges 排序：`g.tasks`/`g.edges` 本身就是 append 有序切片，删除走保序原地压缩，字节已经稳定；按 ID 排序反而会破坏创建顺序（ID 是 `task-%d` 递增计数，字典序在第 10 个 task 之后就有 `task-10 < task-2`）。 |
 | C4 | `M-07 外部用户消息` | `Manager.Send()` 入队的原始用户文本，作为 `RoleUser`。 |
 | C5 | `M-08 内部 manager 用户消息` | `[拆分请求]` 通知、任务完成报告、恢复所需的内部消息，也都作为 `RoleUser`。 |
 | C4/C5 | `M-09 manager ReAct 历史` | 之前的 user、assistant 文本、assistant 工具调用、工具结果和 Responses `ModelData`。 |
@@ -385,7 +390,7 @@ verifier 输出
 
 1. 静态前缀（C0/C1）：角色系统提示和工具 schema，作为不可变配置块放在 wire 最前。
 2. append-only 历史（C4）：紧跟静态前缀；保留可追加前缀，原地重写只允许发生在显式的新版本切点（如 `applyCompactTail`）或尾部水位线之后——`memory_drop_from_context` 对全历史的逐条改写已按 Phase 4 收敛到最近一段，避免在压力期作废整条前缀。
-3. 易变状态（C2/C3）：Task Info 契约与记忆投影按有效投影（规范化订阅集合 + 有序节点字段）缓存，协调图注入剥掉 `revision`/`executing` 并排序后放历史之后；各 revision 字段只作失效提示，不能单独证明内容相同。
+3. 易变状态（C2/C3）：Task Info 契约与记忆投影按有效投影（规范化订阅集合 + 有序节点字段）缓存，协调图注入剥掉 `revision`/`executing` 后放历史之后（保留切片原有顺序，不做字典序规范化）；各 revision 字段只作失效提示，不能单独证明内容相同。
 4. 当前回合与动态尾部（C5）：当前交接、工具输出和 `ModelData` 作为动态尾部，不混入固定前缀。
 5. 条件性尾部（C6）：永远放在未缓存尾部。实现注意：文档早先版本只说「放在尾部」，但代码曾把压力提醒拼进 SystemPrompt 开头（wire 第 0 个 token）；已随 Phase 2 改为独立的 `Suffix` 段，物理上落在输入末尾。
 

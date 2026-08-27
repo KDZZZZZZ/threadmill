@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"sync"
 )
 
@@ -242,25 +241,17 @@ type Snapshot struct {
 }
 
 // PromptProjection 返回注入提示词用的稳定投影：剥掉逐请求易变的 Revision 和
-// Executing（模型从工具返回里已能看到等价信息），Tasks 按 ID、Edges 按 From/To 排序，
-// 保证图内容不变时字节逐请求一致，不因协调整理打掉 manager 的历史前缀缓存。
+// Executing（模型从工具返回里已能看到等价信息），保证图内容不变时字节逐请求一致，
+// 不因协调整理打掉 manager 的历史前缀缓存。
+//
+// 不对 Tasks/Edges 排序：g.tasks 和 g.edges 本身就是 append 有序切片，删除走保序
+// 原地压缩，同样内容的字节已经稳定。按 ID 排序反而会破坏创建顺序——ID 是 task-%d
+// 的递增计数，字典序在第 10 个 task 之后就与创建顺序不一致（task-10 < task-2）。
 func (s Snapshot) PromptProjection() ([]byte, error) {
-	tasks := append([]Task(nil), s.Tasks...)
-	sort.Slice(tasks, func(i, j int) bool { return tasks[i].ID < tasks[j].ID })
-	edges := append([]Edge(nil), s.Edges...)
-	sort.Slice(edges, func(i, j int) bool {
-		if edges[i].From != edges[j].From {
-			return edges[i].From < edges[j].From
-		}
-		if edges[i].To != edges[j].To {
-			return edges[i].To < edges[j].To
-		}
-		return edges[i].Kind < edges[j].Kind
-	})
 	return json.Marshal(struct {
 		Tasks []Task `json:"tasks"`
 		Edges []Edge `json:"edges"`
-	}{Tasks: tasks, Edges: edges})
+	}{Tasks: s.Tasks, Edges: s.Edges})
 }
 
 // Snapshot 返回当前 tasks 和边；Run 期间 executing 为 true。

@@ -474,3 +474,51 @@ func TestInjectSubscribedMemoryReusesUnchangedProjection(t *testing.T) {
 		t.Fatalf("hidden injections = %d, want one per distinct projection", injections)
 	}
 }
+
+// TestSubscribedMemoryBlockInvalidatesOnBind 锁定跨环境隔离：Fork 出的子环境与父环境
+// 图 revision 相同（Graph.Clone 保留 Revision），若 memo 不随 Bind 失效，
+// 订阅列表未变时会把上一个环境的记忆文本泄漏给新环境。
+func TestSubscribedMemoryBlockInvalidatesOnBind(t *testing.T) {
+	ctx := context.Background()
+	resetDefaultStore(t)
+
+	loop, err := NewLoop(Config{Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+		return AssistantMessage{Content: "done"}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAddMemoryHooks(t, loop)
+
+	store := ctxgraph.NewStore()
+	graph := ctxgraph.Graph{
+		Revision: 7,
+		Nodes:    []ctxgraph.Node{{ID: "a", Statement: "parent secret", SubgraphIDs: []string{"sg"}}},
+	}
+	bindEnvGraph(t, loop, store, "env-parent", graph)
+	loop.SetSubscribedSubgraphs([]string{"sg"})
+
+	first, err := loop.subscribedMemoryBlock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "记忆：\n- parent secret"; first != want {
+		t.Fatalf("parent memory block = %q, want %q", first, want)
+	}
+
+	// Fork 保留 revision，子环境节点不同但 revision 相同、订阅列表未变。
+	if err := store.Fork("env-parent", "env-child"); err != nil {
+		t.Fatal(err)
+	}
+	child := graph.Clone()
+	child.Nodes = []ctxgraph.Node{{ID: "b", Statement: "child fact", SubgraphIDs: []string{"sg"}}}
+	bindEnvGraph(t, loop, store, "env-child", child)
+
+	second, err := loop.subscribedMemoryBlock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "记忆：\n- child fact"; second != want {
+		t.Fatalf("child memory block = %q, want %q", second, want)
+	}
+}

@@ -3,7 +3,9 @@ package coordination
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -74,16 +76,11 @@ func TestSnapshotPromptProjectionIgnoresVolatileFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 第二次快照 revision 前进、executing 翻转，且 tasks/edges 顺序被打乱，但内容相同。
+	// 第二次快照 revision 前进、executing 翻转，但图内容相同：投影字节必须逐字节一致，
+	// 否则 manager 每轮都会因协调整理打掉整段历史前缀缓存。
 	snap := graph.Snapshot()
 	snap.Revision = snap.Revision + 7
 	snap.Executing = true
-	for i, j := 0, len(snap.Tasks)-1; i < j; i, j = i+1, j-1 {
-		snap.Tasks[i], snap.Tasks[j] = snap.Tasks[j], snap.Tasks[i]
-	}
-	for i, j := 0, len(snap.Edges)-1; i < j; i, j = i+1, j-1 {
-		snap.Edges[i], snap.Edges[j] = snap.Edges[j], snap.Edges[i]
-	}
 	second, err := snap.PromptProjection()
 	if err != nil {
 		t.Fatal(err)
@@ -93,5 +90,35 @@ func TestSnapshotPromptProjectionIgnoresVolatileFields(t *testing.T) {
 	}
 	if bytes.Contains(second, []byte("revision")) || bytes.Contains(second, []byte("executing")) {
 		t.Fatalf("projection leaks volatile fields: %s", second)
+	}
+}
+
+// TestSnapshotPromptProjectionKeepsCreationOrder 锁定投影不得重排 tasks：
+// ID 是 task-%d 的递增计数，任何字典序规范化都会在第 10 个 task 之后打乱创建顺序。
+func TestSnapshotPromptProjectionKeepsCreationOrder(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	for range 12 {
+		graph.AddTask()
+	}
+	payload, err := graph.Snapshot().PromptProjection()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Tasks []struct{ ID string } `json:"tasks"`
+	}
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Tasks) != 12 {
+		t.Fatalf("tasks = %d, want 12", len(got.Tasks))
+	}
+	for i, task := range got.Tasks {
+		want := fmt.Sprintf("task-%d", i+1)
+		if task.ID != want {
+			t.Fatalf("tasks[%d].ID = %q, want %q (创建顺序被重排)", i, task.ID, want)
+		}
 	}
 }
