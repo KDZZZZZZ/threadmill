@@ -6,14 +6,14 @@ import (
 	"fmt"
 )
 
-// InjectSubscribedMemory 把当前订阅子图里的节点拼进系统提示词。
+// InjectSubscribedMemory 把当前订阅子图里的节点作为记忆状态块注入请求尾部。
 func InjectSubscribedMemory(loop *Loop) AssembleRequestHook {
 	return func(ctx context.Context, request Request) (Request, error) {
 		out, err := loop.execHidden(ctx, injectSubscribedMemoryToolName, json.RawMessage(`{}`))
 		if err != nil {
 			return request, err
 		}
-		request.SystemPrompt = joinSystemPrompt(request.SystemPrompt, out.Content)
+		request.SetBlock("memory", out.Content)
 		return request, nil
 	}
 }

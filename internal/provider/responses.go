@@ -140,6 +140,27 @@ func (provider *Responses) buildRequest(request agent.Request) (createResponseRe
 		}
 	}
 
+	for _, block := range request.StateBlocks {
+		if block.Text == "" {
+			continue
+		}
+		if err := appendInput(responseInput{
+			Role:    "system",
+			Content: block.Text,
+		}); err != nil {
+			return createResponseRequest{}, fmt.Errorf("encode state block %q: %w", block.ID, err)
+		}
+	}
+
+	if request.Suffix != "" {
+		if err := appendInput(responseInput{
+			Role:    "system",
+			Content: request.Suffix,
+		}); err != nil {
+			return createResponseRequest{}, fmt.Errorf("encode suffix: %w", err)
+		}
+	}
+
 	tools := make([]responseTool, len(request.Tools))
 	for i, definition := range request.Tools {
 		if err := definition.Validate(); err != nil {

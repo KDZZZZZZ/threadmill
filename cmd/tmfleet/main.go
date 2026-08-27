@@ -162,7 +162,7 @@ func newFleetProvider(delay time.Duration) *fleetProvider {
 }
 
 func (p *fleetProvider) Generate(ctx context.Context, request agent.Request) (agent.AssistantMessage, error) {
-	role := detectRole(request.SystemPrompt)
+	role := detectRole(request.WirePrompt())
 	p.calls[role].Add(1)
 	usage := p.simulateCache(request)
 	select {
@@ -209,10 +209,10 @@ func (p *fleetProvider) simulateCache(request agent.Request) *agent.Usage {
 	}
 }
 
-// wireText 近似 wire 上的输入字节：提示词段加全部消息正文。
+// wireText 近似 wire 上的输入字节：提示词段（含状态块与尾段）加全部消息正文。
 func wireText(request agent.Request) string {
 	var b strings.Builder
-	b.WriteString(request.SystemPrompt)
+	b.WriteString(request.WirePrompt())
 	for _, message := range request.Messages {
 		b.WriteByte(0)
 		b.WriteString(message.Content)

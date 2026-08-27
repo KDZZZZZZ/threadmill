@@ -24,15 +24,23 @@ func TestInjectCoordinationGraphAppendsLatestSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hook error = %v", err)
 	}
-	if !strings.HasPrefix(got.SystemPrompt, "yaml manager") {
-		t.Fatalf("system prompt = %q, want prefix yaml manager", got.SystemPrompt)
+	block := requestBlock(got, "coordination")
+	if !strings.Contains(block, "当前协调图（JSON：") {
+		t.Fatalf("coordination block = %q, want injected graph label", block)
 	}
-	if !strings.Contains(got.SystemPrompt, "当前协调图（JSON：") {
-		t.Fatalf("system prompt = %q, want injected graph label", got.SystemPrompt)
+	if !strings.Contains(block, `"ID":"task-1"`) {
+		t.Fatalf("coordination block = %q, want latest task-1", block)
 	}
-	if !strings.Contains(got.SystemPrompt, `"ID":"task-1"`) {
-		t.Fatalf("system prompt = %q, want latest task-1", got.SystemPrompt)
+}
+
+// requestBlock 返回请求里指定 ID 的状态块文本；不存在时返回空串。
+func requestBlock(request agent.Request, id string) string {
+	for _, block := range request.StateBlocks {
+		if block.ID == id {
+			return block.Text
+		}
 	}
+	return ""
 }
 
 func TestInjectCoordinationGraphNilGraph(t *testing.T) {

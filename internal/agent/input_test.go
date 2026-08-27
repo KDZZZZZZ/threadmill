@@ -71,16 +71,29 @@ func TestAssembleRequestInjectsUnionMemoryFromSubscribedSubgraphs(t *testing.T) 
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
 
-	want := DefaultSystemPrompt + "\n\n记忆：\n- shared fact\n- only in a"
-	if request.SystemPrompt != want {
-		t.Fatalf("system prompt = %q, want %q", request.SystemPrompt, want)
+	wantMemory := "记忆：\n- shared fact\n- only in a"
+	if got := blockText(request, "memory"); got != wantMemory {
+		t.Fatalf("memory block = %q, want %q", blockText(request, "memory"), wantMemory)
 	}
-	if strings.Contains(request.SystemPrompt, "only in c") {
-		t.Fatal("system prompt included a node from an unsubscribed subgraph")
+	if request.SystemPrompt != DefaultSystemPrompt {
+		t.Fatalf("system prompt = %q, want the bare default prompt", request.SystemPrompt)
+	}
+	if strings.Contains(request.WirePrompt(), "only in c") {
+		t.Fatal("wire prompt included a node from an unsubscribed subgraph")
 	}
 	if len(request.Messages) != 1 || request.Messages[0].Content != "start" {
 		t.Fatalf("messages = %#v, want the original user message only", request.Messages)
 	}
+}
+
+// blockText 返回请求里指定 ID 的状态块文本；不存在时返回空串。
+func blockText(request Request, id string) string {
+	for _, block := range request.StateBlocks {
+		if block.ID == id {
+			return block.Text
+		}
+	}
+	return ""
 }
 
 func TestAssembleRequestUsesCurrentSubgraphSubscriptions(t *testing.T) {
@@ -89,10 +102,10 @@ func TestAssembleRequestUsesCurrentSubgraphSubscriptions(t *testing.T) {
 	resetDefaultStore(t)
 
 	var loop *Loop
-	prompts := make([]string, 0, 2)
+	memories := make([]string, 0, 2)
 	model := ignoreOrganize(func(_ context.Context, request Request) (AssistantMessage, error) {
-		prompts = append(prompts, request.SystemPrompt)
-		if len(prompts) == 1 {
+		memories = append(memories, blockText(request, "memory"))
+		if len(memories) == 1 {
 			return AssistantMessage{ToolCalls: []agenttool.Call{{
 				ID:        "call-1",
 				Name:      "lookup",
@@ -145,17 +158,17 @@ func TestAssembleRequestUsesCurrentSubgraphSubscriptions(t *testing.T) {
 	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
-	if len(prompts) != 2 {
-		t.Fatalf("model request count = %d, want 2", len(prompts))
+	if len(memories) != 2 {
+		t.Fatalf("model request count = %d, want 2", len(memories))
 	}
 
-	wantFirst := DefaultSystemPrompt + "\n\n记忆：\n- memory a"
-	if prompts[0] != wantFirst {
-		t.Fatalf("first system prompt = %q, want %q", prompts[0], wantFirst)
+	wantFirst := "记忆：\n- memory a"
+	if memories[0] != wantFirst {
+		t.Fatalf("first memory block = %q, want %q", memories[0], wantFirst)
 	}
-	wantSecond := DefaultSystemPrompt + "\n\n记忆：\n- memory b"
-	if prompts[1] != wantSecond {
-		t.Fatalf("second system prompt = %q, want %q", prompts[1], wantSecond)
+	wantSecond := "记忆：\n- memory b"
+	if memories[1] != wantSecond {
+		t.Fatalf("second memory block = %q, want %q", memories[1], wantSecond)
 	}
 }
 
@@ -173,10 +186,10 @@ func TestAssembleRequestReadsLiveSubscribedSubgraphContent(t *testing.T) {
 		}},
 	})
 
-	prompts := make([]string, 0, 2)
+	memories := make([]string, 0, 2)
 	model := ignoreOrganize(func(_ context.Context, request Request) (AssistantMessage, error) {
-		prompts = append(prompts, request.SystemPrompt)
-		if len(prompts) == 1 {
+		memories = append(memories, blockText(request, "memory"))
+		if len(memories) == 1 {
 			return AssistantMessage{ToolCalls: []agenttool.Call{{
 				ID:        "call-1",
 				Name:      "refresh",
@@ -229,17 +242,17 @@ func TestAssembleRequestReadsLiveSubscribedSubgraphContent(t *testing.T) {
 	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
-	if len(prompts) != 2 {
-		t.Fatalf("model request count = %d, want 2", len(prompts))
+	if len(memories) != 2 {
+		t.Fatalf("model request count = %d, want 2", len(memories))
 	}
 
-	wantFirst := DefaultSystemPrompt + "\n\n记忆：\n- old memory"
-	if prompts[0] != wantFirst {
-		t.Fatalf("first system prompt = %q, want %q", prompts[0], wantFirst)
+	wantFirst := "记忆：\n- old memory"
+	if memories[0] != wantFirst {
+		t.Fatalf("first memory block = %q, want %q", memories[0], wantFirst)
 	}
-	wantSecond := DefaultSystemPrompt + "\n\n记忆：\n- new memory"
-	if prompts[1] != wantSecond {
-		t.Fatalf("second system prompt = %q, want %q", prompts[1], wantSecond)
+	wantSecond := "记忆：\n- new memory"
+	if memories[1] != wantSecond {
+		t.Fatalf("second memory block = %q, want %q", memories[1], wantSecond)
 	}
 }
 
@@ -248,10 +261,10 @@ func TestLoopsShareDefaultMemoryGraph(t *testing.T) {
 	defer cancel()
 	resetDefaultStore(t)
 
-	var prompt string
+	var memory string
 	reader, err := NewLoop(Config{
 		Provider: ignoreOrganize(func(_ context.Context, request Request) (AssistantMessage, error) {
-			prompt = request.SystemPrompt
+			memory = blockText(request, "memory")
 			return AssistantMessage{Content: "done"}, nil
 		}),
 		Hooks: Hooks{
@@ -283,9 +296,9 @@ func TestLoopsShareDefaultMemoryGraph(t *testing.T) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
 
-	want := DefaultSystemPrompt + "\n\n记忆：\n- shared fact"
-	if prompt != want {
-		t.Fatalf("reader system prompt = %q, want %q", prompt, want)
+	want := "记忆：\n- shared fact"
+	if memory != want {
+		t.Fatalf("reader memory block = %q, want %q", memory, want)
 	}
 }
 

@@ -636,11 +636,11 @@ func TestNewManagerLoopReplacePendingMutatesGraph(t *testing.T) {
 	if got != "done" {
 		t.Fatalf("Ask() = %q, want done", got)
 	}
-	if !strings.HasPrefix(request.SystemPrompt, "yaml manager") {
-		t.Fatalf("system prompt = %q, want prefix yaml manager", request.SystemPrompt)
+	if request.SystemPrompt != "yaml manager" {
+		t.Fatalf("system prompt = %q, want the bare yaml manager prompt", request.SystemPrompt)
 	}
-	if !strings.Contains(request.SystemPrompt, "当前协调图（JSON：") {
-		t.Fatalf("system prompt = %q, want injected graph", request.SystemPrompt)
+	if !strings.Contains(requestBlock(request, "coordination"), "当前协调图（JSON：") {
+		t.Fatalf("coordination block = %q, want injected graph", requestBlock(request, "coordination"))
 	}
 	if !hasTool(request.Tools, coordReplacePendingName) {
 		t.Fatal("manager missing replacePending")
@@ -648,8 +648,8 @@ func TestNewManagerLoopReplacePendingMutatesGraph(t *testing.T) {
 	if graph.taskCount() != 1 {
 		t.Fatalf("tasks = %d, want 1", graph.taskCount())
 	}
-	if !strings.Contains(after.SystemPrompt, `"ID":"task-1"`) {
-		t.Fatalf("prompt after replacePending = %q, want latest task-1", after.SystemPrompt)
+	if !strings.Contains(requestBlock(after, "coordination"), `"ID":"task-1"`) {
+		t.Fatalf("block after replacePending = %q, want latest task-1", requestBlock(after, "coordination"))
 	}
 }
 

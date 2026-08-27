@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
@@ -86,23 +85,20 @@ func (l *Loop) dropNodesFromMessages(ids map[string]struct{}) {
 }
 
 // RemindDropContextOnPressure 在请求接近上下文窗口时提醒模型调用丢弃工具。
+// 提醒写进 Suffix 段（wire 末尾），不碰静态前缀和历史。
 func RemindDropContextOnPressure(loop *Loop) AssembleRequestHook {
 	return func(_ context.Context, request Request) (Request, error) {
 		if loop == nil || loop.contextWindow <= 0 {
 			return request, nil
 		}
 		reminder := loop.dropContextReminderText()
-		if strings.Contains(request.SystemPrompt, reminder) {
+		if request.Suffix == reminder {
 			return request, nil
 		}
 		if estimateRequestTokens(request) < softContextThreshold(loop.contextWindow) {
 			return request, nil
 		}
-		if request.SystemPrompt == "" {
-			request.SystemPrompt = reminder
-			return request, nil
-		}
-		request.SystemPrompt = request.SystemPrompt + "\n\n" + reminder
+		request.Suffix = reminder
 		return request, nil
 	}
 }
@@ -119,7 +115,7 @@ func softContextThreshold(contextWindow int) int {
 }
 
 func estimateRequestTokens(request Request) int {
-	total := estimateTextTokens(request.SystemPrompt)
+	total := estimateTextTokens(request.WirePrompt())
 	for _, message := range request.Messages {
 		total += estimateTokens(message)
 	}

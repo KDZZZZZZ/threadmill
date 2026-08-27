@@ -77,10 +77,10 @@ func TestDropFromContextToolRemovesNodesFromHistoryNotGraph(t *testing.T) {
 func TestRemindDropContextOnPressure(t *testing.T) {
 	resetDefaultStore(t)
 
-	var prompt string
+	var suffix string
 	loop, err := NewLoop(Config{
 		Provider: modelFunc(func(_ context.Context, request Request) (AssistantMessage, error) {
-			prompt = request.SystemPrompt
+			suffix = request.Suffix
 			return AssistantMessage{Content: "done"}, nil
 		}),
 		ContextWindow: 40,
@@ -98,17 +98,17 @@ func TestRemindDropContextOnPressure(t *testing.T) {
 	if _, err := loop.Ask(context.Background(), "hi"); err != nil {
 		t.Fatalf("Ask() error = %v", err)
 	}
-	if strings.Contains(prompt, dropContextPressureReminder) {
-		t.Fatalf("prompt = %q, want no reminder under the soft threshold", prompt)
+	if strings.Contains(suffix, dropContextPressureReminder) {
+		t.Fatalf("suffix = %q, want no reminder under the soft threshold", suffix)
 	}
 
 	if _, err := loop.Ask(context.Background(), strings.Repeat("n", 400)); err != nil {
 		t.Fatalf("Ask() error = %v", err)
 	}
-	if !strings.Contains(prompt, dropContextPressureReminder) {
-		t.Fatalf("prompt = %q, want the drop-context reminder", prompt)
+	if !strings.Contains(suffix, dropContextPressureReminder) {
+		t.Fatalf("suffix = %q, want the drop-context reminder", suffix)
 	}
-	if !strings.Contains(prompt, memoryDropFromContextToolName) {
-		t.Fatalf("prompt = %q, want the tool name", prompt)
+	if !strings.Contains(suffix, memoryDropFromContextToolName) {
+		t.Fatalf("suffix = %q, want the tool name", suffix)
 	}
 }
