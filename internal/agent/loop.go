@@ -82,6 +82,9 @@ type Loop struct {
 	usedToolCallIDs          map[string]struct{}
 	subscribedSubgraphs      []string
 	fixedSubscribedSubgraphs []string
+	memoryBlockRev           int64
+	memoryBlockSubs          []string
+	memoryBlockText          string
 	agentID                  string
 	running                  bool
 	compactPrompt            string

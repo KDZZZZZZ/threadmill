@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	"github.com/KDZZZZZZ/threadmill/internal/env"
+	"github.com/KDZZZZZZ/threadmill/internal/event"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -206,7 +208,9 @@ func TestAssembleRequestReadsLiveSubscribedSubgraphContent(t *testing.T) {
 			InputSchema: json.RawMessage(`{"type":"object"}`),
 		},
 		execute: func(context.Context, agenttool.Call) (agenttool.Output, error) {
+			// 生产写路径（memory 工具、compact、organizer）都会递增 revision。
 			store.Save("env-1", ctxgraph.Graph{
+				Revision: store.Revision("env-1") + 1,
 				Nodes: []ctxgraph.Node{{
 					ID:          "n1",
 					Statement:   "new memory",
@@ -361,4 +365,112 @@ func resetDefaultStore(t *testing.T) {
 	t.Cleanup(func() {
 		ctxgraph.Update(ctxgraph.Copy{})
 	})
+}
+
+func TestInjectSubscribedMemoryReusesUnchangedProjection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resetDefaultStore(t)
+
+	injections := 0
+	memorySeen := make([]string, 0, 2)
+	bus := event.NewBus(func(_ context.Context, ev event.RuntimeEvent) {
+		if ev.Kind == event.KindMemory && ev.Phase == event.PhaseStart &&
+			ev.Name == injectSubscribedMemoryToolName {
+			injections++
+		}
+	})
+
+	store := ctxgraph.NewStore()
+	var loop *Loop
+	saveBumpedGraph := func(context.Context, agenttool.Call) (agenttool.Output, error) {
+		store.Save("env-1", ctxgraph.Graph{
+			Revision: store.Revision("env-1") + 1,
+			Nodes: []ctxgraph.Node{{
+				ID:          "n2",
+				Statement:   "fresh fact",
+				SubgraphIDs: []string{"sg-a"},
+			}},
+		})
+		return agenttool.Output{Content: "ok"}, nil
+	}
+	refresh := &testTool{
+		definition: agenttool.Definition{
+			Name:        "refresh",
+			Description: "Refresh memory",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		execute: saveBumpedGraph,
+	}
+	mark := &testTool{
+		definition: agenttool.Definition{
+			Name:        "mark",
+			Description: "Touch nothing",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		execute: func(context.Context, agenttool.Call) (agenttool.Output, error) {
+			return agenttool.Output{Content: "ok"}, nil
+		},
+	}
+
+	memorySeen = make([]string, 0, 3)
+	model := modelFunc(func(_ context.Context, request Request) (AssistantMessage, error) {
+		memorySeen = append(memorySeen, blockText(request, "memory"))
+		switch len(memorySeen) {
+		case 1:
+			return AssistantMessage{ToolCalls: []agenttool.Call{{
+				ID:        "call-1",
+				Name:      "refresh",
+				Arguments: json.RawMessage(`{}`),
+			}}}, nil
+		case 2:
+			return AssistantMessage{ToolCalls: []agenttool.Call{{
+				ID:        "call-2",
+				Name:      "mark",
+				Arguments: json.RawMessage(`{}`),
+			}}}, nil
+		}
+		return AssistantMessage{Content: "done"}, nil
+	})
+	loop, err := NewLoop(Config{
+		Provider: model,
+		Tools:    []agenttool.Tool{refresh, mark},
+		Events:   bus,
+		Hooks: Hooks{AfterTurn: []AfterTurnHook{
+			func(context.Context, UserMessage, TurnResult) error {
+				cancel()
+				return nil
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := MemoryHooks(loop)
+	if err := loop.AddHooks(Hooks{AssembleRequest: hooks.AssembleRequest}); err != nil {
+		t.Fatal(err)
+	}
+	bindEnvGraph(t, loop, store, "env-1", ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{{
+			ID:          "n1",
+			Statement:   "shared fact",
+			SubgraphIDs: []string{"sg-a"},
+		}},
+	})
+	loop.SetSubscribedSubgraphs([]string{"sg-a"})
+	loop.Enqueue(UserMessage{Content: "start"})
+
+	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if len(memorySeen) != 3 {
+		t.Fatalf("model requests = %d, want 3", len(memorySeen))
+	}
+	wantProjections := []string{"记忆：\n- shared fact", "记忆：\n- fresh fact", "记忆：\n- fresh fact"}
+	if !reflect.DeepEqual(memorySeen, wantProjections) {
+		t.Fatalf("memory blocks = %q, want %q", memorySeen, wantProjections)
+	}
+	if injections != 2 {
+		t.Fatalf("hidden injections = %d, want one per distinct projection", injections)
+	}
 }

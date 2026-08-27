@@ -2,13 +2,12 @@ package coordination
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 )
 
-// InjectCoordinationGraph 在每次调用模型前把最新协调图快照拼进系统提示。
+// InjectCoordinationGraph 在每次调用模型前把最新协调图快照的稳定投影注入请求状态块。
 func InjectCoordinationGraph(graph *Graph) agent.Hooks {
 	return agent.Hooks{
 		AssembleRequest: []agent.AssembleRequestHook{
@@ -23,11 +22,11 @@ func InjectCoordinationGraph(graph *Graph) agent.Hooks {
 				if err != nil {
 					return request, err
 				}
-				payload, err := json.Marshal(snap)
+				payload, err := snap.PromptProjection()
 				if err != nil {
 					return request, fmt.Errorf("encode coordination graph: %w", err)
 				}
-				extra := "当前协调图（JSON：tasks[].id/info/outcome/sequence，edges[].from/to 为节点关联，helps 为拆分请求）：\n" + string(payload)
+				extra := "当前协调图（JSON：tasks[].id/info/outcome/sequence，edges[].from/to 为节点关联）：\n" + string(payload)
 				request.SetBlock("coordination", extra)
 				return request, nil
 			},

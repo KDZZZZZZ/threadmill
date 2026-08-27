@@ -8,8 +8,10 @@ package coordination
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -237,6 +239,28 @@ type Snapshot struct {
 	Executing bool   `json:"executing"`
 	Tasks     []Task `json:"tasks"`
 	Edges     []Edge `json:"edges"`
+}
+
+// PromptProjection 返回注入提示词用的稳定投影：剥掉逐请求易变的 Revision 和
+// Executing（模型从工具返回里已能看到等价信息），Tasks 按 ID、Edges 按 From/To 排序，
+// 保证图内容不变时字节逐请求一致，不因协调整理打掉 manager 的历史前缀缓存。
+func (s Snapshot) PromptProjection() ([]byte, error) {
+	tasks := append([]Task(nil), s.Tasks...)
+	sort.Slice(tasks, func(i, j int) bool { return tasks[i].ID < tasks[j].ID })
+	edges := append([]Edge(nil), s.Edges...)
+	sort.Slice(edges, func(i, j int) bool {
+		if edges[i].From != edges[j].From {
+			return edges[i].From < edges[j].From
+		}
+		if edges[i].To != edges[j].To {
+			return edges[i].To < edges[j].To
+		}
+		return edges[i].Kind < edges[j].Kind
+	})
+	return json.Marshal(struct {
+		Tasks []Task `json:"tasks"`
+		Edges []Edge `json:"edges"`
+	}{Tasks: tasks, Edges: edges})
 }
 
 // Snapshot 返回当前 tasks 和边；Run 期间 executing 为 true。

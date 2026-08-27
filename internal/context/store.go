@@ -97,6 +97,16 @@ func (s *Store) Load(envID string) Graph {
 	return graph.Clone()
 }
 
+// Revision 返回该环境的图版本号，不拷贝图内容，供缓存层作失效提示。
+func (s *Store) Revision(envID string) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if graph, ok := s.graphs[envID]; ok {
+		return graph.Revision
+	}
+	return 0
+}
+
 // Save 用拷贝替换该环境的图快照。
 func (s *Store) Save(envID string, graph Graph) error {
 	s.mu.Lock()
@@ -172,6 +182,11 @@ type EnvView struct {
 // Snapshot 返回该环境的图拷贝。
 func (v *EnvView) Snapshot() Graph {
 	return v.store.Load(v.envID)
+}
+
+// Revision 返回该环境当前图的版本号，不产生拷贝。
+func (v *EnvView) Revision() int64 {
+	return v.store.Revision(v.envID)
 }
 
 // Commit 用拷贝替换该环境的图快照。
