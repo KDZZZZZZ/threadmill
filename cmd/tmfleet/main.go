@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	"github.com/KDZZZZZZ/threadmill/internal/coordination"
+	"github.com/KDZZZZZZ/threadmill/internal/event"
 	"github.com/KDZZZZZZ/threadmill/internal/exec"
 	"github.com/KDZZZZZZ/threadmill/internal/provider"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
@@ -91,10 +93,12 @@ func run(spawns int, delay time.Duration, slots, files int, timeout time.Duratio
 
 	mock := newFleetProvider(delay)
 	stores := coordination.Stores{Memory: memory, Files: filesStore, Exec: sched}
+	cacheStats := newCacheReporter()
 	overlay := agent.FileOverlay{
 		Prompts:    cfg.Prompts,
 		Curation:   cfg.Memory.Curation,
 		NamedTools: graph.HelpTools(nil),
+		Events:     event.NewBus(cacheStats.Handle),
 	}
 	assemble := coordination.Assemble(
 		stores, mock, cfg.Agents, nil, cfg.LLM.ContextWindow, checkpoints,
@@ -112,6 +116,7 @@ func run(spawns int, delay time.Duration, slots, files int, timeout time.Duratio
 		fmt.Printf("root verifier tail: %s\n", tail(out, 200))
 	}
 	mock.report()
+	cacheStats.report()
 	vs := filesStore.Stats()
 	es := sched.Stats()
 	fmt.Printf(
@@ -140,22 +145,26 @@ func run(spawns int, delay time.Duration, slots, files int, timeout time.Duratio
 }
 
 // fleetProvider 按角色脚本返回模型消息；用系统提示词关键词区分角色。
+// 同时按相邻请求的字节前缀重叠合成 usage，让事件流携带可对比的
+// cached_tokens/tokens 比率（mock 不产生真实计费）。
 type fleetProvider struct {
-	delay time.Duration
-	mu    sync.Mutex
-	seq   int
-	calls map[string]*atomic.Int64
+	delay     time.Duration
+	mu        sync.Mutex
+	seq       int
+	calls     map[string]*atomic.Int64
+	lastInput map[string]string
 }
 
 func newFleetProvider(delay time.Duration) *fleetProvider {
 	return &fleetProvider{delay: delay, calls: map[string]*atomic.Int64{
 		"planner": {}, "executor": {}, "verifier": {}, "organizer": {}, "compact": {},
-	}}
+	}, lastInput: map[string]string{}}
 }
 
 func (p *fleetProvider) Generate(ctx context.Context, request agent.Request) (agent.AssistantMessage, error) {
 	role := detectRole(request.SystemPrompt)
 	p.calls[role].Add(1)
+	usage := p.simulateCache(request)
 	select {
 	case <-ctx.Done():
 		return agent.AssistantMessage{}, ctx.Err()
@@ -166,6 +175,71 @@ func (p *fleetProvider) Generate(ctx context.Context, request agent.Request) (ag
 	seq := p.seq
 	p.mu.Unlock()
 
+	message, err := p.script(request, role, seq)
+	if err != nil {
+		return agent.AssistantMessage{}, err
+	}
+	message.Usage = usage
+	return message, nil
+}
+
+// simulateCache 估算 Responses 前缀缓存行为：请求输入折算成 token，
+// 与同一 agent 上一次请求的共享字节前缀达到 1024 token 才计入命中。
+func (p *fleetProvider) simulateCache(request agent.Request) *agent.Usage {
+	full := wireText(request)
+	inputTokens := estimateTokensOf(full)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	key := request.CacheKey
+	if key == "" {
+		key = "?"
+	}
+	shared := commonPrefixLen(full, p.lastInput[key])
+	p.lastInput[key] = full
+
+	cachedTokens := shared / 4
+	if cachedTokens < 1024 {
+		cachedTokens = 0
+	}
+	return &agent.Usage{
+		InputTokens:  inputTokens,
+		CachedTokens: min(cachedTokens, inputTokens),
+		TotalTokens:  inputTokens,
+	}
+}
+
+// wireText 近似 wire 上的输入字节：提示词段加全部消息正文。
+func wireText(request agent.Request) string {
+	var b strings.Builder
+	b.WriteString(request.SystemPrompt)
+	for _, message := range request.Messages {
+		b.WriteByte(0)
+		b.WriteString(message.Content)
+		if message.ToolResult != nil {
+			b.WriteString(message.ToolResult.Content)
+		}
+	}
+	return b.String()
+}
+
+func commonPrefixLen(a, b string) int {
+	n := min(len(a), len(b))
+	i := 0
+	for i < n && a[i] == b[i] {
+		i++
+	}
+	return i
+}
+
+func estimateTokensOf(text string) int {
+	if text == "" {
+		return 0
+	}
+	return (len(text) + 3) / 4
+}
+
+func (p *fleetProvider) script(request agent.Request, role string, seq int) (agent.AssistantMessage, error) {
 	if role == "compact" {
 		return agent.AssistantMessage{Content: `{"nodes":[{"kind":"fact","statement":"fleet 压测压缩节点 pytest 退出码 0","status":"accepted","subgraph_ids":[]}]}`}, nil
 	}
@@ -268,4 +342,52 @@ func peakRSS() string {
 		}
 	}
 	return "?"
+}
+
+// cacheReporter 聚合 model end 事件的 cached/input 比率，压测结束时按 agentID 打印。
+type cacheReporter struct {
+	mu    sync.Mutex
+	tally map[string]*cacheTotals
+}
+
+type cacheTotals struct {
+	input  uint64
+	cached uint64
+}
+
+func newCacheReporter() *cacheReporter {
+	return &cacheReporter{tally: map[string]*cacheTotals{}}
+}
+
+func (r *cacheReporter) Handle(_ context.Context, ev event.RuntimeEvent) {
+	if ev.Kind != event.KindModel || ev.Phase != event.PhaseEnd {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	total, ok := r.tally[ev.AgentID]
+	if !ok {
+		total = &cacheTotals{}
+		r.tally[ev.AgentID] = total
+	}
+	total.input += uint64(max(ev.Tokens, 0))
+	total.cached += uint64(max(ev.CachedTokens, 0))
+}
+
+func (r *cacheReporter) report() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	keys := make([]string, 0, len(r.tally))
+	for key := range r.tally {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		total := r.tally[key]
+		ratio := "n/a"
+		if total.input > 0 {
+			ratio = fmt.Sprintf("%.1f%%", float64(total.cached)/float64(total.input)*100)
+		}
+		fmt.Printf("cache[%s]=cached=%d input=%d ratio=%s\n", key, total.cached, total.input, ratio)
+	}
 }

@@ -13,6 +13,8 @@ type Request struct {
 	SystemPrompt string
 	Messages     []Message
 	Tools        []agenttool.Definition
+	// CacheKey 进入 Responses 的 prompt_cache_key，让同一 Agent 的请求粘在同一个缓存路由上。
+	CacheKey string
 }
 
 // cloneRequest 深拷贝模型请求中的消息、调用参数和工具 schema。
@@ -25,6 +27,7 @@ func cloneRequest(request Request) Request {
 		SystemPrompt: request.SystemPrompt,
 		Messages:     cloneMessages(request.Messages),
 		Tools:        definitions,
+		CacheKey:     request.CacheKey,
 	}
 }
 
@@ -72,6 +75,7 @@ func (l *Loop) assembleRequest() Request {
 		SystemPrompt: l.agentConfig.systemPrompt,
 		Messages:     cloneMessages(l.messages),
 		Tools:        definitions,
+		CacheKey:     l.agentID,
 	}
 }
 

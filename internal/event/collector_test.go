@@ -97,7 +97,7 @@ func TestCollectorTracksTasksAndNeverMakesActiveNegative(t *testing.T) {
 		t.Fatalf("organizer counted as hidden memory stream idle: %s", idle)
 	}
 	collector.Handle(context.Background(), ModelEnd(
-		"task-1:custom-organizer", "model", time.Now().Add(-time.Millisecond), 0, 7, nil,
+		"task-1:custom-organizer", "model", time.Now().Add(-time.Millisecond), 0, 7, 0, nil,
 	))
 	collector.Handle(context.Background(), MemoryOrganized(
 		"task-1:custom-organizer",
@@ -236,5 +236,21 @@ func TestCollectorReportsActiveModelStreamIdle(t *testing.T) {
 	})
 	if idle := collector.Snapshot().ModelStreamIdle; idle != 0 {
 		t.Fatalf("idle after completion = %s", idle)
+	}
+}
+
+func TestCollectorAccumulatesCachedTokens(t *testing.T) {
+	t.Parallel()
+
+	collector := NewCollector()
+	collector.Handle(context.Background(), ModelEnd(
+		"planner", "gpt-5", time.Now().Add(-time.Millisecond), 0, 1500, 800, nil,
+	))
+	collector.Handle(context.Background(), ModelEnd(
+		"verifier", "gpt-5", time.Now().Add(-time.Millisecond), 0, 500, 0, nil,
+	))
+	got := collector.Snapshot()
+	if got.Tokens != 2000 || got.CachedTokens != 800 {
+		t.Fatalf("usage = tokens %d cached %d, want 2000/800", got.Tokens, got.CachedTokens)
 	}
 }
