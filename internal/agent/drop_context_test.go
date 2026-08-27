@@ -112,3 +112,58 @@ func TestRemindDropContextOnPressure(t *testing.T) {
 		t.Fatalf("suffix = %q, want the tool name", suffix)
 	}
 }
+
+func TestDropFromContextKeepsOldHistoryBytes(t *testing.T) {
+	resetDefaultStore(t)
+
+	loop, err := NewLoop(Config{
+		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+			return AssistantMessage{Content: "unused"}, nil
+		}),
+		ContextWindow: 200, // 尾部可改写预算 = 100 token ≈ 400 字节
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldDetail := `[{"id":"n-drop","statement":"old drop me"}]` + strings.Repeat("x", 500)
+	recentDetail := `[{"id":"n-drop","statement":"recent drop me"}]`
+	if err := loop.appendMessage(Message{
+		Role:    RoleUser,
+		Content: oldDetail,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.appendMessage(Message{
+		Role:    RoleTool,
+		Content: recentDetail,
+		ToolResult: &agenttool.Result{
+			CallID:  "call-2",
+			Name:    "memory_neighbors",
+			Content: recentDetail,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := DropFromContextTool(loop).Execute(context.Background(), agenttool.Call{
+		ID:        "call-drop",
+		Name:      memoryDropFromContextToolName,
+		Arguments: json.RawMessage(`{"node_ids":["n-drop"]}`),
+	}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	messages := loop.Messages()
+	if len(messages) != 2 {
+		t.Fatalf("messages = %d, want 2", len(messages))
+	}
+	if !strings.Contains(messages[0].Content, "n-drop") {
+		t.Fatalf("old message rewritten: %q", messages[0].Content)
+	}
+	for _, part := range []string{messages[1].Content, messages[1].ToolResult.Content} {
+		if strings.Contains(part, "n-drop") {
+			t.Fatalf("recent message kept the dropped detail: %q", part)
+		}
+	}
+}

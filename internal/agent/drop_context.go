@@ -67,10 +67,14 @@ func (t *dropFromContextTool) Execute(ctx context.Context, call agenttool.Call) 
 	return agenttool.Output{Content: string(payload)}, nil
 }
 
+// dropNodesFromMessages 只重写最近 dropRewriteBudget 之内的消息；更早的历史保持
+// 字节不变——丢弃详情发生在上下文压力期，此时前缀最长、缓存最值钱，整段改写
+// 会作废全部历史缓存。对旧消息的内容性清理交给随后的 compact 切点。
 func (l *Loop) dropNodesFromMessages(ids map[string]struct{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for i := range l.messages {
+	start := dropRewriteStart(l.messages, l.contextWindow)
+	for i := start; i < len(l.messages); i++ {
 		l.messages[i].Content = dropNodesFromJSON(l.messages[i].Content, ids)
 		if l.messages[i].ToolResult == nil {
 			continue
@@ -82,6 +86,19 @@ func (l *Loop) dropNodesFromMessages(ids map[string]struct{}) {
 		}
 		l.messages[i].ToolResult = &result
 	}
+}
+
+// dropRewriteStart 返回可原地改写的起始下标：从最新消息向旧累积 token，
+// 预算（与 compact 尾部保留同源）用满后停下；更早的全部归入受保护前缀。
+func dropRewriteStart(messages []Message, contextWindow int) int {
+	budget := keepRecentBudget(contextWindow)
+	accumulated := 0
+	start := len(messages)
+	for start > 0 && accumulated+estimateTokens(messages[start-1]) <= budget {
+		start--
+		accumulated += estimateTokens(messages[start])
+	}
+	return start
 }
 
 // RemindDropContextOnPressure 在请求接近上下文窗口时提醒模型调用丢弃工具。
