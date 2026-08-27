@@ -21,7 +21,6 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
-
 // stateBlocksText 合并请求的状态块文本（记忆与协调图投影），供断言投影内容。
 func stateBlocksText(request agent.Request) string {
 	var b strings.Builder
