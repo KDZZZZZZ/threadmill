@@ -169,7 +169,7 @@ func (t injectSubscribedMemoryTool) Execute(ctx context.Context, call agenttool.
 	if !ok {
 		return agenttool.Output{}, fmt.Errorf("%s: missing transcript", injectSubscribedMemoryToolName)
 	}
-	content := assembleSystemPrompt("", t.memory.Snapshot(), transcript.Subscribed)
+	content := formatMemory(t.memory.Snapshot().NodesInSubgraphs(transcript.Subscribed))
 	return agenttool.Output{Content: content}, nil
 }
 

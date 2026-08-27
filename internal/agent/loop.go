@@ -82,6 +82,9 @@ type Loop struct {
 	usedToolCallIDs          map[string]struct{}
 	subscribedSubgraphs      []string
 	fixedSubscribedSubgraphs []string
+	memoryBlockRev           int64
+	memoryBlockSubs          []string
+	memoryBlockText          string
 	agentID                  string
 	running                  bool
 	compactPrompt            string
@@ -488,8 +491,10 @@ func (p eventProvider) Generate(ctx context.Context, request Request) (Assistant
 	started := time.Now()
 	message, err := p.inner.Generate(ctx, request)
 	tokens := 0
+	cachedTokens := 0
 	if message.Usage != nil {
 		tokens = message.Usage.TotalTokens
+		cachedTokens = message.Usage.CachedTokens
 	}
 	end := event.ModelEnd(
 		p.loop.agentID,
@@ -497,6 +502,7 @@ func (p eventProvider) Generate(ctx context.Context, request Request) (Assistant
 		started,
 		len(message.ToolCalls),
 		tokens,
+		cachedTokens,
 		err,
 	)
 	end.Retries = retries

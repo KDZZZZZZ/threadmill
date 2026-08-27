@@ -140,6 +140,27 @@ func (provider *Responses) buildRequest(request agent.Request) (createResponseRe
 		}
 	}
 
+	for _, block := range request.StateBlocks {
+		if block.Text == "" {
+			continue
+		}
+		if err := appendInput(responseInput{
+			Role:    "system",
+			Content: block.Text,
+		}); err != nil {
+			return createResponseRequest{}, fmt.Errorf("encode state block %q: %w", block.ID, err)
+		}
+	}
+
+	if request.Suffix != "" {
+		if err := appendInput(responseInput{
+			Role:    "system",
+			Content: request.Suffix,
+		}); err != nil {
+			return createResponseRequest{}, fmt.Errorf("encode suffix: %w", err)
+		}
+	}
+
 	tools := make([]responseTool, len(request.Tools))
 	for i, definition := range request.Tools {
 		if err := definition.Validate(); err != nil {
@@ -160,24 +181,25 @@ func (provider *Responses) buildRequest(request agent.Request) (createResponseRe
 
 	// store=false 时回放加密 reasoning 项，保持工具调用后的无状态续接。
 	// 协议来源：https://platform.openai.com/docs/guides/conversation-state
+	// 不再设置 Instructions：input[0] 的 system 项已承担角色提示，双写会浪费输入 token。
 	return createResponseRequest{
-		Model:        provider.model,
-		Instructions: request.SystemPrompt,
-		Input:        input,
-		Tools:        tools,
-		Store:        false,
-		Include:      []string{"reasoning.encrypted_content"},
+		Model:          provider.model,
+		Input:          input,
+		Tools:          tools,
+		Store:          false,
+		Include:        []string{"reasoning.encrypted_content"},
+		PromptCacheKey: request.CacheKey,
 	}, nil
 }
 
 type createResponseRequest struct {
-	Model        string            `json:"model"`
-	Instructions string            `json:"instructions,omitempty"`
-	Input        []json.RawMessage `json:"input"`
-	Tools        []responseTool    `json:"tools,omitempty"`
-	Store        bool              `json:"store"`
-	Include      []string          `json:"include"`
-	Stream       bool              `json:"stream,omitempty"`
+	Model          string            `json:"model"`
+	Input          []json.RawMessage `json:"input"`
+	Tools          []responseTool    `json:"tools,omitempty"`
+	Store          bool              `json:"store"`
+	Include        []string          `json:"include"`
+	Stream         bool              `json:"stream,omitempty"`
+	PromptCacheKey string            `json:"prompt_cache_key,omitempty"`
 }
 
 // responseInput 覆盖当前 Agent 用到的文本消息、函数调用和函数结果三种输入项。

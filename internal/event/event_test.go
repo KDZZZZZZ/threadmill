@@ -26,11 +26,11 @@ func TestNormalizeModelStart(t *testing.T) {
 
 func TestNormalizeModelEnd(t *testing.T) {
 	started := time.Now().Add(-12 * time.Millisecond)
-	got := ModelEnd("planner", "deepseek", started, 1, 40, nil)
+	got := ModelEnd("planner", "deepseek", started, 1, 40, 32, nil)
 	if got.Kind != KindModel || got.Phase != PhaseEnd {
 		t.Fatalf("kind/phase = %s/%s, want model/end", got.Kind, got.Phase)
 	}
-	if got.Name != "deepseek" || got.ToolCalls != 1 || got.Tokens != 40 {
+	if got.Name != "deepseek" || got.ToolCalls != 1 || got.Tokens != 40 || got.CachedTokens != 32 {
 		t.Fatalf("got %#v", got)
 	}
 	if got.Duration < 12*time.Millisecond {
@@ -39,7 +39,7 @@ func TestNormalizeModelEnd(t *testing.T) {
 }
 
 func TestNormalizeModelEndError(t *testing.T) {
-	got := ModelEnd("planner", "", time.Time{}, 0, 0, errors.New("provider down"))
+	got := ModelEnd("planner", "", time.Time{}, 0, 0, 0, errors.New("provider down"))
 	if got.Err != "provider down" || !got.IsError {
 		t.Fatalf("error fields = %#v", got)
 	}

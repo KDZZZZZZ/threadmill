@@ -55,6 +55,7 @@ type MetricsSnapshot struct {
 	Task                      OperationMetrics `json:"task"`
 	Memory                    OperationMetrics `json:"memory"`
 	Tokens                    uint64           `json:"tokens"`
+	CachedTokens              uint64           `json:"cached_tokens"`
 	ToolCalls                 uint64           `json:"tool_calls"`
 	ModelRetries              uint64           `json:"model_retries"`
 	MemoryTokens              uint64           `json:"memory_tokens"`
@@ -178,6 +179,7 @@ type Collector struct {
 	modelFlights              map[string]modelFlight
 	memoryFlights             map[string]modelFlight
 	tokens                    uint64
+	cachedTokens              uint64
 	toolCalls                 uint64
 	modelRetries              uint64
 	memoryTokens              uint64
@@ -275,6 +277,7 @@ func (c *Collector) Handle(_ context.Context, ev RuntimeEvent) {
 		if ev.Kind == KindModel {
 			delete(c.modelFlights, ev.AgentID)
 			c.tokens += uint64(max(ev.Tokens, 0))
+			c.cachedTokens += uint64(max(ev.CachedTokens, 0))
 			c.toolCalls += uint64(max(ev.ToolCalls, 0))
 			if _, ok := c.memoryOrganizerFlights[ev.AgentID]; ok {
 				c.memoryOrganizerFlights[ev.AgentID] += uint64(max(ev.Tokens, 0))
@@ -331,6 +334,7 @@ func (c *Collector) Snapshot() MetricsSnapshot {
 		Task:                      c.task.snapshot(),
 		Memory:                    c.memory.snapshot(),
 		Tokens:                    c.tokens,
+		CachedTokens:              c.cachedTokens,
 		ToolCalls:                 c.toolCalls,
 		ModelRetries:              c.modelRetries,
 		MemoryTokens:              c.memoryTokens,

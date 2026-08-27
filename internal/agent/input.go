@@ -8,11 +8,52 @@ import (
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
+// Block 是插在消息历史之后的一段状态文本（记忆投影、协调图投影等 C3 块）。
+type Block struct {
+	ID   string // 例如 "memory"、"coordination"
+	Text string
+}
+
 // Request 是一次模型生成所需的静态 Agent 配置和动态上下文快照。
+// wire 顺序是 静态前缀（C0 角色提示 + tools）→ append-only 历史（Messages）
+// → 易变状态（StateBlocks）→ 当轮尾部（Suffix）；把易变块移到历史之后，
+// 其变动只会作废尾部缓存，不再打掉整段前缀。
 type Request struct {
 	SystemPrompt string
 	Messages     []Message
+	StateBlocks  []Block
+	Suffix       string
 	Tools        []agenttool.Definition
+	// CacheKey 进入 Responses 的 prompt_cache_key，让同一 Agent 的请求粘在同一个缓存路由上。
+	CacheKey string
+}
+
+// SetBlock 按 ID 覆盖或追加状态块，使 hook 顺序无关且幂等。
+func (r *Request) SetBlock(id, text string) {
+	for i := range r.StateBlocks {
+		if r.StateBlocks[i].ID == id {
+			r.StateBlocks[i].Text = text
+			return
+		}
+	}
+	r.StateBlocks = append(r.StateBlocks, Block{ID: id, Text: text})
+}
+
+// WirePrompt 拼接角色提示、全部状态块和尾段，供只读消费者（角色识别、token 估算）使用。
+func (r Request) WirePrompt() string {
+	parts := make([]string, 0, len(r.StateBlocks)+2)
+	if r.SystemPrompt != "" {
+		parts = append(parts, r.SystemPrompt)
+	}
+	for _, block := range r.StateBlocks {
+		if block.Text != "" {
+			parts = append(parts, block.Text)
+		}
+	}
+	if r.Suffix != "" {
+		parts = append(parts, r.Suffix)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // cloneRequest 深拷贝模型请求中的消息、调用参数和工具 schema。
@@ -21,10 +62,15 @@ func cloneRequest(request Request) Request {
 	for i, definition := range request.Tools {
 		definitions[i] = cloneDefinition(definition)
 	}
+	blocks := make([]Block, len(request.StateBlocks))
+	copy(blocks, request.StateBlocks)
 	return Request{
 		SystemPrompt: request.SystemPrompt,
 		Messages:     cloneMessages(request.Messages),
+		StateBlocks:  blocks,
+		Suffix:       request.Suffix,
 		Tools:        definitions,
+		CacheKey:     request.CacheKey,
 	}
 }
 
@@ -72,21 +118,8 @@ func (l *Loop) assembleRequest() Request {
 		SystemPrompt: l.agentConfig.systemPrompt,
 		Messages:     cloneMessages(l.messages),
 		Tools:        definitions,
+		CacheKey:     l.agentID,
 	}
-}
-
-func assembleSystemPrompt(systemPrompt string, graph ctxgraph.Graph, subscribed []string) string {
-	return joinSystemPrompt(systemPrompt, formatMemory(graph.NodesInSubgraphs(subscribed)))
-}
-
-func joinSystemPrompt(systemPrompt, extra string) string {
-	if extra == "" {
-		return systemPrompt
-	}
-	if systemPrompt == "" {
-		return extra
-	}
-	return systemPrompt + "\n\n" + extra
 }
 
 func formatMemory(nodes []ctxgraph.Node) string {

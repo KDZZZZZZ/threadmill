@@ -951,8 +951,8 @@ func TestLoopCompactsOverflowIntoSubscribedMemoryAndKeepsTail(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("model calls = %d, want 2", calls)
 	}
-	if !strings.Contains(second.SystemPrompt, "start") {
-		t.Fatalf("second system prompt = %q, want compacted user memory", second.SystemPrompt)
+	if !strings.Contains(blockText(second, "memory"), "start") {
+		t.Fatalf("second memory block = %q, want compacted user memory", blockText(second, "memory"))
 	}
 	if len(second.Messages) == 0 || second.Messages[0].Role != RoleAssistant {
 		t.Fatalf("second messages = %#v, want the kept assistant tail", second.Messages)
@@ -964,11 +964,11 @@ func TestLoopCommitsTailIntoMemoryWhenTurnEnds(t *testing.T) {
 	defer cancel()
 	resetDefaultStore(t)
 
-	var secondPrompt string
+	var secondMemory string
 	turns := 0
 	model := withOrganizeJSON(func(_ context.Context, request Request) (AssistantMessage, error) {
 		if turns == 1 {
-			secondPrompt = request.SystemPrompt
+			secondMemory = blockText(request, "memory")
 		}
 		return AssistantMessage{Content: "ok", Usage: &Usage{TotalTokens: 3}}, nil
 	})
@@ -1005,8 +1005,8 @@ func TestLoopCommitsTailIntoMemoryWhenTurnEnds(t *testing.T) {
 	if len(loop.Messages()) != 0 {
 		t.Fatalf("messages after last turn = %#v, want empty", loop.Messages())
 	}
-	if !strings.Contains(secondPrompt, "remember blue") {
-		t.Fatalf("second system prompt = %q, want committed first-turn memory", secondPrompt)
+	if !strings.Contains(secondMemory, "remember blue") {
+		t.Fatalf("second memory block = %q, want committed first-turn memory", secondMemory)
 	}
 
 	graph := store.Load("env-1")

@@ -50,6 +50,7 @@ func CompactHistory(
 		graph,
 		subgraphIDs,
 		messages[:cut],
+		agentID,
 	)
 	if err != nil {
 		return ctxgraph.Graph{}, nil, err
@@ -79,6 +80,7 @@ func organizeWithModel(
 	graph ctxgraph.Graph,
 	subgraphIDs []string,
 	history []Message,
+	agentID string,
 ) ([]organizeNode, error) {
 	if provider == nil {
 		return nil, fmt.Errorf("organizing memory: %w", ErrNilProvider)
@@ -95,6 +97,7 @@ func organizeWithModel(
 		response, err := provider.Generate(ctx, Request{
 			SystemPrompt: compactSystemPrompt(ctx),
 			Messages:     requestMessages,
+			CacheKey:     agentID + ":compact",
 		})
 		if err != nil {
 			return nil, fmt.Errorf("organizing memory: %w", err)

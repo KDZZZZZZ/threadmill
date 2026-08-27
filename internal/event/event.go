@@ -44,6 +44,7 @@ type RuntimeEvent struct {
 	Tools            int           `json:"tools,omitempty"`
 	ToolCalls        int           `json:"tool_calls,omitempty"`
 	Tokens           int           `json:"tokens,omitempty"`
+	CachedTokens     int           `json:"cached_tokens,omitempty"`
 	Retries          int           `json:"retries,omitempty"`
 	RetryReason      string        `json:"retry_reason,omitempty"`
 	Delta            string        `json:"delta,omitempty"`
@@ -55,34 +56,36 @@ type RuntimeEvent struct {
 
 // Input 是生产者交给 Normalize 的原始字段。
 type Input struct {
-	AgentID   string
-	Kind      Kind
-	Name      string
-	CallID    string
-	Started   time.Time
-	Messages  int
-	Tools     int
-	ToolCalls int
-	Tokens    int
-	IsError   bool
-	Err       error
+	AgentID      string
+	Kind         Kind
+	Name         string
+	CallID       string
+	Started      time.Time
+	Messages     int
+	Tools        int
+	ToolCalls    int
+	Tokens       int
+	CachedTokens int
+	IsError      bool
+	Err          error
 }
 
 // Normalize 把一次生产者回调收成 RuntimeEvent。
 func Normalize(in Input, phase Phase) RuntimeEvent {
 	now := time.Now()
 	ev := RuntimeEvent{
-		Time:      now,
-		AgentID:   in.AgentID,
-		Kind:      in.Kind,
-		Phase:     phase,
-		Name:      in.Name,
-		CallID:    in.CallID,
-		IsError:   in.IsError,
-		Messages:  in.Messages,
-		Tools:     in.Tools,
-		ToolCalls: in.ToolCalls,
-		Tokens:    in.Tokens,
+		Time:         now,
+		AgentID:      in.AgentID,
+		Kind:         in.Kind,
+		Phase:        phase,
+		Name:         in.Name,
+		CallID:       in.CallID,
+		IsError:      in.IsError,
+		Messages:     in.Messages,
+		Tools:        in.Tools,
+		ToolCalls:    in.ToolCalls,
+		Tokens:       in.Tokens,
+		CachedTokens: in.CachedTokens,
 	}
 	if phase == PhaseEnd && !in.Started.IsZero() {
 		ev.Duration = now.Sub(in.Started)
@@ -104,16 +107,17 @@ func ModelStart(agentID string, messages, tools int) RuntimeEvent {
 	}, PhaseStart)
 }
 
-// ModelEnd 归一化一次模型调用结束。
-func ModelEnd(agentID, name string, started time.Time, toolCalls, tokens int, err error) RuntimeEvent {
+// ModelEnd 归一化一次模型调用结束；cachedTokens 是本次命中前缀缓存的输入 token 数。
+func ModelEnd(agentID, name string, started time.Time, toolCalls, tokens, cachedTokens int, err error) RuntimeEvent {
 	return Normalize(Input{
-		AgentID:   agentID,
-		Kind:      KindModel,
-		Name:      name,
-		Started:   started,
-		ToolCalls: toolCalls,
-		Tokens:    tokens,
-		Err:       err,
+		AgentID:      agentID,
+		Kind:         KindModel,
+		Name:         name,
+		Started:      started,
+		ToolCalls:    toolCalls,
+		Tokens:       tokens,
+		CachedTokens: cachedTokens,
+		Err:          err,
 	}, PhaseEnd)
 }
 

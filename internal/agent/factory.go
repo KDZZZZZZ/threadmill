@@ -475,6 +475,12 @@ func bindLoopTools(loop *Loop, e env.Env) error {
 	}
 	loop.mu.Lock()
 	loop.memory = e.Memory
+	// 换环境必须丢掉记忆投影 memo：memo 只按 revision + 订阅列表判等，而 Fork 出的子图
+	// 与父图 revision 相同（Graph.Clone 保留 Revision），订阅列表也跨 Bind 保留，
+	// 不清会把上一个环境的记忆文本泄漏给新环境。
+	loop.memoryBlockRev = 0
+	loop.memoryBlockSubs = nil
+	loop.memoryBlockText = ""
 	if organizer := organizerFromTool(loop.tools[organizeSubgraphToolName]); organizer != nil {
 		loop.mu.Unlock()
 		if err := bindLoopTools(organizer, e); err != nil {

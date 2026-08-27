@@ -29,10 +29,9 @@ func TestResponsesGenerateCallsResponsesAPI(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := map[string]any{
-			"model":        "gpt-5",
-			"instructions": "system prompt",
-			"store":        false,
-			"include":      []any{"reasoning.encrypted_content"},
+			"model":   "gpt-5",
+			"store":   false,
+			"include": []any{"reasoning.encrypted_content"},
 			"input": []any{
 				map[string]any{
 					"role":    "system",
@@ -221,6 +220,37 @@ func TestResponsesGenerateReplaysProviderOutput(t *testing.T) {
 	}
 }
 
+func TestResponsesGenerateSendsPromptCacheKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var got struct {
+			PromptCacheKey string `json:"prompt_cache_key"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got.PromptCacheKey != "task-1:planner" {
+			t.Fatalf("prompt_cache_key = %q, want task-1:planner", got.PromptCacheKey)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+  "status":"completed",
+  "output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+}`))
+	}))
+	defer server.Close()
+
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := model.Generate(context.Background(), agent.Request{
+		CacheKey: "task-1:planner",
+		Messages: []agent.Message{{Role: agent.RoleUser, Content: "hi"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestResponsesGenerateKeepsEmptyToolOutput(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		var got struct {
@@ -371,5 +401,74 @@ func TestResponsesGenerateStopsAfterFiveRetries(t *testing.T) {
 	}
 	if got := requests.Load(); got != 6 {
 		t.Fatalf("requests = %d, want one initial request plus five retries", got)
+	}
+}
+
+func TestResponsesGenerateOrdersSegmentsForPrefixCache(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var got struct {
+			Input []struct {
+				Role    string `json:"role"`
+				Type    string `json:"type"`
+				Content any    `json:"content"`
+			} `json:"input"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		type segment struct {
+			kind string
+			text string
+		}
+		segments := make([]segment, 0, len(got.Input))
+		for _, item := range got.Input {
+			switch item.Type {
+			case "", "message":
+				switch value := item.Content.(type) {
+				case string:
+					segments = append(segments, segment{item.Role, value})
+				case []any:
+					var text string
+					if len(value) > 0 {
+						if entry, ok := value[0].(map[string]any); ok {
+							text, _ = entry["text"].(string)
+						}
+					}
+					segments = append(segments, segment{item.Role, text})
+				}
+			}
+		}
+		want := []segment{
+			{"system", "role prompt"},
+			{"user", "history"},
+			{"system", "memory projection"},
+			{"system", "coordination projection"},
+			{"system", "pressure reminder"},
+		}
+		if !reflect.DeepEqual(segments, want) {
+			t.Fatalf("input segments = %#v, want %#v", segments, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+  "status":"completed",
+  "output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+}`))
+	}))
+	defer server.Close()
+
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := model.Generate(context.Background(), agent.Request{
+		SystemPrompt: "role prompt",
+		Messages:     []agent.Message{{Role: agent.RoleUser, Content: "history"}},
+		StateBlocks: []agent.Block{
+			{ID: "memory", Text: "memory projection"},
+			{ID: "coordination", Text: "coordination projection"},
+		},
+		Suffix: "pressure reminder",
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

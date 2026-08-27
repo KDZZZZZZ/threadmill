@@ -46,9 +46,11 @@ func TestAssembleRequestOmitsSubscribedMemoryWithoutHook(t *testing.T) {
 	resetDefaultStore(t)
 
 	var prompt string
+	var memory string
 	loop, err := NewLoop(Config{
 		Provider: ignoreOrganize(func(_ context.Context, request Request) (AssistantMessage, error) {
 			prompt = request.SystemPrompt
+			memory = blockText(request, "memory")
 			return AssistantMessage{Content: "done"}, nil
 		}),
 		Hooks: Hooks{AfterTurn: []AfterTurnHook{
@@ -69,6 +71,9 @@ func TestAssembleRequestOmitsSubscribedMemoryWithoutHook(t *testing.T) {
 	}
 	if prompt != DefaultSystemPrompt {
 		t.Fatalf("system prompt = %q, want the default prompt without memory", prompt)
+	}
+	if memory != "" {
+		t.Fatalf("memory block = %q, want none without the injection hook", memory)
 	}
 }
 
@@ -129,8 +134,8 @@ func TestLoopLeavesHistoryUncompactedWithoutOverflowHook(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("model calls = %d, want 2", calls)
 	}
-	if strings.Contains(second.SystemPrompt, "start") {
-		t.Fatalf("second system prompt = %q, want no compacted memory", second.SystemPrompt)
+	if strings.Contains(blockText(second, "memory"), "start") {
+		t.Fatalf("second memory block = %q, want no compacted memory", blockText(second, "memory"))
 	}
 	if len(second.Messages) == 0 || second.Messages[0].Role != RoleUser {
 		t.Fatalf("second messages = %#v, want the original user history", second.Messages)
@@ -142,11 +147,11 @@ func TestLoopKeepsTailWithoutCommitHook(t *testing.T) {
 	defer cancel()
 	resetDefaultStore(t)
 
-	var secondPrompt string
+	var secondMemory string
 	turns := 0
 	model := modelFunc(func(_ context.Context, request Request) (AssistantMessage, error) {
 		if turns == 1 {
-			secondPrompt = request.SystemPrompt
+			secondMemory = blockText(request, "memory")
 		}
 		return AssistantMessage{Content: "ok", Usage: &Usage{TotalTokens: 3}}, nil
 	})
@@ -178,8 +183,8 @@ func TestLoopKeepsTailWithoutCommitHook(t *testing.T) {
 	if len(loop.Messages()) == 0 {
 		t.Fatal("messages after last turn were committed, want the tail kept in history")
 	}
-	if strings.Contains(secondPrompt, "remember blue") {
-		t.Fatalf("second system prompt = %q, want no committed memory", secondPrompt)
+	if strings.Contains(secondMemory, "remember blue") {
+		t.Fatalf("second memory block = %q, want no committed memory", secondMemory)
 	}
 }
 

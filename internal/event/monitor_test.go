@@ -43,7 +43,7 @@ func TestMonitorLogsRuntimeEvent(t *testing.T) {
 func TestMonitorLogsErrorLevel(t *testing.T) {
 	var output bytes.Buffer
 	logger := logging.New(logging.Config{Output: &output, JSON: true})
-	Monitor(logger)(context.Background(), ModelEnd("planner", "", time.Time{}, 0, 0, errors.New("timeout")))
+	Monitor(logger)(context.Background(), ModelEnd("planner", "", time.Time{}, 0, 0, 0, errors.New("timeout")))
 
 	var got map[string]any
 	if err := json.Unmarshal(output.Bytes(), &got); err != nil {
@@ -51,6 +51,20 @@ func TestMonitorLogsErrorLevel(t *testing.T) {
 	}
 	if got["level"] != "ERROR" || got["error"] != "timeout" {
 		t.Fatalf("log = %#v", got)
+	}
+}
+
+func TestMonitorLogsCachedTokens(t *testing.T) {
+	var output bytes.Buffer
+	logger := logging.New(logging.Config{Output: &output, JSON: true})
+	Monitor(logger)(context.Background(), ModelEnd("planner", "gpt-5", time.Time{}, 0, 1500, 800, nil))
+
+	var got map[string]any
+	if err := json.Unmarshal(output.Bytes(), &got); err != nil {
+		t.Fatalf("decode log: %v", err)
+	}
+	if got["tokens"] != float64(1500) || got["cached_tokens"] != float64(800) {
+		t.Fatalf("usage log = %#v", got)
 	}
 }
 

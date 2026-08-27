@@ -21,6 +21,15 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
+// stateBlocksText 合并请求的状态块文本（记忆与协调图投影），供断言投影内容。
+func stateBlocksText(request agent.Request) string {
+	var b strings.Builder
+	for _, block := range request.StateBlocks {
+		b.WriteString(block.Text)
+	}
+	return b.String()
+}
+
 func TestOpenUsesOneUserStateDirectoryForCanonicalPath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -380,11 +389,11 @@ func TestManagerHidesBufferedRequestFromCurrentTurn(t *testing.T) {
 				return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
 			}
 			if lastUser(request.Messages) == "second" {
-				dequeueObserved <- strings.Contains(request.SystemPrompt, "[User Message] second")
+				dequeueObserved <- strings.Contains(stateBlocksText(request), "[User Message] second")
 				return agent.AssistantMessage{Content: "done"}, nil
 			}
 			if hasToolResult(request.Messages) {
-				bufferObserved <- strings.Contains(request.SystemPrompt, "[User Message] second")
+				bufferObserved <- strings.Contains(stateBlocksText(request), "[User Message] second")
 				return agent.AssistantMessage{Content: "first done"}, nil
 			}
 			close(firstStarted)
@@ -625,9 +634,9 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 			query := lastUser(request.Messages)
 			managerQueries = append(managerQueries, query)
 			if strings.Contains(query, "[任务报告]") {
-				managerReportMemory = sys
+				managerReportMemory = stateBlocksText(request)
 			} else if hasToolResult(request.Messages) {
-				managerAfterGraphMemory = sys
+				managerAfterGraphMemory = stateBlocksText(request)
 			}
 			n := 0
 			for _, q := range managerQueries {
@@ -674,7 +683,7 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 			mu.Lock()
 			leakedManagerMemory = leakedManagerMemory || strings.Contains(sys, "USER MESSAGE")
 			if strings.Contains(lastUser(request.Messages), "[join pending]") {
-				rootExecutorMemory = sys
+				rootExecutorMemory = stateBlocksText(request)
 			}
 			mu.Unlock()
 			if strings.Contains(lastUser(request.Messages), "child plan") {
@@ -794,7 +803,7 @@ func TestManagerBuildsMinimalTaskPackageFromTaskInfo(t *testing.T) {
 			}
 			return agent.AssistantMessage{Content: "started"}, nil
 		case strings.Contains(sys, "你是 planner"):
-			plannerMemory = sys
+			plannerMemory = stateBlocksText(request)
 			return agent.AssistantMessage{Content: "plan"}, nil
 		case strings.Contains(sys, "你是 executor"):
 			return agent.AssistantMessage{Content: "executed"}, nil
@@ -867,7 +876,7 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 			defer mu.Unlock()
 			switch {
 			case strings.Contains(query, "[任务报告]"):
-				managerFinalMemory = sys
+				managerFinalMemory = stateBlocksText(request)
 				return agent.AssistantMessage{Content: "任务已完成"}, nil
 			case strings.Contains(query, "[拆分请求]"):
 				helpRequest = query
@@ -890,7 +899,7 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 						Arguments: args,
 					}}}, nil
 				}
-				managerHelpMemory = sys
+				managerHelpMemory = stateBlocksText(request)
 				return agent.AssistantMessage{Content: "正在拆分"}, nil
 			case !created:
 				created = true
@@ -934,7 +943,7 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 			if result := lastToolResult(request.Messages); result != "" {
 				mu.Lock()
 				requesterResult = result
-				requesterMemory = sys
+				requesterMemory = stateBlocksText(request)
 				resumedBeforeHelp = helperFinished != 2
 				mu.Unlock()
 				return agent.AssistantMessage{Content: "root-did"}, nil

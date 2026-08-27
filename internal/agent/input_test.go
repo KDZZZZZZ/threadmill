@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	"github.com/KDZZZZZZ/threadmill/internal/env"
+	"github.com/KDZZZZZZ/threadmill/internal/event"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -71,16 +73,29 @@ func TestAssembleRequestInjectsUnionMemoryFromSubscribedSubgraphs(t *testing.T) 
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
 
-	want := DefaultSystemPrompt + "\n\n记忆：\n- shared fact\n- only in a"
-	if request.SystemPrompt != want {
-		t.Fatalf("system prompt = %q, want %q", request.SystemPrompt, want)
+	wantMemory := "记忆：\n- shared fact\n- only in a"
+	if got := blockText(request, "memory"); got != wantMemory {
+		t.Fatalf("memory block = %q, want %q", blockText(request, "memory"), wantMemory)
 	}
-	if strings.Contains(request.SystemPrompt, "only in c") {
-		t.Fatal("system prompt included a node from an unsubscribed subgraph")
+	if request.SystemPrompt != DefaultSystemPrompt {
+		t.Fatalf("system prompt = %q, want the bare default prompt", request.SystemPrompt)
+	}
+	if strings.Contains(request.WirePrompt(), "only in c") {
+		t.Fatal("wire prompt included a node from an unsubscribed subgraph")
 	}
 	if len(request.Messages) != 1 || request.Messages[0].Content != "start" {
 		t.Fatalf("messages = %#v, want the original user message only", request.Messages)
 	}
+}
+
+// blockText 返回请求里指定 ID 的状态块文本；不存在时返回空串。
+func blockText(request Request, id string) string {
+	for _, block := range request.StateBlocks {
+		if block.ID == id {
+			return block.Text
+		}
+	}
+	return ""
 }
 
 func TestAssembleRequestUsesCurrentSubgraphSubscriptions(t *testing.T) {
@@ -89,10 +104,10 @@ func TestAssembleRequestUsesCurrentSubgraphSubscriptions(t *testing.T) {
 	resetDefaultStore(t)
 
 	var loop *Loop
-	prompts := make([]string, 0, 2)
+	memories := make([]string, 0, 2)
 	model := ignoreOrganize(func(_ context.Context, request Request) (AssistantMessage, error) {
-		prompts = append(prompts, request.SystemPrompt)
-		if len(prompts) == 1 {
+		memories = append(memories, blockText(request, "memory"))
+		if len(memories) == 1 {
 			return AssistantMessage{ToolCalls: []agenttool.Call{{
 				ID:        "call-1",
 				Name:      "lookup",
@@ -145,17 +160,17 @@ func TestAssembleRequestUsesCurrentSubgraphSubscriptions(t *testing.T) {
 	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
-	if len(prompts) != 2 {
-		t.Fatalf("model request count = %d, want 2", len(prompts))
+	if len(memories) != 2 {
+		t.Fatalf("model request count = %d, want 2", len(memories))
 	}
 
-	wantFirst := DefaultSystemPrompt + "\n\n记忆：\n- memory a"
-	if prompts[0] != wantFirst {
-		t.Fatalf("first system prompt = %q, want %q", prompts[0], wantFirst)
+	wantFirst := "记忆：\n- memory a"
+	if memories[0] != wantFirst {
+		t.Fatalf("first memory block = %q, want %q", memories[0], wantFirst)
 	}
-	wantSecond := DefaultSystemPrompt + "\n\n记忆：\n- memory b"
-	if prompts[1] != wantSecond {
-		t.Fatalf("second system prompt = %q, want %q", prompts[1], wantSecond)
+	wantSecond := "记忆：\n- memory b"
+	if memories[1] != wantSecond {
+		t.Fatalf("second memory block = %q, want %q", memories[1], wantSecond)
 	}
 }
 
@@ -173,10 +188,10 @@ func TestAssembleRequestReadsLiveSubscribedSubgraphContent(t *testing.T) {
 		}},
 	})
 
-	prompts := make([]string, 0, 2)
+	memories := make([]string, 0, 2)
 	model := ignoreOrganize(func(_ context.Context, request Request) (AssistantMessage, error) {
-		prompts = append(prompts, request.SystemPrompt)
-		if len(prompts) == 1 {
+		memories = append(memories, blockText(request, "memory"))
+		if len(memories) == 1 {
 			return AssistantMessage{ToolCalls: []agenttool.Call{{
 				ID:        "call-1",
 				Name:      "refresh",
@@ -193,7 +208,9 @@ func TestAssembleRequestReadsLiveSubscribedSubgraphContent(t *testing.T) {
 			InputSchema: json.RawMessage(`{"type":"object"}`),
 		},
 		execute: func(context.Context, agenttool.Call) (agenttool.Output, error) {
+			// 生产写路径（memory 工具、compact、organizer）都会递增 revision。
 			store.Save("env-1", ctxgraph.Graph{
+				Revision: store.Revision("env-1") + 1,
 				Nodes: []ctxgraph.Node{{
 					ID:          "n1",
 					Statement:   "new memory",
@@ -229,17 +246,17 @@ func TestAssembleRequestReadsLiveSubscribedSubgraphContent(t *testing.T) {
 	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
-	if len(prompts) != 2 {
-		t.Fatalf("model request count = %d, want 2", len(prompts))
+	if len(memories) != 2 {
+		t.Fatalf("model request count = %d, want 2", len(memories))
 	}
 
-	wantFirst := DefaultSystemPrompt + "\n\n记忆：\n- old memory"
-	if prompts[0] != wantFirst {
-		t.Fatalf("first system prompt = %q, want %q", prompts[0], wantFirst)
+	wantFirst := "记忆：\n- old memory"
+	if memories[0] != wantFirst {
+		t.Fatalf("first memory block = %q, want %q", memories[0], wantFirst)
 	}
-	wantSecond := DefaultSystemPrompt + "\n\n记忆：\n- new memory"
-	if prompts[1] != wantSecond {
-		t.Fatalf("second system prompt = %q, want %q", prompts[1], wantSecond)
+	wantSecond := "记忆：\n- new memory"
+	if memories[1] != wantSecond {
+		t.Fatalf("second memory block = %q, want %q", memories[1], wantSecond)
 	}
 }
 
@@ -248,10 +265,10 @@ func TestLoopsShareDefaultMemoryGraph(t *testing.T) {
 	defer cancel()
 	resetDefaultStore(t)
 
-	var prompt string
+	var memory string
 	reader, err := NewLoop(Config{
 		Provider: ignoreOrganize(func(_ context.Context, request Request) (AssistantMessage, error) {
-			prompt = request.SystemPrompt
+			memory = blockText(request, "memory")
 			return AssistantMessage{Content: "done"}, nil
 		}),
 		Hooks: Hooks{
@@ -283,9 +300,9 @@ func TestLoopsShareDefaultMemoryGraph(t *testing.T) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
 
-	want := DefaultSystemPrompt + "\n\n记忆：\n- shared fact"
-	if prompt != want {
-		t.Fatalf("reader system prompt = %q, want %q", prompt, want)
+	want := "记忆：\n- shared fact"
+	if memory != want {
+		t.Fatalf("reader memory block = %q, want %q", memory, want)
 	}
 }
 
@@ -348,4 +365,160 @@ func resetDefaultStore(t *testing.T) {
 	t.Cleanup(func() {
 		ctxgraph.Update(ctxgraph.Copy{})
 	})
+}
+
+func TestInjectSubscribedMemoryReusesUnchangedProjection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resetDefaultStore(t)
+
+	injections := 0
+	memorySeen := make([]string, 0, 2)
+	bus := event.NewBus(func(_ context.Context, ev event.RuntimeEvent) {
+		if ev.Kind == event.KindMemory && ev.Phase == event.PhaseStart &&
+			ev.Name == injectSubscribedMemoryToolName {
+			injections++
+		}
+	})
+
+	store := ctxgraph.NewStore()
+	var loop *Loop
+	saveBumpedGraph := func(context.Context, agenttool.Call) (agenttool.Output, error) {
+		store.Save("env-1", ctxgraph.Graph{
+			Revision: store.Revision("env-1") + 1,
+			Nodes: []ctxgraph.Node{{
+				ID:          "n2",
+				Statement:   "fresh fact",
+				SubgraphIDs: []string{"sg-a"},
+			}},
+		})
+		return agenttool.Output{Content: "ok"}, nil
+	}
+	refresh := &testTool{
+		definition: agenttool.Definition{
+			Name:        "refresh",
+			Description: "Refresh memory",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		execute: saveBumpedGraph,
+	}
+	mark := &testTool{
+		definition: agenttool.Definition{
+			Name:        "mark",
+			Description: "Touch nothing",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		execute: func(context.Context, agenttool.Call) (agenttool.Output, error) {
+			return agenttool.Output{Content: "ok"}, nil
+		},
+	}
+
+	memorySeen = make([]string, 0, 3)
+	model := modelFunc(func(_ context.Context, request Request) (AssistantMessage, error) {
+		memorySeen = append(memorySeen, blockText(request, "memory"))
+		switch len(memorySeen) {
+		case 1:
+			return AssistantMessage{ToolCalls: []agenttool.Call{{
+				ID:        "call-1",
+				Name:      "refresh",
+				Arguments: json.RawMessage(`{}`),
+			}}}, nil
+		case 2:
+			return AssistantMessage{ToolCalls: []agenttool.Call{{
+				ID:        "call-2",
+				Name:      "mark",
+				Arguments: json.RawMessage(`{}`),
+			}}}, nil
+		}
+		return AssistantMessage{Content: "done"}, nil
+	})
+	loop, err := NewLoop(Config{
+		Provider: model,
+		Tools:    []agenttool.Tool{refresh, mark},
+		Events:   bus,
+		Hooks: Hooks{AfterTurn: []AfterTurnHook{
+			func(context.Context, UserMessage, TurnResult) error {
+				cancel()
+				return nil
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := MemoryHooks(loop)
+	if err := loop.AddHooks(Hooks{AssembleRequest: hooks.AssembleRequest}); err != nil {
+		t.Fatal(err)
+	}
+	bindEnvGraph(t, loop, store, "env-1", ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{{
+			ID:          "n1",
+			Statement:   "shared fact",
+			SubgraphIDs: []string{"sg-a"},
+		}},
+	})
+	loop.SetSubscribedSubgraphs([]string{"sg-a"})
+	loop.Enqueue(UserMessage{Content: "start"})
+
+	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if len(memorySeen) != 3 {
+		t.Fatalf("model requests = %d, want 3", len(memorySeen))
+	}
+	wantProjections := []string{"记忆：\n- shared fact", "记忆：\n- fresh fact", "记忆：\n- fresh fact"}
+	if !reflect.DeepEqual(memorySeen, wantProjections) {
+		t.Fatalf("memory blocks = %q, want %q", memorySeen, wantProjections)
+	}
+	if injections != 2 {
+		t.Fatalf("hidden injections = %d, want one per distinct projection", injections)
+	}
+}
+
+// TestSubscribedMemoryBlockInvalidatesOnBind 锁定跨环境隔离：Fork 出的子环境与父环境
+// 图 revision 相同（Graph.Clone 保留 Revision），若 memo 不随 Bind 失效，
+// 订阅列表未变时会把上一个环境的记忆文本泄漏给新环境。
+func TestSubscribedMemoryBlockInvalidatesOnBind(t *testing.T) {
+	ctx := context.Background()
+	resetDefaultStore(t)
+
+	loop, err := NewLoop(Config{Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+		return AssistantMessage{Content: "done"}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAddMemoryHooks(t, loop)
+
+	store := ctxgraph.NewStore()
+	graph := ctxgraph.Graph{
+		Revision: 7,
+		Nodes:    []ctxgraph.Node{{ID: "a", Statement: "parent secret", SubgraphIDs: []string{"sg"}}},
+	}
+	bindEnvGraph(t, loop, store, "env-parent", graph)
+	loop.SetSubscribedSubgraphs([]string{"sg"})
+
+	first, err := loop.subscribedMemoryBlock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "记忆：\n- parent secret"; first != want {
+		t.Fatalf("parent memory block = %q, want %q", first, want)
+	}
+
+	// Fork 保留 revision，子环境节点不同但 revision 相同、订阅列表未变。
+	if err := store.Fork("env-parent", "env-child"); err != nil {
+		t.Fatal(err)
+	}
+	child := graph.Clone()
+	child.Nodes = []ctxgraph.Node{{ID: "b", Statement: "child fact", SubgraphIDs: []string{"sg"}}}
+	bindEnvGraph(t, loop, store, "env-child", child)
+
+	second, err := loop.subscribedMemoryBlock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "记忆：\n- child fact"; second != want {
+		t.Fatalf("child memory block = %q, want %q", second, want)
+	}
 }

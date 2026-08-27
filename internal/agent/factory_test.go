@@ -294,9 +294,12 @@ func TestRoleAgentsUseMemoryHooksAndRolePrompt(t *testing.T) {
 				t.Fatalf("Ask() = %q, want done", answer)
 			}
 
-			want := tt.prompt + "\n\n记忆：\n- shared fact"
-			if request.SystemPrompt != want {
-				t.Fatalf("system prompt = %q, want %q", request.SystemPrompt, want)
+			wantMemory := "记忆：\n- shared fact"
+			if got := blockText(request, "memory"); got != wantMemory {
+				t.Fatalf("memory block = %q, want %q", got, wantMemory)
+			}
+			if request.SystemPrompt != tt.prompt {
+				t.Fatalf("system prompt = %q, want %q", request.SystemPrompt, tt.prompt)
 			}
 
 			foundEcho := false
@@ -652,11 +655,11 @@ func TestTeamBindUsesYamlPluginsAgainstEnvStore(t *testing.T) {
 	if !strings.Contains(request.SystemPrompt, "yaml plan") {
 		t.Fatalf("planner prompt = %q, want yaml plan", request.SystemPrompt)
 	}
-	if !strings.Contains(request.SystemPrompt, "local fact") {
-		t.Fatalf("planner prompt missing env memory: %q", request.SystemPrompt)
+	if !strings.Contains(request.WirePrompt(), "local fact") {
+		t.Fatalf("planner wire prompt missing env memory: %q", request.WirePrompt())
 	}
-	if strings.Contains(request.SystemPrompt, "global fact") {
-		t.Fatalf("planner prompt used global memory: %q", request.SystemPrompt)
+	if strings.Contains(request.WirePrompt(), "global fact") {
+		t.Fatalf("planner wire prompt used global memory: %q", request.WirePrompt())
 	}
 	if !hasRequestTool(request.Tools, organizeSubgraphToolName) {
 		t.Fatal("yaml organize_subgraph missing")
@@ -845,10 +848,10 @@ func TestNewTeamAppliesYamlToolDescription(t *testing.T) {
 func TestNewTeamAppliesYamlDropContextReminder(t *testing.T) {
 	resetDefaultStore(t)
 
-	var prompt string
+	var suffix string
 	team, err := NewTeam(
 		modelFunc(func(_ context.Context, request Request) (AssistantMessage, error) {
-			prompt = request.SystemPrompt
+			suffix = request.Suffix
 			return AssistantMessage{Content: "done"}, nil
 		}),
 		40,
@@ -870,11 +873,11 @@ func TestNewTeamAppliesYamlDropContextReminder(t *testing.T) {
 	if _, err := team.Organizer.Ask(context.Background(), strings.Repeat("n", 400)); err != nil {
 		t.Fatalf("Ask() error = %v", err)
 	}
-	if !strings.Contains(prompt, "yaml drop reminder") {
-		t.Fatalf("prompt = %q, want yaml drop reminder", prompt)
+	if !strings.Contains(suffix, "yaml drop reminder") {
+		t.Fatalf("suffix = %q, want yaml drop reminder", suffix)
 	}
-	if strings.Contains(prompt, dropContextPressureReminder) {
-		t.Fatalf("prompt = %q, want yaml reminder instead of default", prompt)
+	if strings.Contains(suffix, dropContextPressureReminder) {
+		t.Fatalf("suffix = %q, want yaml reminder instead of default", suffix)
 	}
 }
 
