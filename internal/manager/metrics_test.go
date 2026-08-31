@@ -108,6 +108,8 @@ func TestManagerMetricsAndIdleSnapshotCoverRuntimeAndSubsystems(t *testing.T) {
 		`"exec_timed_out":0`,
 		`"exec_tracked_process_groups":0`,
 		`"exec_runtime_dirs":0`,
+		`"exec_runtime_cleanup_errors":0`,
+		`"exec_last_runtime_cleanup_error":""`,
 		`"vfs_overlay_files":0`,
 		`"vfs_tombstones":0`,
 		`"vfs_materialize_copies":`,
