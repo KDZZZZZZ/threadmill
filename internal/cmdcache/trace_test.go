@@ -186,6 +186,28 @@ func TestParseTraceMarksIncompleteOnUnresolvableRelativePath(t *testing.T) {
 	}
 }
 
+func TestParseTraceIgnoresEmptyFstatatPathWithoutFlag(t *testing.T) {
+	obs := parseFixture(t, `1 newfstatat(AT_FDCWD, "", 0x7ffd, 0) = -1 ENOENT (No such file or directory)
+`)
+	if obs.Incomplete {
+		t.Fatal("an invalid empty path must not make the trace incomplete")
+	}
+	if len(obs.Reads) != 0 {
+		t.Fatalf("reads = %v, want empty", obs.Reads)
+	}
+}
+
+func TestParseTraceResolvesEmptyFstatatPathWithFlag(t *testing.T) {
+	obs := parseFixture(t, `1 newfstatat(3</input.txt>, "", 0x7ffd, AT_EMPTY_PATH) = 0
+`)
+	if obs.Incomplete {
+		t.Fatal("AT_EMPTY_PATH trace should be complete")
+	}
+	if got := obs.Reads["input.txt"]; got != ReadStat {
+		t.Fatalf("input.txt read kind = %v, want ReadStat", got)
+	}
+}
+
 // 超过上限的追踪同样失效，避免为一条巨型构建保留无界状态。
 func TestParseTraceMarksIncompleteWhenOverLimit(t *testing.T) {
 	line := `1 openat(AT_FDCWD</>, "go.mod", O_RDONLY) = 3</go.mod>` + "\n"

@@ -321,6 +321,9 @@ func (p *traceParser) consume(line string) {
 	}
 	errno, failed := parseFailure(result)
 	for i, abs := range paths {
+		if abs == "" {
+			continue
+		}
 		role := roles.first
 		if i > 0 && roles.rest != 0 {
 			role = roles.rest
@@ -429,6 +432,14 @@ func (p *traceParser) resolvePaths(pid int, tokens argTokens) []string {
 	}
 	resolved := make([]string, 0, len(tokens.paths))
 	for _, item := range tokens.paths {
+		// Linux rejects an empty pathname unless the caller opted into
+		// AT_EMPTY_PATH. The rejected call observes no filesystem path, so it
+		// must not make an otherwise complete trace depend on an unknown cwd.
+		// Keep an empty slot so later path arguments retain their syscall role.
+		if item.value == "" && !strings.Contains(tokens.flags, "AT_EMPTY_PATH") {
+			resolved = append(resolved, "")
+			continue
+		}
 		if strings.HasPrefix(item.value, "/") {
 			abs := path.Clean(item.value)
 			resolved = append(resolved, abs)
