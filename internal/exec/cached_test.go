@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -495,6 +497,54 @@ func TestCacheRejectsTimedOutCommand(t *testing.T) {
 	}
 }
 
+func TestCacheDoesNotLetTracedDaemonHoldForegroundResult(t *testing.T) {
+	base := baseRepo(t)
+	if err := os.WriteFile(filepath.Join(base, "launcher.sh"), []byte(
+		"#!/usr/bin/env bash\n"+
+			"sleep 30 &\n"+
+			"printf 'child=%d\\n' \"$!\"\n"+
+			"exit 3\n",
+	), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sched, cache := newCachedScheduler(t, Config{Slots: 1, ExternalSandbox: true})
+	t.Cleanup(func() {
+		if err := sched.Reap("agent-daemon"); err != nil {
+			t.Error(err)
+		}
+	})
+	files := vfs.NewStore(base)
+
+	started := time.Now()
+	result, err := sched.View("agent-daemon", files).Run(
+		context.Background(),
+		env.Cmd{Command: "bash launcher.sh", Timeout: 2 * time.Second},
+	)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want foreground exit result", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("traced daemon held foreground result for %v", elapsed)
+	}
+	if result.ExitCode != 3 {
+		t.Fatalf("ExitCode = %d, want 3", result.ExitCode)
+	}
+	pidText := strings.TrimSpace(strings.TrimPrefix(result.Output, "child="))
+	pid, err := strconv.Atoi(pidText)
+	if err != nil {
+		t.Fatalf("parse child pid from %q: %v", result.Output, err)
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatalf("daemon was killed before environment Reap: %v", err)
+	}
+	if got := sched.Stats().TrackedProcessGroups; got != 1 {
+		t.Fatalf("TrackedProcessGroups = %d, want 1", got)
+	}
+	if stats := cache.Stats(); stats.Stores != 0 {
+		t.Fatalf("daemon-backed command entered cache: %+v", stats)
+	}
+}
+
 // 关掉缓存时执行链路必须完全不受影响。
 func TestSchedulerWorksWithoutCache(t *testing.T) {
 	sched := New(Config{Slots: 1})
@@ -589,6 +639,9 @@ func main() { fmt.Println("built by threadmill") }
 	cacheStats := cache.Stats()
 	if materialized := cacheStats.ArtifactReflinks + cacheStats.ArtifactCopies; materialized == 0 {
 		t.Fatal("the cached build did not replay its binary artifact")
+	}
+	if got := sched.Stats().TrackedProcessGroups; got != 0 {
+		t.Fatalf("tracked process groups after completed builds = %d, want 0", got)
 	}
 	t.Logf(
 		"cold build=%v segmented reuse=%v saved command time=%v reflinks=%d/%dB copies=%d/%dB",
