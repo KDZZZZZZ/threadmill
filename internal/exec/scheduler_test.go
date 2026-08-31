@@ -419,6 +419,63 @@ func TestSchedulerReapKillsTrackedProcessGroup(t *testing.T) {
 	}
 }
 
+func TestSchedulerReapWaitsBeforeRemovingRuntimeDir(t *testing.T) {
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	if err := os.Mkdir(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := osexec.Command("bash", "-c", `
+touch "$THREADMILL_RUNTIME/ready"
+iteration=0
+while [ "$iteration" -lt 100 ]; do
+	iteration=$((iteration + 1))
+	mkdir -p "$THREADMILL_RUNTIME/churn/a"
+	: > "$THREADMILL_RUNTIME/churn/a/file"
+	rm -rf "$THREADMILL_RUNTIME/churn"
+	sleep 0.001
+done
+`)
+	cmd.Env = append(os.Environ(), "THREADMILL_RUNTIME="+runtimeDir)
+	// Go telemetry does the same thing: its sidecar calls setsid and can
+	// outlive the command process group while still writing under HOME.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	finished := false
+	t.Cleanup(func() {
+		if finished {
+			return
+		}
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(runtimeDir, "ready")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background writers did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	s := New(Config{Slots: 1, ExternalSandbox: true})
+	s.mu.Lock()
+	s.runtimes = map[string]string{"env-a": runtimeDir}
+	s.mu.Unlock()
+	reapErr := s.Reap("env-a")
+	_ = cmd.Wait()
+	finished = true
+	if reapErr != nil {
+		t.Fatal(reapErr)
+	}
+	if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
+		t.Fatalf("runtime dir still exists after Reap: %v", err)
+	}
+}
+
 func TestSchedulerKeepsLiveBackgroundProcessGroupForReap(t *testing.T) {
 	t.Parallel()
 

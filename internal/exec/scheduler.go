@@ -686,13 +686,17 @@ func (s *Scheduler) pruneDeadProcessGroups(envID string) {
 	s.groups[envID] = live
 }
 
+const (
+	runtimeCleanupTimeout = time.Second
+	runtimeCleanupQuiet   = 10 * time.Millisecond
+	runtimeCleanupPoll    = time.Millisecond
+)
+
 // Reap 杀掉该 env 里仍活着的命令进程组并删除运行时目录。在 task 结束时调用。
 func (s *Scheduler) Reap(envID string) error {
 	s.mu.Lock()
-	pgids := s.groups[envID]
-	delete(s.groups, envID)
+	pgids := append([]int(nil), s.groups[envID]...)
 	runtimeDir := s.runtimes[envID]
-	delete(s.runtimes, envID)
 	s.mu.Unlock()
 	var err error
 	for _, pgid := range pgids {
@@ -700,12 +704,74 @@ func (s *Scheduler) Reap(envID string) error {
 			err = errors.Join(err, fmt.Errorf("exec: reap process group %d: %w", pgid, killErr))
 		}
 	}
+	if err != nil {
+		return err
+	}
 	if runtimeDir != "" {
-		if removeErr := os.RemoveAll(runtimeDir); removeErr != nil {
+		remove := os.RemoveAll
+		if s.sandbox == sandboxExternal {
+			remove = removeExternalRuntimeDir
+		}
+		if removeErr := remove(runtimeDir); removeErr != nil {
 			err = errors.Join(err, fmt.Errorf("exec: remove runtime dir: %w", removeErr))
 		}
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	delete(s.groups, envID)
+	delete(s.runtimes, envID)
+	s.mu.Unlock()
+	return nil
+}
+
+// removeExternalRuntimeDir tolerates short-lived sidecars that call setsid and
+// outlive the foreground process group. Go telemetry is one such process. The
+// external sandbox owns process isolation, so Threadmill waits for a quiet
+// runtime directory instead of pretending the original process group owns all
+// descendants.
+func removeExternalRuntimeDir(dir string) error {
+	deadline := time.Now().Add(runtimeCleanupTimeout)
+	var lastErr error
+	for {
+		if err := os.RemoveAll(dir); err != nil {
+			if !errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, syscall.EEXIST) {
+				return err
+			}
+			lastErr = err
+		} else {
+			quiet, err := runtimeDirRemainedAbsent(dir, runtimeCleanupQuiet)
+			if err != nil {
+				return err
+			}
+			if quiet {
+				return nil
+			}
+			lastErr = fmt.Errorf("runtime directory %q was recreated during cleanup", dir)
+		}
+		if !time.Now().Before(deadline) {
+			return lastErr
+		}
+		time.Sleep(runtimeCleanupPoll)
+	}
+}
+
+func runtimeDirRemainedAbsent(dir string, quiet time.Duration) (bool, error) {
+	deadline := time.Now().Add(quiet)
+	for {
+		_, err := os.Lstat(dir)
+		switch {
+		case err == nil:
+			return false, nil
+		case !errors.Is(err, os.ErrNotExist):
+			return false, err
+		case !time.Now().Before(deadline):
+			return true, nil
+		default:
+			time.Sleep(runtimeCleanupPoll)
+		}
+	}
 }
 
 type capBuffer struct {
