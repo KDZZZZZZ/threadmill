@@ -203,8 +203,8 @@ var outboundSyscalls = map[string]bool{
 // 临时目录——它既不是依赖也不是产物，更不算逃逸。limit 是允许消费的字节数，
 // 超出即把观测标记为不可信。
 //
-// 解析对错误一律 fail closed：无法解析的相对路径、被截断的路径、悬空的
-// <unfinished> 都会置 Incomplete，让调用方放弃缓存本次结果。
+// 解析对错误一律 fail closed：无法解析的相对路径、被截断的路径和无法
+// 安全补全的 <unfinished> 都会置 Incomplete，让调用方放弃缓存本次结果。
 func ParseTrace(r io.Reader, root, tmp string, limit int) (Observation, error) {
 	p := &traceParser{
 		obs: Observation{
@@ -247,14 +247,26 @@ func ParseTrace(r io.Reader, root, tmp string, limit int) (Observation, error) {
 // unfinished/resumed，末尾总有一两个进程在系统调用途中就退出了。
 // 为此作废整条追踪等于对所有真实构建关掉缓存。
 //
-// 参数是完整的，缺的只是结果，所以按成功处理——这是保守方向：
+// 普通文件调用的参数是完整的，缺的只是结果，所以按成功处理——这是保守方向：
 // 多记一条读依赖只会多几次 miss；写入路径的真实状态由记录阶段的 lstat
-// 决定，不会凭空造出产物。
+// 决定，不会凭空造出产物。exec 是例外：同线程组的另一个 exec 会让 strace
+// 留下永不返回且参数可能已失效的 unfinished 行，由终止事件决定丢弃或作废。
 func (p *traceParser) flushPending() {
 	for pid, head := range p.pending {
 		delete(p.pending, pid)
+		// consume removes an unfinished exec only after strace reports that PID
+		// terminal. Without that proof the trace may simply be truncated, so an
+		// unresolved exec must keep the cache fail-closed.
+		if unfinishedExec(head) {
+			p.obs.Incomplete = true
+			continue
+		}
 		p.consume(strconv.Itoa(pid) + " " + head + ") = 0")
 	}
+}
+
+func unfinishedExec(head string) bool {
+	return strings.HasPrefix(head, "execve(") || strings.HasPrefix(head, "execveat(")
 }
 
 type traceParser struct {
@@ -269,7 +281,17 @@ type traceParser struct {
 func (p *traceParser) consume(line string) {
 	pid, rest := splitPID(line)
 	rest = strings.TrimSpace(rest)
-	if rest == "" || strings.HasPrefix(rest, "---") || strings.HasPrefix(rest, "+++") {
+	if rest == "" || strings.HasPrefix(rest, "---") {
+		return
+	}
+	if strings.HasPrefix(rest, "+++") {
+		// strace documents unfinished exec as the shape produced when another
+		// thread in the same group wins exec. Once this PID is terminal, that
+		// call cannot later select an executable and its entry registers are not
+		// a dependency. Successful and failed execs have a normal result line.
+		if head, ok := p.pending[pid]; ok && unfinishedExec(head) {
+			delete(p.pending, pid)
+		}
 		return
 	}
 	if strings.HasPrefix(rest, "<...") {
