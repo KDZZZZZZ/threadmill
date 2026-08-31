@@ -591,9 +591,13 @@ func (s *Scheduler) runSandboxed(
 		if err != nil {
 			return env.ExecResult{}, nil, err
 		}
-		result, err := runBwrap(ctx, live, runtimeDir, command, s.outputCap, func(pgid int) {
+		track := trace.tracker(func(pgid int) {
 			s.track(envID, pgid)
-		}, trace)
+		})
+		result, err := runBwrap(ctx, live, runtimeDir, command, s.outputCap, track, trace)
+		if err == nil && trace != nil && trace.finish() {
+			s.untrack(envID, trace.pgid)
+		}
 		return result, trace, err
 	case sandboxDocker:
 		result, err := runDocker(ctx, live, command, s.image, s.outputCap, func(pgid int) {
@@ -609,9 +613,13 @@ func (s *Scheduler) runSandboxed(
 		if err != nil {
 			return env.ExecResult{}, nil, err
 		}
-		result, err := runExternalSandbox(ctx, live, runtimeDir, command, s.outputCap, func(pgid int) {
+		track := trace.tracker(func(pgid int) {
 			s.track(envID, pgid)
-		}, trace)
+		})
+		result, err := runExternalSandbox(ctx, live, runtimeDir, command, s.outputCap, track, trace)
+		if err == nil && trace != nil && trace.finish() {
+			s.untrack(envID, trace.pgid)
+		}
 		return result, trace, err
 	default:
 		return env.ExecResult{}, nil, ErrSandboxUnavailable
@@ -642,6 +650,23 @@ func (s *Scheduler) track(envID string, pgid int) {
 		s.groups = map[string][]int{}
 	}
 	s.groups[envID] = append(s.groups[envID], pgid)
+}
+
+func (s *Scheduler) untrack(envID string, pgid int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	groups := s.groups[envID]
+	kept := groups[:0]
+	for _, group := range groups {
+		if group != pgid {
+			kept = append(kept, group)
+		}
+	}
+	if len(kept) == 0 {
+		delete(s.groups, envID)
+		return
+	}
+	s.groups[envID] = kept
 }
 
 func (s *Scheduler) pruneDeadProcessGroups(envID string) {

@@ -3,12 +3,16 @@ package exec
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 )
 
 // traceProgram 是读集推断依赖的外部程序。
@@ -24,6 +28,7 @@ const traceProgram = "strace"
 
 // straceFlags 是追踪文件与网络访问的参数。
 //
+//	-D              让被执行命令保持调用方的直接子进程；后台后代不会拖住前台结果
 //	-f              跟踪子进程：真正读文件的是编译器和测试进程，不是 shell
 //	-y              打印 fd 对应的解析后路径，省掉自己跟踪 dirfd 与 chdir
 //	--seccomp-bpf   让内核过滤非目标系统调用，开销从数倍降到个位数百分比
@@ -32,6 +37,7 @@ const traceProgram = "strace"
 // 不能加 `-e status=successful`：ENOENT 正是负依赖，探测过但不存在的路径
 // 必须进读集，否则别的 agent 新建该文件后会静默误命中。
 var straceFlags = []string{
+	"-D",
 	"-f",
 	"-y",
 	"--seccomp-bpf",
@@ -50,6 +56,117 @@ type traceRun struct {
 	// tmp 是 per-env 临时目录（既不是依赖也不是产物）。
 	root string
 	tmp  string
+	// pgid 是被执行命令所在的进程组。-D 让 strace 留在该组但不再成为
+	// 前台命令的父进程，因此前台退出后仍存活的组表示追踪尚未闭合。
+	pgid int
+	// incomplete 表示前台退出时仍有后代或 tracer 存活；它们后续的读写
+	// 已超出本次命令事务，结果不能进入缓存。
+	incomplete bool
+}
+
+const (
+	traceClassifyDelay = 10 * time.Millisecond
+	traceFlushTimeout  = time.Second
+	traceFlushPoll     = time.Millisecond
+)
+
+func (t *traceRun) tracker(track func(int)) func(int) {
+	if t == nil {
+		return track
+	}
+	return func(pgid int) {
+		t.pgid = pgid
+		if track != nil {
+			track(pgid)
+		}
+	}
+}
+
+// finish waits briefly for a normal tracer to flush and exit. A live descendant
+// after that belongs to the environment lifecycle, not this cache transaction.
+func (t *traceRun) finish() bool {
+	if t == nil || t.pgid <= 0 {
+		return true
+	}
+	if waitForProcessGroupExit(t.pgid, traceClassifyDelay) {
+		return true
+	}
+	active, workload := processGroupState(t.pgid)
+	if !active {
+		return true
+	}
+	if workload {
+		t.incomplete = true
+		return false
+	}
+	if waitForProcessGroupExit(t.pgid, traceFlushTimeout) {
+		return true
+	}
+	t.incomplete = true
+	return false
+}
+
+func waitForProcessGroupExit(pgid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for processGroupExists(pgid) {
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(traceFlushPoll)
+	}
+	return true
+}
+
+func processGroupExists(pgid int) bool {
+	return !errors.Is(syscall.Kill(-pgid, 0), syscall.ESRCH)
+}
+
+// processGroupState ignores zombie/dead members. A live non-tracer after the
+// foreground command exits is background workload, so a trace observation is
+// incomplete without waiting for that workload to finish.
+func processGroupState(pgid int) (active, workload bool) {
+	if !processGroupExists(pgid) {
+		return false, false
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return true, true
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+		if err != nil {
+			continue
+		}
+		text := string(data)
+		end := strings.LastIndex(text, ") ")
+		if end < 0 {
+			continue
+		}
+		fields := strings.Fields(text[end+2:])
+		if len(fields) < 3 {
+			continue
+		}
+		group, err := strconv.Atoi(fields[2])
+		if err != nil || group != pgid {
+			continue
+		}
+		if fields[0] == "Z" || fields[0] == "X" || fields[0] == "x" {
+			continue
+		}
+		active = true
+		name := text[strings.LastIndex(text[:end], "(")+1 : end]
+		if name != traceProgram {
+			return true, true
+		}
+	}
+	return active, false
 }
 
 // wrap 把原本要执行的命令包进追踪器。

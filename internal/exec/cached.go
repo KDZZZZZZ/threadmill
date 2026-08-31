@@ -79,7 +79,7 @@ func (s *Scheduler) storeTrace(
 
 // observe 解析追踪文件。读不出来就当作没有观测，本次结果不入缓存。
 func (t *traceRun) observe() (cmdcache.Observation, bool) {
-	if t == nil {
+	if t == nil || t.incomplete {
 		return cmdcache.Observation{}, false
 	}
 	file, err := os.Open(t.hostOutput)
