@@ -419,6 +419,90 @@ func TestSchedulerReapKillsTrackedProcessGroup(t *testing.T) {
 	}
 }
 
+func TestSchedulerReapRemovesReadOnlyRuntimeTree(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root can remove read-only directories")
+	}
+
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	moduleDir := filepath.Join(runtimeDir, "go", "pkg", "mod", "golang.org", "x", "sys@v0.38.0")
+	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(moduleDir, "PATENTS"), nil, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(moduleDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(moduleDir, 0o700)
+		_ = os.RemoveAll(runtimeDir)
+	})
+
+	s := New(Config{Slots: 1})
+	s.mu.Lock()
+	s.runtimes = map[string]string{"env-a": runtimeDir}
+	s.mu.Unlock()
+	if err := s.Reap("env-a"); err != nil {
+		t.Fatalf("Reap() error = %v", err)
+	}
+	if _, err := os.Stat(runtimeDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime dir still exists after Reap: %v", err)
+	}
+}
+
+func TestSchedulerReapReportsRuntimeCleanupFailureWithoutReturningIt(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root can remove directories from a read-only parent")
+	}
+
+	parent := t.TempDir()
+	runtimeDir := filepath.Join(parent, "runtime")
+	if err := os.Mkdir(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+
+	s := New(Config{Slots: 1, ExternalSandbox: true})
+	s.mu.Lock()
+	s.runtimes = map[string]string{"env-a": runtimeDir}
+	s.mu.Unlock()
+	if err := s.Reap("env-a"); err != nil {
+		t.Fatalf("Reap() error = %v, want runtime cleanup failure not returned", err)
+	}
+	if _, err := os.Stat(runtimeDir); err != nil {
+		t.Fatalf("runtime cleanup unexpectedly succeeded: %v", err)
+	}
+	stats := s.Stats()
+	if stats.RuntimeCleanupErrors != 1 {
+		t.Fatalf("RuntimeCleanupErrors = %d, want 1", stats.RuntimeCleanupErrors)
+	}
+	if !strings.Contains(stats.LastRuntimeCleanupError, "permission denied") {
+		t.Fatalf("LastRuntimeCleanupError = %q, want permission denied", stats.LastRuntimeCleanupError)
+	}
+	if stats.RuntimeDirs != 1 {
+		t.Fatalf("RuntimeDirs = %d, want failed cleanup retained for retry", stats.RuntimeDirs)
+	}
+	if err := os.Chmod(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reap("env-a"); err != nil {
+		t.Fatalf("retry Reap() error = %v", err)
+	}
+	if _, err := os.Stat(runtimeDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime dir still exists after retry: %v", err)
+	}
+	if got := s.Stats().RuntimeDirs; got != 0 {
+		t.Fatalf("RuntimeDirs after retry = %d, want 0", got)
+	}
+}
+
 func TestSchedulerReapWaitsBeforeRemovingRuntimeDir(t *testing.T) {
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
 	if err := os.Mkdir(runtimeDir, 0o700); err != nil {

@@ -80,50 +80,54 @@ type Scheduler struct {
 }
 
 type schedulerCounters struct {
-	requests          uint64
-	started           uint64
-	completed         uint64
-	errors            uint64
-	canceled          uint64
-	timedOut          uint64
-	queued            int
-	active            int
-	peakQueued        int
-	peakActive        int
-	waitDuration      time.Duration
-	runDuration       time.Duration
-	heavyQueued       int
-	heavyActive       int
-	heavyPeakQueued   int
-	heavyPeakActive   int
-	heavyWaitDuration time.Duration
+	requests                uint64
+	started                 uint64
+	completed               uint64
+	errors                  uint64
+	canceled                uint64
+	timedOut                uint64
+	queued                  int
+	active                  int
+	peakQueued              int
+	peakActive              int
+	waitDuration            time.Duration
+	runDuration             time.Duration
+	heavyQueued             int
+	heavyActive             int
+	heavyPeakQueued         int
+	heavyPeakActive         int
+	heavyWaitDuration       time.Duration
+	runtimeCleanupErrors    uint64
+	lastRuntimeCleanupError string
 }
 
 // Stats 是执行槽位、排队和完成情况的并发一致快照。
 type Stats struct {
-	Capacity             int           `json:"capacity"`
-	SandboxBackend       string        `json:"sandbox_backend"`
-	NetworkIsolation     string        `json:"network_isolation"`
-	Queued               int           `json:"queued"`
-	Active               int           `json:"active"`
-	PeakQueued           int           `json:"peak_queued"`
-	PeakActive           int           `json:"peak_active"`
-	Requests             uint64        `json:"requests"`
-	Started              uint64        `json:"started"`
-	Completed            uint64        `json:"completed"`
-	Errors               uint64        `json:"errors"`
-	Canceled             uint64        `json:"canceled"`
-	TimedOut             uint64        `json:"timed_out"`
-	WaitDuration         time.Duration `json:"wait_duration"`
-	RunDuration          time.Duration `json:"run_duration"`
-	TrackedProcessGroups int           `json:"tracked_process_groups"`
-	RuntimeDirs          int           `json:"runtime_dirs"`
-	HeavyCapacity        int           `json:"heavy_capacity"`
-	HeavyQueued          int           `json:"heavy_queued"`
-	HeavyActive          int           `json:"heavy_active"`
-	HeavyPeakQueued      int           `json:"heavy_peak_queued"`
-	HeavyPeakActive      int           `json:"heavy_peak_active"`
-	HeavyWaitDuration    time.Duration `json:"heavy_wait_duration"`
+	Capacity                int           `json:"capacity"`
+	SandboxBackend          string        `json:"sandbox_backend"`
+	NetworkIsolation        string        `json:"network_isolation"`
+	Queued                  int           `json:"queued"`
+	Active                  int           `json:"active"`
+	PeakQueued              int           `json:"peak_queued"`
+	PeakActive              int           `json:"peak_active"`
+	Requests                uint64        `json:"requests"`
+	Started                 uint64        `json:"started"`
+	Completed               uint64        `json:"completed"`
+	Errors                  uint64        `json:"errors"`
+	Canceled                uint64        `json:"canceled"`
+	TimedOut                uint64        `json:"timed_out"`
+	WaitDuration            time.Duration `json:"wait_duration"`
+	RunDuration             time.Duration `json:"run_duration"`
+	TrackedProcessGroups    int           `json:"tracked_process_groups"`
+	RuntimeDirs             int           `json:"runtime_dirs"`
+	RuntimeCleanupErrors    uint64        `json:"runtime_cleanup_errors"`
+	LastRuntimeCleanupError string        `json:"last_runtime_cleanup_error,omitempty"`
+	HeavyCapacity           int           `json:"heavy_capacity"`
+	HeavyQueued             int           `json:"heavy_queued"`
+	HeavyActive             int           `json:"heavy_active"`
+	HeavyPeakQueued         int           `json:"heavy_peak_queued"`
+	HeavyPeakActive         int           `json:"heavy_peak_active"`
+	HeavyWaitDuration       time.Duration `json:"heavy_wait_duration"`
 	// Cache 是命令结果缓存的累计计数；未启用时为零值。
 	Cache cmdcache.Stats `json:"cache"`
 	// DependencyTracing 表示读集推断是否可用。为假时缓存退化成整树指纹键。
@@ -188,31 +192,33 @@ func (s *Scheduler) Stats() Stats {
 	c := s.counters
 	backend, network := s.isolationBoundary()
 	return Stats{
-		Capacity:             s.capacity,
-		SandboxBackend:       backend,
-		NetworkIsolation:     network,
-		Queued:               c.queued,
-		Active:               c.active,
-		PeakQueued:           c.peakQueued,
-		PeakActive:           c.peakActive,
-		Requests:             c.requests,
-		Started:              c.started,
-		Completed:            c.completed,
-		Errors:               c.errors,
-		Canceled:             c.canceled,
-		TimedOut:             c.timedOut,
-		WaitDuration:         c.waitDuration,
-		RunDuration:          c.runDuration,
-		TrackedProcessGroups: tracked,
-		RuntimeDirs:          len(s.runtimes),
-		HeavyCapacity:        cap(s.heavy),
-		HeavyQueued:          c.heavyQueued,
-		HeavyActive:          c.heavyActive,
-		HeavyPeakQueued:      c.heavyPeakQueued,
-		HeavyPeakActive:      c.heavyPeakActive,
-		HeavyWaitDuration:    c.heavyWaitDuration,
-		Cache:                s.cache.Stats(),
-		DependencyTracing:    s.tracing,
+		Capacity:                s.capacity,
+		SandboxBackend:          backend,
+		NetworkIsolation:        network,
+		Queued:                  c.queued,
+		Active:                  c.active,
+		PeakQueued:              c.peakQueued,
+		PeakActive:              c.peakActive,
+		Requests:                c.requests,
+		Started:                 c.started,
+		Completed:               c.completed,
+		Errors:                  c.errors,
+		Canceled:                c.canceled,
+		TimedOut:                c.timedOut,
+		WaitDuration:            c.waitDuration,
+		RunDuration:             c.runDuration,
+		TrackedProcessGroups:    tracked,
+		RuntimeDirs:             len(s.runtimes),
+		RuntimeCleanupErrors:    c.runtimeCleanupErrors,
+		LastRuntimeCleanupError: c.lastRuntimeCleanupError,
+		HeavyCapacity:           cap(s.heavy),
+		HeavyQueued:             c.heavyQueued,
+		HeavyActive:             c.heavyActive,
+		HeavyPeakQueued:         c.heavyPeakQueued,
+		HeavyPeakActive:         c.heavyPeakActive,
+		HeavyWaitDuration:       c.heavyWaitDuration,
+		Cache:                   s.cache.Stats(),
+		DependencyTracing:       s.tracing,
 	}
 }
 
@@ -707,20 +713,24 @@ func (s *Scheduler) Reap(envID string) error {
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
+	delete(s.groups, envID)
+	s.mu.Unlock()
 	if runtimeDir != "" {
-		remove := os.RemoveAll
+		remove := removeRuntimeDir
 		if s.sandbox == sandboxExternal {
 			remove = removeExternalRuntimeDir
 		}
 		if removeErr := remove(runtimeDir); removeErr != nil {
-			err = errors.Join(err, fmt.Errorf("exec: remove runtime dir: %w", removeErr))
+			cleanupErr := fmt.Errorf("exec: remove runtime dir: %w", removeErr)
+			s.mu.Lock()
+			s.counters.runtimeCleanupErrors++
+			s.counters.lastRuntimeCleanupError = cleanupErr.Error()
+			s.mu.Unlock()
+			return nil
 		}
 	}
-	if err != nil {
-		return err
-	}
 	s.mu.Lock()
-	delete(s.groups, envID)
 	delete(s.runtimes, envID)
 	s.mu.Unlock()
 	return nil
@@ -735,7 +745,7 @@ func removeExternalRuntimeDir(dir string) error {
 	deadline := time.Now().Add(runtimeCleanupTimeout)
 	var lastErr error
 	for {
-		if err := os.RemoveAll(dir); err != nil {
+		if err := removeRuntimeDir(dir); err != nil {
 			if !errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, syscall.EEXIST) {
 				return err
 			}
@@ -755,6 +765,35 @@ func removeExternalRuntimeDir(dir string) error {
 		}
 		time.Sleep(runtimeCleanupPoll)
 	}
+}
+
+func removeRuntimeDir(dir string) error {
+	err := os.RemoveAll(dir)
+	if err == nil || (!errors.Is(err, syscall.EACCES) && !errors.Is(err, syscall.EPERM)) {
+		return err
+	}
+	if err := makeRuntimeTreeWritable(dir); err != nil {
+		return err
+	}
+	return os.RemoveAll(dir)
+}
+
+func makeRuntimeTreeWritable(dir string) error {
+	return filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
+		if errors.Is(walkErr, os.ErrNotExist) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		if err := os.Chmod(path, 0o700); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	})
 }
 
 func runtimeDirRemainedAbsent(dir string, quiet time.Duration) (bool, error) {

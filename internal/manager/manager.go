@@ -661,6 +661,8 @@ func (s *Manager) logSnapshot() {
 		"exec_run_duration", snapshot.Exec.RunDuration,
 		"exec_tracked_process_groups", snapshot.Exec.TrackedProcessGroups,
 		"exec_runtime_dirs", snapshot.Exec.RuntimeDirs,
+		"exec_runtime_cleanup_errors", snapshot.Exec.RuntimeCleanupErrors,
+		"exec_last_runtime_cleanup_error", snapshot.Exec.LastRuntimeCleanupError,
 		"exec_heavy_capacity", snapshot.Exec.HeavyCapacity,
 		"exec_heavy_queued", snapshot.Exec.HeavyQueued,
 		"exec_heavy_active", snapshot.Exec.HeavyActive,
