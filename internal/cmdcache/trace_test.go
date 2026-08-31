@@ -382,6 +382,50 @@ func TestParseTraceTreatsDanglingUnfinishedAsComplete(t *testing.T) {
 	}
 }
 
+// strace classifies an execve superseded by another thread's execve as
+// unfinished: that call never selected an executable and has no dependency to
+// record. Treating its entry registers as a successful call can manufacture a
+// relative executable path with no cwd and reject an otherwise complete build.
+func TestParseTraceIgnoresTerminatedUnfinishedExec(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		call     string
+		terminal string
+	}{
+		{
+			name:     "execve exited",
+			call:     `execve("stale-registers", [], 0xc000000000 /* 18 vars */`,
+			terminal: "+++ exited with 0 +++",
+		},
+		{
+			name:     "execveat superseded",
+			call:     `execveat(AT_FDCWD, "stale-registers", [], 0xc000000000, 0`,
+			terminal: "+++ superseded by execve in pid 3 +++",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			obs := parseFixture(t, `1 openat(AT_FDCWD</>, "main.go", O_RDONLY) = 3</main.go>
+2 `+tt.call+` <unfinished ...>
+2 `+tt.terminal+`
+`)
+			if obs.Incomplete {
+				t.Fatal("an exec that never returned must not void the whole trace")
+			}
+			if !reflect.DeepEqual(obs.Reads, map[string]ReadKind{"main.go": ReadFile}) {
+				t.Fatalf("reads = %v, want only main.go", obs.Reads)
+			}
+		})
+	}
+}
+
+func TestParseTraceRejectsUnfinishedExecWithoutTerminalEvent(t *testing.T) {
+	obs := parseFixture(t, `2 execve("stale-registers", [], 0xc000000000 /* 18 vars */ <unfinished ...>
+`)
+	if !obs.Incomplete {
+		t.Fatal("an unfinished exec without a terminal event may be a truncated trace")
+	}
+}
+
 // `go build -o app` 先探测 app 不存在再创建它。这不是读写冲突：
 // 追踪已经精确给出执行前状态是「不存在」，不需要在执行后回头哈希。
 func TestObservationAllowsProbeThenCreate(t *testing.T) {
