@@ -78,6 +78,63 @@ func TestOverlayMaterializeRecoversAndHandoffs(t *testing.T) {
 	}
 }
 
+func TestPublishHandlesOverlayMountedProject(t *testing.T) {
+	driver := detectOverlayDriver()
+	if driver == nil {
+		t.Skip("no usable OverlayFS backend")
+	}
+	root := t.TempDir()
+	lower := filepath.Join(root, "lower")
+	upper := filepath.Join(root, "upper")
+	work := filepath.Join(root, "work")
+	project := filepath.Join(root, "project")
+	for _, dir := range []string{lower, upper, work, project} {
+		if err := os.Mkdir(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(lower, "component"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(lower, "component", "existing.txt"),
+		[]byte("before"),
+		0o640,
+	); err != nil {
+		t.Fatal(err)
+	}
+	mount, err := driver.mount(lower, upper, work, project)
+	if err != nil {
+		t.Skipf("mount OverlayFS project: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := mount.close(); err != nil {
+			t.Errorf("unmount OverlayFS project: %v", err)
+		}
+	})
+
+	store := NewStore(project)
+	mustFork(t, store, "", "root")
+	if err := store.View("root").Write("component/existing.txt", []byte("after")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.View("root").Write("component/new.txt", []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Publish("root"); err != nil {
+		t.Fatalf("publish into OverlayFS project: %v", err)
+	}
+	for path, want := range map[string]string{
+		"component/existing.txt": "after",
+		"component/new.txt":      "new",
+	} {
+		got, err := os.ReadFile(filepath.Join(project, filepath.FromSlash(path)))
+		if err != nil || string(got) != want {
+			t.Fatalf("published %s = %q, %v, want %q", path, got, err, want)
+		}
+	}
+}
+
 func TestOverlayMaterializeFallsBackAtCapacity(t *testing.T) {
 	if detectOverlayDriver() == nil {
 		t.Skip("no usable OverlayFS backend")
@@ -177,6 +234,7 @@ func TestFuseOverlayAbsorbUsesUpperdirDelta(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	seedDirectoryDeletionFixture(t, base)
 	store, err := NewPersistentStoreWithOptions(base, state, Options{Overlay: true})
 	if err != nil {
 		t.Fatal(err)
@@ -192,6 +250,7 @@ func TestFuseOverlayAbsorbUsesUpperdirDelta(t *testing.T) {
 	if err := os.Remove(filepath.Join(live, "deleted.txt")); err != nil {
 		t.Fatal(err)
 	}
+	removeDirectoryDeletionFixture(t, live)
 	if err := os.WriteFile(filepath.Join(live, "created.txt"), []byte("created"), 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -202,6 +261,7 @@ func TestFuseOverlayAbsorbUsesUpperdirDelta(t *testing.T) {
 		stats.AbsorbUpperFallbacks != 0 || stats.AbsorbScans != 0 {
 		t.Fatalf("absorb stats = %+v, want one FUSE upperdir fast path", stats)
 	}
+	assertDirectoryTombstones(t, store, "parent")
 	if err := store.Fork("parent", "child"); err != nil {
 		t.Fatal(err)
 	}
@@ -220,6 +280,11 @@ func TestFuseOverlayAbsorbUsesUpperdirDelta(t *testing.T) {
 	if _, err := store.View("child").Read("deleted.txt"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("child deleted.txt error = %v, want not found", err)
 	}
+	childLive, err := store.Materialize("child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDirectoryDeletionFixtureAbsent(t, childLive)
 }
 
 func TestNativeOverlayAbsorbUsesUpperdirDelta(t *testing.T) {
@@ -238,6 +303,7 @@ func TestNativeOverlayAbsorbUsesUpperdirDelta(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(base, "deleted.txt"), []byte("delete me"), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	seedDirectoryDeletionFixture(t, base)
 	for i := range 1000 {
 		path := filepath.Join(base, "fixture", fmt.Sprintf("file-%04d.txt", i))
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
@@ -266,6 +332,7 @@ func TestNativeOverlayAbsorbUsesUpperdirDelta(t *testing.T) {
 	if err := os.Remove(filepath.Join(live, "deleted.txt")); err != nil {
 		t.Fatal(err)
 	}
+	removeDirectoryDeletionFixture(t, live)
 	if err := os.WriteFile(filepath.Join(live, "created.txt"), []byte("created"), 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -275,6 +342,7 @@ func TestNativeOverlayAbsorbUsesUpperdirDelta(t *testing.T) {
 	if err := store.Absorb("parent"); err != nil {
 		t.Fatal(err)
 	}
+	assertDirectoryTombstones(t, store, "parent")
 	if err := os.Remove(filepath.Join(live, "created.txt")); err != nil {
 		t.Fatal(err)
 	}
@@ -319,6 +387,7 @@ func TestNativeOverlayAbsorbUsesUpperdirDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertDirectoryDeletionFixtureAbsent(t, childLive)
 	info, err := os.Stat(filepath.Join(childLive, "executable.sh"))
 	if err != nil || info.Mode().Perm()&0o111 == 0 {
 		t.Fatalf("child executable mode = %v, %v, want executable", info, err)

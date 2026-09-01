@@ -71,12 +71,6 @@ func (s *Store) absorbOverlayUpper(envID, live string) (
 	overlayFiles := s.visibleOverlayFilesLocked(envID)
 	s.mu.Unlock()
 
-	for _, entry := range scan.entries {
-		if entry.whiteout && before[entry.rel].dir {
-			return true, false, scan.visited, nil
-		}
-	}
-
 	tombstones := make(map[string]blob)
 	writes := make(map[string]blob)
 	var totalSize int64
@@ -85,7 +79,7 @@ func (s *Store) absorbOverlayUpper(envID, live string) (
 	for _, entry := range scan.entries {
 		old := before[entry.rel]
 		if entry.whiteout {
-			if old.file {
+			if old.file || old.dir {
 				tombstones[entry.rel] = blob{tombstone: true}
 			}
 			continue

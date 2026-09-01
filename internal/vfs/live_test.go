@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -459,6 +461,73 @@ func TestAbsorbTombsLiveDeletions(t *testing.T) {
 	}
 }
 
+func TestAbsorbKeepsDeletedDirectoriesAbsentAfterFork(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	state := t.TempDir()
+	seedDirectoryDeletionFixture(t, base)
+	store, err := NewPersistentStoreWithOptions(base, state, Options{Overlay: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, store, "", "parent")
+	live, err := store.Materialize("parent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeDirectoryDeletionFixture(t, live)
+
+	mustFork(t, store, "parent", "child")
+	assertDirectoryTombstones(t, store, "parent")
+	childLive, err := store.Materialize("child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDirectoryDeletionFixtureAbsent(t, childLive)
+	stats := store.Stats()
+	if stats.MaterializeOverlays != 0 ||
+		stats.MaterializeReflinks+stats.MaterializeFullCopies == 0 {
+		t.Fatalf("materialize stats = %+v, want copy/reflink workspace", stats)
+	}
+}
+
+func TestAbsorbKeepsDeletedDirectoriesAbsentAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	state := t.TempDir()
+	seedDirectoryDeletionFixture(t, base)
+	first, err := NewPersistentStoreWithOptions(base, state, Options{Overlay: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, first, "", "parent")
+	live, err := first.Materialize("parent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeDirectoryDeletionFixture(t, live)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := NewPersistentStoreWithOptions(base, state, Options{Overlay: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Restore("parent"); err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, restarted, "parent", "child")
+	assertDirectoryTombstones(t, restarted, "parent")
+	childLive, err := restarted.Materialize("child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDirectoryDeletionFixtureAbsent(t, childLive)
+}
+
 func TestAbsorbSkipsUnchangedHostFiles(t *testing.T) {
 	t.Parallel()
 
@@ -715,6 +784,372 @@ func TestReleaseAbsorbsLiveWrites(t *testing.T) {
 	}
 	if string(got) != "from-live" {
 		t.Fatalf("overlay from-live.txt = %q, want from-live", got)
+	}
+}
+
+func TestPublishCommitsEnvironmentToBase(t *testing.T) {
+	t.Parallel()
+
+	store, base := newTestStore(t)
+	mustFork(t, store, "", "root")
+	if err := store.View("root").Write("hello.txt", []byte("changed")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.View("root").Write("new/script.sh", []byte("#!/bin/sh\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.View("root").Delete("sub"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := os.ReadFile(filepath.Join(base, "hello.txt")); err != nil || string(got) != "hello" {
+		t.Fatalf("base changed before publish: %q, %v", got, err)
+	}
+	receipt, err := store.Publish("root")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := os.ReadFile(filepath.Join(base, "hello.txt")); err != nil || string(got) != "changed" {
+		t.Fatalf("published hello.txt = %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(base, "new", "script.sh")); err != nil || string(got) != "#!/bin/sh\n" {
+		t.Fatalf("published new/script.sh = %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "sub")); !os.IsNotExist(err) {
+		t.Fatalf("published deletion left sub: %v", err)
+	}
+	if receipt.Changed() == 0 {
+		t.Fatalf("receipt reported no change: %+v", receipt)
+	}
+	if !slices.Contains(receipt.Updated, "hello.txt") ||
+		!slices.Contains(receipt.Added, "new/script.sh") {
+		t.Fatalf("receipt missing rendered paths: %+v", receipt)
+	}
+	// Publication is a display operation: the checkpoint it rendered from is
+	// still there to render again.
+	if stats := store.Stats(); stats.Environments == 0 {
+		t.Fatalf("publication consumed the checkpoint: %+v", stats)
+	}
+}
+
+func TestPublishCommitsLiveDirectoryDeletions(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	seedDirectoryDeletionFixture(t, base)
+	store := NewStore(base)
+	mustFork(t, store, "", "root")
+	live, err := store.Materialize("root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeDirectoryDeletionFixture(t, live)
+
+	if _, err := store.Publish("root"); err != nil {
+		t.Fatal(err)
+	}
+	assertDirectoryDeletionFixtureAbsent(t, base)
+}
+
+func TestPublishCountsNoopAsCommit(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	mustFork(t, store, "", "root")
+	receipt, err := store.Publish("root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A checkpoint that matches what is displayed is a legitimate publication
+	// that changed nothing, and the receipt has to say so.
+	if receipt.Changed() != 0 {
+		t.Fatalf("no-op publish receipt = %+v, want no change", receipt)
+	}
+	stats := store.Stats()
+	if stats.PublishAttempts != 1 || stats.PublishCommits != 1 || stats.PublishErrors != 0 {
+		t.Fatalf("no-op publish stats = %+v", stats)
+	}
+}
+
+func TestFreezeRetainsSnapshotWithoutLiveWorkspace(t *testing.T) {
+	t.Parallel()
+
+	store, base := newTestStore(t)
+	mustFork(t, store, "", "root")
+	live, err := store.Materialize("root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "frozen.txt"), []byte("kept"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Freeze("root"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "frozen.txt")); !os.IsNotExist(err) {
+		t.Fatalf("Freeze changed base: %v", err)
+	}
+	got, err := store.View("root").Read("frozen.txt")
+	if err != nil || string(got) != "kept" {
+		t.Fatalf("frozen snapshot = %q, %v", got, err)
+	}
+	if stats := store.Stats(); stats.Environments != 1 || stats.LiveDirs != 0 {
+		t.Fatalf("Freeze stats = %+v, want one environment and no live dirs", stats)
+	}
+}
+
+func TestArchiveRestoresAndPublishesAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	state := t.TempDir()
+	store, err := NewPersistentStore(base, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, store, "", "source")
+	live, err := store.Materialize("source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(live, "nested", "archived.txt"), "kept")
+	if err := store.Archive("source", "archive"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Discard("source"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := NewPersistentStore(base, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Restore("archive"); err != nil {
+		t.Fatalf("restore archive: %v", err)
+	}
+	if _, err := restarted.Publish("archive"); err != nil {
+		t.Fatalf("publish restored archive: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(base, "nested", "archived.txt"))
+	if err != nil || string(got) != "kept" {
+		t.Fatalf("published archive = %q, %v, want kept", got, err)
+	}
+}
+
+func TestArchiveRejectsUnknownSource(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t)
+	err := store.Archive("missing", "archive")
+	if !errors.Is(err, ErrUnknownEnvironment) {
+		t.Fatalf("Archive() error = %v, want ErrUnknownEnvironment", err)
+	}
+	if stats := store.Stats(); stats.Environments != 0 || stats.LiveDirs != 0 {
+		t.Fatalf("failed archive created state: %+v", stats)
+	}
+}
+
+func TestPublishDoesNotCommitGitMetadata(t *testing.T) {
+	t.Parallel()
+
+	store, base := newTestStore(t)
+	mustWriteFile(t, filepath.Join(base, ".git", "index"), "host-index")
+	mustFork(t, store, "", "root")
+	live, err := store.Materialize("root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, ".git", "index"), []byte("agent-index"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "hello.txt"), []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.Publish("root"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(base, ".git", "index")); err != nil || string(got) != "host-index" {
+		t.Fatalf("published .git/index = %q, %v, want host metadata unchanged", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(base, "hello.txt")); err != nil || string(got) != "changed" {
+		t.Fatalf("published hello.txt = %q, %v, want changed", got, err)
+	}
+}
+
+func TestPublishProceedsWithActiveSibling(t *testing.T) {
+	t.Parallel()
+
+	// Publication used to wait for every sibling to stop, because it wrote into
+	// the overlay lower directory. It renders onto the display surface instead,
+	// so a running sibling is no longer its business.
+	store, base := newTestStore(t)
+	mustFork(t, store, "", "root")
+	if err := store.View("root").Write("hello.txt", []byte("changed")); err != nil {
+		t.Fatal(err)
+	}
+	store.mountMu.Lock()
+	store.mounts["sibling"] = &overlayMount{}
+	store.mountMu.Unlock()
+	t.Cleanup(func() {
+		store.mountMu.Lock()
+		delete(store.mounts, "sibling")
+		store.mountMu.Unlock()
+	})
+
+	if _, err := store.Publish("root"); err != nil {
+		t.Fatalf("Publish() with active sibling: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(base, "hello.txt")); err != nil || string(got) != "changed" {
+		t.Fatalf("published hello.txt = %q, %v, want changed", got, err)
+	}
+}
+
+func TestPublishLeavesDisplayOnlyFiles(t *testing.T) {
+	t.Parallel()
+
+	// The display surface is the user's own directory. A build artifact they or
+	// their tooling created after the session adopted the project was never in
+	// any checkpoint, so no checkpoint may remove it; a file that did come from
+	// the project still goes when the checkpoint drops it.
+	store, base := newTestStore(t)
+	mustFork(t, store, "", "root")
+	if err := store.View("root").Delete("sub/nested.txt"); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(base, "build", "artifact.o"), "local")
+
+	if _, err := store.Publish("root"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(base, "build", "artifact.o")); err != nil || string(got) != "local" {
+		t.Fatalf("publication removed a display-only file: %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "sub", "nested.txt")); !os.IsNotExist(err) {
+		t.Fatalf("publication kept a dropped project file: %v", err)
+	}
+}
+
+func TestPublishRetainsDisplacedDisplayContent(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	mustWriteFile(t, filepath.Join(base, "hello.txt"), "hello")
+	store, err := NewPersistentStore(base, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, store, "", "root")
+	if err := store.View("root").Write("hello.txt", []byte("from-checkpoint")); err != nil {
+		t.Fatal(err)
+	}
+	// Someone edited the project directly before the checkpoint was rendered.
+	mustWriteFile(t, filepath.Join(base, "hello.txt"), "hand-edited")
+
+	receipt, err := store.Publish("root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Replaced == "" {
+		t.Fatalf("receipt did not record displaced content: %+v", receipt)
+	}
+	got, err := os.ReadFile(filepath.Join(receipt.Replaced, "hello.txt"))
+	if err != nil || string(got) != "hand-edited" {
+		t.Fatalf("retained content = %q, %v, want hand-edited", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(base, "hello.txt")); err != nil || string(got) != "from-checkpoint" {
+		t.Fatalf("published hello.txt = %q, %v", got, err)
+	}
+}
+
+func TestPublishRendersAnEarlierCheckpointAgain(t *testing.T) {
+	t.Parallel()
+
+	// Checkpoints are versions to show, not a ratchet: going back is rendering
+	// the earlier one again.
+	store, base := newTestStore(t)
+	mustFork(t, store, "", "first")
+	if err := store.View("first").Write("hello.txt", []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, store, "first", "second")
+	if err := store.View("second").Write("hello.txt", []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.Publish("second"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(base, "hello.txt")); err != nil || string(got) != "second" {
+		t.Fatalf("hello.txt = %q, %v, want second", got, err)
+	}
+	receipt, err := store.Publish("first")
+	if err != nil {
+		t.Fatalf("re-render earlier checkpoint: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(base, "hello.txt")); err != nil || string(got) != "first" {
+		t.Fatalf("hello.txt = %q, %v, want first", got, err)
+	}
+	if !slices.Contains(receipt.Updated, "hello.txt") {
+		t.Fatalf("receipt missing the reverted path: %+v", receipt)
+	}
+}
+
+func TestPersistentPublishLeavesEnvironmentReadsAlone(t *testing.T) {
+	t.Parallel()
+
+	// The whole point of the floor: what a running environment reads must not
+	// move when a checkpoint is rendered for the user.
+	base := t.TempDir()
+	mustWriteFile(t, filepath.Join(base, "hello.txt"), "original")
+	store, err := NewPersistentStore(base, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, store, "", "done")
+	if err := store.View("done").Write("hello.txt", []byte("published")); err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, store, "", "running")
+
+	if _, err := store.Publish("done"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.View("running").Read("hello.txt")
+	if err != nil || string(got) != "original" {
+		t.Fatalf("running environment read %q, %v, want the floor's original", got, err)
+	}
+}
+
+func TestPersistentFloorRetakenWhenProjectChangedBetweenSessions(t *testing.T) {
+	t.Parallel()
+
+	// A later session has to build on what the user can actually see, so a
+	// project edited outside Threadmill is re-adopted as the new floor.
+	base := t.TempDir()
+	state := t.TempDir()
+	mustWriteFile(t, filepath.Join(base, "hello.txt"), "original")
+	store, err := NewPersistentStore(base, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(base, "hello.txt"), "edited-between-sessions")
+
+	restarted, err := NewPersistentStore(base, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustFork(t, restarted, "", "next")
+	got, err := restarted.View("next").Read("hello.txt")
+	if err != nil || string(got) != "edited-between-sessions" {
+		t.Fatalf("new session read %q, %v, want the edited project", got, err)
 	}
 }
 
@@ -1186,6 +1621,58 @@ func TestAbsorbRejectsTotalSizeExceeded(t *testing.T) {
 	err = store.Absorb("env-a")
 	if err == nil || !errors.Is(err, ErrTotalSizeExceeded) {
 		t.Fatalf("Absorb error = %v, want ErrTotalSizeExceeded", err)
+	}
+}
+
+func seedDirectoryDeletionFixture(t *testing.T, root string) {
+	t.Helper()
+	for _, path := range []string{
+		"m4/macros/compiler.m4",
+		"m4/nested/platform.m4",
+		"build-aux/install-sh",
+		"build-aux/nested/missing",
+	} {
+		mustWriteFile(t, filepath.Join(root, filepath.FromSlash(path)), path)
+	}
+}
+
+func removeDirectoryDeletionFixture(t *testing.T, root string) {
+	t.Helper()
+	for _, name := range []string{"m4", "build-aux"} {
+		if err := os.RemoveAll(filepath.Join(root, name)); err != nil {
+			t.Fatalf("remove %s: %v", name, err)
+		}
+	}
+}
+
+func assertDirectoryDeletionFixtureAbsent(t *testing.T, root string) {
+	t.Helper()
+	for _, name := range []string{"m4", "build-aux"} {
+		if _, err := os.Stat(filepath.Join(root, name)); !os.IsNotExist(err) {
+			t.Fatalf("%s survived directory deletion: %v", name, err)
+		}
+	}
+}
+
+func assertDirectoryTombstones(t *testing.T, store *Store, envID string) {
+	t.Helper()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	layer := store.envs[envID]
+	if layer == nil {
+		t.Fatalf("environment %q is missing", envID)
+	}
+	for _, name := range []string{"m4", "build-aux"} {
+		item, ok := layer.files[name]
+		if !ok || !item.tombstone {
+			t.Fatalf("overlay %q = %+v, %v, want directory tombstone", name, item, ok)
+		}
+		prefix := name + "/"
+		for path := range layer.files {
+			if strings.HasPrefix(path, prefix) {
+				t.Fatalf("overlay contains redundant descendant %q below %q", path, name)
+			}
+		}
 	}
 }
 
