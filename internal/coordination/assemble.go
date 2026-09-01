@@ -217,7 +217,7 @@ func NewManagerLoop(
 	if overlay.NamedTools == nil {
 		overlay.NamedTools = make(map[string]agenttool.Tool)
 	}
-	for name, tool := range GraphToolMap(graph) {
+	for name, tool := range GraphToolMap(graph, stores) {
 		overlay.NamedTools[name] = tool
 	}
 	loop, err := agent.NewManager(provider, contextWindow, agents, extra, overlay)

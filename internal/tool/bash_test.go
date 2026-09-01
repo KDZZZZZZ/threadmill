@@ -25,6 +25,9 @@ func TestBashDefinitionOmitsEnvAndCwd(t *testing.T) {
 	if !strings.Contains(schema, `"command"`) {
 		t.Fatalf("bash schema missing command: %s", schema)
 	}
+	if !strings.Contains(def.Description, "后代进程") {
+		t.Fatalf("bash description omits traced process lifetime: %q", def.Description)
+	}
 }
 
 func TestBashUnboundExecuteError(t *testing.T) {

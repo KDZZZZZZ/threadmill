@@ -1,11 +1,18 @@
 package tui
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 
 	"github.com/KDZZZZZZ/threadmill/internal/event"
@@ -92,6 +99,33 @@ func TestManagerDeltaThenSkipsFullOutput(t *testing.T) {
 	}
 }
 
+func TestManagerFinalOutputCompletesPartialStream(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{Root: "/ws"}))
+	m = apply(t, m, event.ModelStart("manager", 1, 0))
+	m = apply(t, m, event.ModelDelta("manager", "Hel"))
+	m = apply(t, m, event.ModelEnd("manager", "stub", time.Time{}, 0, 0, 0, nil))
+	m = apply(t, m, OutputMsg{Text: "Hello"})
+
+	view := m.viewport.View()
+	if strings.Count(view, "Hello") != 1 || strings.Contains(view, "HelHel") {
+		t.Fatalf("view = %q", view)
+	}
+}
+
+func TestFailedStreamDoesNotSuppressNextTurnOutput(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{Root: "/ws"}))
+	m = apply(t, m, event.ModelStart("manager", 1, 0))
+	m = apply(t, m, event.ModelDelta("manager", "partial"))
+	m = apply(t, m, event.ModelEnd("manager", "stub", time.Time{}, 0, 0, 0, errors.New("broken stream")))
+	m = apply(t, m, event.ModelStart("manager", 2, 0))
+	m = apply(t, m, event.ModelEnd("manager", "stub", time.Time{}, 0, 0, 0, nil))
+	m = apply(t, m, OutputMsg{Text: "recovered answer"})
+
+	if view := m.viewport.View(); !strings.Contains(view, "recovered answer") {
+		t.Fatalf("next turn output was suppressed: %q", view)
+	}
+}
+
 func TestManagerEmptyActivityKeepsFullOutput(t *testing.T) {
 	m := sized(newModel(&fakeChat{}, Info{Root: "/ws"}))
 	m = apply(t, m, event.ModelDelta("manager", ""))
@@ -99,6 +133,28 @@ func TestManagerEmptyActivityKeepsFullOutput(t *testing.T) {
 	view := m.viewport.View()
 	if strings.Count(view, "completed snapshot") != 1 {
 		t.Fatalf("view = %q", view)
+	}
+}
+
+func TestManagerDeltasCoalesceTranscriptRefreshes(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{Root: "/ws"}))
+	m = apply(t, m, event.ModelStart("manager", 1, 0))
+	next, cmd := m.Update(event.ModelDelta("manager", "a"))
+	m = next.(model)
+	if cmd == nil {
+		t.Fatal("first delta should schedule the next transcript frame")
+	}
+	if view := m.viewport.View(); !strings.Contains(view, "a") {
+		t.Fatalf("first delta was not rendered immediately: %q", view)
+	}
+
+	m = apply(t, m, event.ModelDelta("manager", "b"))
+	if view := m.viewport.View(); strings.Contains(view, "ab") {
+		t.Fatalf("second delta rebuilt transcript before the scheduled frame: %q", view)
+	}
+	m = apply(t, m, cmd())
+	if view := m.viewport.View(); !strings.Contains(view, "ab") {
+		t.Fatalf("coalesced delta missing after frame: %q", view)
 	}
 }
 
@@ -126,8 +182,17 @@ func TestChromeShowsTitleAndKeyHints(t *testing.T) {
 	if !strings.Contains(view, "THREADMILL") {
 		t.Fatalf("missing title: %q", view)
 	}
-	if !strings.Contains(view, "ENTER  SEND") {
+	if !strings.Contains(view, "ENTER SEND") {
 		t.Fatalf("missing key hints: %q", view)
+	}
+	if !strings.Contains(view, "CHAT") || !strings.Contains(view, "GRAPH") {
+		t.Fatalf("missing mode tabs: %q", view)
+	}
+	if !strings.Contains(view, "❯") {
+		t.Fatalf("missing input prompt: %q", view)
+	}
+	if !strings.Contains(view, "┄") {
+		t.Fatalf("missing stitch rules: %q", view)
 	}
 	if !strings.Contains(view, "deepseek") {
 		t.Fatalf("missing model: %q", view)
@@ -137,21 +202,22 @@ func TestChromeShowsTitleAndKeyHints(t *testing.T) {
 func TestHeaderCarriesMStripeAccent(t *testing.T) {
 	m := sized(newModel(&fakeChat{}, Info{Root: "/tmp/proj", Model: "deepseek"}))
 	if view := m.View(); !strings.Contains(view, "▮▮▮") {
-		t.Fatalf("missing three-color M stripe: %q", view)
+		t.Fatalf("missing woven brand stripe: %q", view)
 	}
 }
 
-func TestRunningViewKeepsRedInBrandOnly(t *testing.T) {
+func TestViewIsAchromatic(t *testing.T) {
 	profile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
 
 	m := sized(newModel(&fakeChat{}, Info{Root: "/tmp/proj", Model: "deepseek"}))
-	m.items = []item{{kind: itemActivity, text: "tool bash start"}}
-	m.refresh()
-	if got := strings.Count(m.View(), "38;2;227;38;54"); got != 1 {
-		t.Fatalf("chat M red occurrences = %d, want brand stripe only", got)
+	m.items = []item{
+		{kind: itemUser, text: "ship the TUI"},
+		{kind: itemError, text: "boom"},
 	}
+	m.refresh()
+	assertAchromatic(t, m.View())
 
 	m.mode = viewGraph
 	m.tasks = map[string]taskView{
@@ -165,9 +231,45 @@ func TestRunningViewKeepsRedInBrandOnly(t *testing.T) {
 	m.taskOrder = []string{"task-1"}
 	m.inflight = map[string]int{"task-1:executor": 1}
 	m.refresh()
+	assertAchromatic(t, m.View())
+}
 
-	if got := strings.Count(m.View(), "38;2;227;38;54"); got != 1 {
-		t.Fatalf("graph M red occurrences = %d, want brand stripe only", got)
+// sgrTrueColor 匹配 38;2;r;g;b 与 48;2;r;g;b 形式的真彩色 SGR 序列。
+var sgrTrueColor = regexp.MustCompile(`(?:38|48);2;(\d+);(\d+);(\d+)`)
+
+// assertAchromatic 守护墨织不变量:界面里的每个真彩色都必须 R==G==B。
+func assertAchromatic(t *testing.T, view string) {
+	t.Helper()
+	matches := sgrTrueColor.FindAllStringSubmatch(view, -1)
+	if len(matches) == 0 {
+		t.Fatal("view carries no true color at all")
+	}
+	for _, match := range matches {
+		if match[1] != match[2] || match[2] != match[3] {
+			t.Fatalf("non-achromatic color %s in view", match[0])
+		}
+	}
+}
+
+func TestErrorItemsUseReverseNotHue(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+
+	m := sized(newModel(&fakeChat{}, Info{}))
+	m.items = []item{{kind: itemError, text: "boom"}}
+	m.refresh()
+	view := m.View()
+	if !strings.Contains(view, "48;2;245;245;245") {
+		t.Fatalf("error should be an ink reverse bar: %q", view)
+	}
+	assertAchromatic(t, view)
+}
+
+func TestEmptyTranscriptShowsWeaveMotif(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{}))
+	if view := m.viewport.View(); !strings.Contains(view, "▚") {
+		t.Fatalf("empty state missing weave motif: %q", view)
 	}
 }
 
@@ -186,8 +288,9 @@ func TestVisualLanguageSeparatesConversationLayers(t *testing.T) {
 		"▮",
 		"YOU",
 		"TM",
+		"┆",
 		"› bash start",
-		"ENTER  SEND",
+		"ENTER SEND",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing %q: %q", want, view)
@@ -305,6 +408,9 @@ func TestTabSwitchesToRuntimeGraph(t *testing.T) {
 		Phase:   event.PhaseStart,
 	})
 	m = apply(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	for m.weave > 0 {
+		m = apply(t, m, weaveTickMsg{})
+	}
 
 	view := m.View()
 	for _, want := range []string{"GRAPH", "task-2", "PLANNER", "EXECUTOR", "VERIFIER"} {
@@ -312,6 +418,41 @@ func TestTabSwitchesToRuntimeGraph(t *testing.T) {
 			t.Fatalf("graph missing %q: %q", want, view)
 		}
 	}
+}
+
+func TestTabWeaveTransition(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{Root: "/tmp/proj", Model: "deepseek"}))
+	m.items = []item{{kind: itemUser, text: "ship the TUI"}}
+	m.refresh()
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(model)
+	if m.weave == 0 || cmd == nil {
+		t.Fatalf("tab should start the weave transition, weave=%d", m.weave)
+	}
+	masked := ansi.Strip(m.View())
+	m.weave = 0
+	if visibleRunes(masked) >= visibleRunes(ansi.Strip(m.View())) {
+		t.Fatal("first weave frame should hide every other row")
+	}
+
+	// resize 立即结束转场,避免遮罩错帧。
+	m = sized(newModel(&fakeChat{}, Info{}))
+	m = apply(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	m = apply(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	if m.weave != 0 {
+		t.Fatalf("resize should cancel the weave, got %d", m.weave)
+	}
+}
+
+func visibleRunes(s string) int {
+	n := 0
+	for _, r := range s {
+		if r != ' ' && r != '\n' {
+			n++
+		}
+	}
+	return n
 }
 
 func TestStatusBarTokensAndTasks(t *testing.T) {
@@ -344,6 +485,223 @@ func TestStatusBarTokensAndTasks(t *testing.T) {
 	got = m.statusLine()
 	if !strings.Contains(got, "tasks 1") {
 		t.Fatalf("running: %q", got)
+	}
+}
+
+func TestTaskLifecycleCountsBareTaskID(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{}))
+	m = apply(t, m, event.TaskStart("task-12"))
+	if got := m.statusLine(); !strings.Contains(got, "tasks 1") {
+		t.Fatalf("task start not counted: %q", got)
+	}
+	m = apply(t, m, event.TaskEnd("task-12", "done", time.Time{}, nil))
+	if got := m.statusLine(); !strings.Contains(got, "tasks 0") {
+		t.Fatalf("task end still counted: %q", got)
+	}
+}
+
+func TestRecoveredRoleDoesNotStayFailed(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{}))
+	m = apply(t, m, event.ToolStart("task-3:executor", "bash", "call-1"))
+	m = apply(t, m, event.ToolEnd(
+		"task-3:executor", "bash", "call-1", time.Time{}, true, errors.New("exit 1"),
+	))
+	if got := m.taskRoleStatus(m.tasks["task-3"], "executor"); got != taskFailed {
+		t.Fatalf("failed status = %v", got)
+	}
+	m = apply(t, m, event.ModelStart("task-3:executor", 1, 1))
+	m = apply(t, m, event.ModelEnd("task-3:executor", "stub", time.Time{}, 0, 1, 0, nil))
+	if got := m.taskRoleStatus(m.tasks["task-3"], "executor"); got == taskFailed {
+		t.Fatalf("successful recovery remained failed: %v", got)
+	}
+}
+
+func TestViewportScrollsAndDoesNotJumpOnNewOutput(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{}))
+	for i := range 40 {
+		m.items = append(m.items, item{kind: itemUser, text: fmt.Sprintf("line %02d", i)})
+	}
+	m.refresh()
+	bottom := m.viewport.YOffset
+	if bottom == 0 {
+		t.Fatal("test transcript did not overflow viewport")
+	}
+
+	m = apply(t, m, tea.KeyMsg{Type: tea.KeyPgUp})
+	if m.viewport.YOffset >= bottom {
+		t.Fatalf("page up offset = %d, bottom = %d", m.viewport.YOffset, bottom)
+	}
+	scrolled := m.viewport.YOffset
+	m = apply(t, m, OutputMsg{Text: "new tail"})
+	if m.viewport.YOffset != scrolled {
+		t.Fatalf("new output jumped from %d to %d", scrolled, m.viewport.YOffset)
+	}
+}
+
+func TestViewportMouseWheelScrolls(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{}))
+	for i := range 40 {
+		m.items = append(m.items, item{kind: itemUser, text: fmt.Sprintf("line %02d", i)})
+	}
+	m.refresh()
+	bottom := m.viewport.YOffset
+	m = apply(t, m, tea.MouseMsg{Button: tea.MouseButtonWheelUp, Action: tea.MouseActionPress})
+	if m.viewport.YOffset >= bottom {
+		t.Fatalf("mouse wheel offset = %d, bottom = %d", m.viewport.YOffset, bottom)
+	}
+}
+
+func TestGraphViewportScrollsAndFollowsOnlyFromBottom(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{}))
+	for i := range 20 {
+		m = apply(t, m, event.TaskStart(fmt.Sprintf("task-%d", i)))
+	}
+	m = apply(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	if m.viewport.YOffset != 0 {
+		t.Fatalf("graph opened at offset %d, want top", m.viewport.YOffset)
+	}
+	m = apply(t, m, tea.KeyMsg{Type: tea.KeyPgDown})
+	if m.viewport.YOffset == 0 {
+		t.Fatal("graph page down did not scroll")
+	}
+
+	m.viewport.GotoBottom()
+	bottom := m.viewport.YOffset
+	m = apply(t, m, event.TaskStart("task-20"))
+	if m.viewport.YOffset <= bottom {
+		t.Fatalf("graph did not follow new task from bottom: before=%d after=%d", bottom, m.viewport.YOffset)
+	}
+
+	m.viewport.PageUp()
+	scrolled := m.viewport.YOffset
+	m = apply(t, m, event.TaskStart("task-21"))
+	if m.viewport.YOffset != scrolled {
+		t.Fatalf("graph jumped while reading history: before=%d after=%d", scrolled, m.viewport.YOffset)
+	}
+}
+
+func TestSpinnerTickDoesNotMoveScrolledTranscript(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{}))
+	for i := range 40 {
+		m.items = append(m.items, item{kind: itemUser, text: fmt.Sprintf("line %02d", i)})
+	}
+	m.refresh()
+	m.viewport.PageUp()
+	m.inflight["manager"] = 1
+	want := m.viewport.YOffset
+	m = apply(t, m, spinner.TickMsg{})
+	if m.viewport.YOffset != want {
+		t.Fatalf("spinner moved transcript from %d to %d", want, m.viewport.YOffset)
+	}
+}
+
+func TestRuntimeActivitiesExplainSilentPeriods(t *testing.T) {
+	tests := []struct {
+		name string
+		ev   event.RuntimeEvent
+		want string
+	}{
+		{name: "manager model", ev: event.ModelStart("manager", 1, 1), want: "THINKING"},
+		{name: "task model", ev: event.ModelStart("task-1:planner", 1, 1), want: "MODEL task-1:planner"},
+		{name: "tool", ev: event.ToolStart("task-1:executor", "bash", "call-1"), want: "TOOL bash"},
+		{name: "task", ev: event.TaskStart("task-1"), want: "TASK task-1"},
+		{name: "memory", ev: event.MemoryStart("manager", "organize_subgraph", "sg-1"), want: "MEMORY organize_subgraph"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := sized(newModel(&fakeChat{}, Info{}))
+			m = apply(t, m, tt.ev)
+			if got := m.statusLine(); !strings.Contains(got, tt.want) {
+				t.Fatalf("status = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMemoryEndRevealsOuterTaskAndMemoryErrors(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{}))
+	m = apply(t, m, event.TaskStart("task-4"))
+	m = apply(t, m, event.MemoryStart("task-4:planner", "memory_search", "hidden-memory_search"))
+	m = apply(t, m, event.MemoryEnd(
+		"task-4:planner", "memory_search", "hidden-memory_search", time.Time{}, errors.New("memory unavailable"),
+	))
+	if got := m.statusLine(); !strings.Contains(got, "TASK task-4") {
+		t.Fatalf("outer activity missing after memory end: %q", got)
+	}
+	if view := m.viewport.View(); !strings.Contains(view, "memory unavailable") {
+		t.Fatalf("memory error invisible: %q", view)
+	}
+}
+
+func TestTaskTerminalFailureIsVisibleWithoutReport(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{}))
+	m = apply(t, m, event.TaskStart("task-6"))
+	m = apply(t, m, event.TaskEnd("task-6", "failed", time.Time{}, errors.New("workspace publish failed")))
+	if view := m.viewport.View(); !strings.Contains(view, "task-6") || !strings.Contains(view, "workspace publish failed") {
+		t.Fatalf("task terminal error invisible: %q", view)
+	}
+}
+
+func TestTaskCancellationIsVisibleWithoutFailureStyling(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{}))
+	m = apply(t, m, event.TaskStart("task-7"))
+	m = apply(t, m, event.ModelStart("task-7:planner", 1, 0))
+	m = apply(t, m, event.ModelEnd("task-7:planner", "stub", time.Time{}, 0, 1, 0, nil))
+	m = apply(t, m, event.TaskEnd("task-7", "canceled", time.Time{}, context.Canceled))
+	if len(m.items) == 0 || m.items[len(m.items)-1].kind != itemActivity {
+		t.Fatalf("cancellation item = %#v, want activity", m.items)
+	}
+	if got := m.taskRoleStatus(m.tasks["task-7"], "planner"); got != taskCanceled {
+		t.Fatalf("canceled role status = %v", got)
+	}
+	if view := m.viewport.View(); !strings.Contains(view, "task-7 canceled") {
+		t.Fatalf("task cancellation invisible: %q", view)
+	}
+}
+
+func TestNestedMemoryLifecycleAlwaysHasNamedActivity(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{}))
+	sequence := []event.RuntimeEvent{
+		event.MemoryStart("subgraph-organizer", "organize_subgraph", "sg-8"),
+		event.ModelStart("subgraph-organizer", 2, 1),
+		event.ModelDelta("subgraph-organizer", ""),
+		event.ModelEnd("subgraph-organizer", "stub", time.Time{}, 0, 3, 0, nil),
+	}
+	for i, ev := range sequence {
+		m = apply(t, m, ev)
+		if !m.busy() || m.currentActivity() == "ACTIVE" {
+			t.Fatalf("step %d has anonymous or idle activity: busy=%v activity=%q", i, m.busy(), m.currentActivity())
+		}
+	}
+	if got := m.currentActivity(); got != "MEMORY organize_subgraph" {
+		t.Fatalf("activity after organizer model = %q", got)
+	}
+	m = apply(t, m, event.MemoryOrganized(
+		"subgraph-organizer", "organize_subgraph", "sg-8", time.Time{}, 4, 2, nil,
+	))
+	if m.busy() || len(m.activity) != 0 {
+		t.Fatalf("completed memory activity leaked: busy=%v activity=%#v", m.busy(), m.activity)
+	}
+}
+
+func TestModelRetryIsVisible(t *testing.T) {
+	m := sized(newModel(&fakeChat{}, Info{}))
+	m = apply(t, m, event.ModelStart("manager", 1, 1))
+	m = apply(t, m, event.ModelRetry("manager", 2, "rate limited"))
+	if view := m.viewport.View(); !strings.Contains(view, "retry 2") || !strings.Contains(view, "rate limited") {
+		t.Fatalf("retry invisible: %q", view)
+	}
+}
+
+func TestSanitizeTextRemovesTerminalControlSequences(t *testing.T) {
+	input := "safe\x1b[31mred\x1b[0m\x1b]52;c;YXR0YWNr\x07\r\x9b32m tail"
+	got := sanitizeText(input)
+	if strings.ContainsAny(got, "\x1b\x07\r\x9b") {
+		t.Fatalf("control characters survived: %q", got)
+	}
+	if !strings.Contains(got, "safered") || !strings.Contains(got, "tail") {
+		t.Fatalf("printable text lost: %q", got)
 	}
 }
 
@@ -396,6 +754,100 @@ func TestDeltaClearsThinking(t *testing.T) {
 	}
 	if !strings.Contains(view, "Hi") {
 		t.Fatalf("missing delta: %q", view)
+	}
+}
+
+func BenchmarkTaskDeltaUpdate(b *testing.B) {
+	m := sized(newModel(&fakeChat{}, Info{}))
+	for i := range 1000 {
+		m.items = append(m.items, item{kind: itemUser, text: fmt.Sprintf("transcript line %04d", i)})
+	}
+	m.refresh()
+	ev := event.ModelDelta("task-1:executor", "hidden task delta")
+
+	b.ReportAllocs()
+	for b.Loop() {
+		next, _ := m.Update(ev)
+		m = next.(model)
+	}
+}
+
+func BenchmarkManagerDeltaUpdate(b *testing.B) {
+	m := sized(newModel(&fakeChat{}, Info{}))
+	for i := range 1000 {
+		m.items = append(m.items, item{kind: itemUser, text: fmt.Sprintf("transcript line %04d", i)})
+	}
+	m.refresh()
+
+	b.ReportAllocs()
+	for b.Loop() {
+		next, _ := m.Update(event.ModelDelta("manager", "x"))
+		m = next.(model)
+	}
+}
+
+func TestActiveEdgeFlowsWhileBusy(t *testing.T) {
+	frames := [2]string{" ─╌▶ ", " ╌─▶ "}
+	first := flowEdge(0, taskActive, frames, " ┄┄▶ ", " ──▶ ")
+	second := flowEdge(1, taskActive, frames, " ┄┄▶ ", " ──▶ ")
+	if first == second {
+		t.Fatalf("active edge should flow between frames: %q", first)
+	}
+	if lipgloss.Width(first) != lipgloss.Width(second) {
+		t.Fatalf(
+			"flow frames changed width: %d vs %d",
+			lipgloss.Width(first),
+			lipgloss.Width(second),
+		)
+	}
+
+	m := sized(newModel(&fakeChat{}, Info{}))
+	m.inflight["task-1:executor"] = 1
+	m = apply(t, m, spinner.TickMsg{})
+	if m.phase != 1 {
+		t.Fatalf("busy tick should advance phase, got %d", m.phase)
+	}
+	m.inflight = map[string]int{}
+	m = apply(t, m, spinner.TickMsg{})
+	if m.phase != 1 {
+		t.Fatalf("idle tick must freeze phase, got %d", m.phase)
+	}
+
+	// GRAPH 视图随相位重渲染:同一份任务图,相邻帧的连线不同。
+	g := sized(newModel(&fakeChat{}, Info{}))
+	g.mode = viewGraph
+	g.tasks = map[string]taskView{
+		"task-1": {
+			id:         "task-1",
+			outcome:    "active",
+			seenRoles:  map[string]bool{"planner": true, "executor": true},
+			failedRole: map[string]bool{},
+		},
+	}
+	g.taskOrder = []string{"task-1"}
+	g.inflight = map[string]int{"task-1:executor": 1}
+	g.refresh()
+	frame0 := g.viewport.View()
+	g = apply(t, g, spinner.TickMsg{})
+	if g.viewport.View() == frame0 {
+		t.Fatal("graph view did not re-render on tick while busy")
+	}
+}
+
+func TestActiveNodeBreathes(t *testing.T) {
+	seen := map[lipgloss.TerminalColor]bool{}
+	for phase := uint64(0); phase < 6; phase++ {
+		seen[breatheColor(phase)] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("active node border should breathe across shades, got %v", seen)
+	}
+	for shade := range seen {
+		if shade != lipgloss.TerminalColor(colorLine) &&
+			shade != lipgloss.TerminalColor(colorLineHi) &&
+			shade != lipgloss.TerminalColor(colorInk) {
+			t.Fatalf("breathe stepped outside the gray ramp: %v", shade)
+		}
 	}
 }
 

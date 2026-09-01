@@ -178,7 +178,7 @@ func (s *Store) baseEpoch() string {
 		return s.epoch
 	}
 	hasher := sha256.New()
-	if root, err := confinedRoot(s.baseDir); err == nil {
+	if root, err := confinedRoot(s.floorDir); err == nil {
 		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return nil //nolint:nilerr // 基线纪元取尽力而为的扫描

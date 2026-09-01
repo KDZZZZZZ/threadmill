@@ -22,14 +22,14 @@ func ReflinkSupported(root string) bool {
 	return magic == fsMagicBtrfs || magic == fsMagicXFS
 }
 
-// ReflinkCloneable 报告从 baseDir 拷贝到 liveRoot 能否走 reflink：
+// ReflinkCloneable 报告从 floorDir 拷贝到 liveRoot 能否走 reflink：
 // 要求 liveRoot 在 reflink 文件系统上，且两者在同一设备（跨文件系统内核会回退为全量拷贝）。
-func ReflinkCloneable(baseDir, liveRoot string) bool {
+func ReflinkCloneable(floorDir, liveRoot string) bool {
 	if !ReflinkSupported(liveRoot) {
 		return false
 	}
 	var base, live syscall.Stat_t
-	if err := syscall.Stat(baseDir, &base); err != nil {
+	if err := syscall.Stat(floorDir, &base); err != nil {
 		return false
 	}
 	if err := syscall.Stat(liveRoot, &live); err != nil {

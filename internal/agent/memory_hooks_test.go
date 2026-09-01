@@ -226,3 +226,54 @@ func mustAddMemoryHooks(t *testing.T, loop *Loop) {
 		t.Fatal(err)
 	}
 }
+
+// 注入投影按 (revision, 订阅列表) memo；取消订阅后列表变了，缓存文本必须失效。
+func TestSubscribedMemoryProjectionInvalidatesOnUnsubscribe(t *testing.T) {
+	resetDefaultStore(t)
+	loop, err := NewLoop(Config{
+		Provider: ignoreOrganize(func(context.Context, Request) (AssistantMessage, error) {
+			return AssistantMessage{Content: "done"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAddMemoryHooks(t, loop)
+
+	store := ctxgraph.NewStore()
+	bindEnvGraph(t, loop, store, "env-1", ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-a"}, {ID: "sg-b"}},
+		Nodes: []ctxgraph.Node{
+			{ID: "n-a", Statement: "only in a", SubgraphIDs: []string{"sg-a"}},
+			{ID: "n-b", Statement: "only in b", SubgraphIDs: []string{"sg-b"}},
+		},
+	})
+	loop.subscribeSubgraph("sg-a")
+	loop.subscribeSubgraph("sg-b")
+
+	ctx := context.Background()
+	before, err := loop.subscribedMemoryBlock(ctx)
+	if err != nil {
+		t.Fatalf("subscribedMemoryBlock() error = %v", err)
+	}
+	if !strings.Contains(before, "only in a") || !strings.Contains(before, "only in b") {
+		t.Fatalf("projection = %q, want both subscribed subgraphs", before)
+	}
+
+	if !loop.unsubscribeSubgraph("sg-b") {
+		t.Fatal("unsubscribeSubgraph(sg-b) = false, want the dynamic subscription removed")
+	}
+	after, err := loop.subscribedMemoryBlock(ctx)
+	if err != nil {
+		t.Fatalf("subscribedMemoryBlock() error = %v", err)
+	}
+	if strings.Contains(after, "only in b") {
+		t.Fatalf("projection = %q, want the unsubscribed subgraph gone (memo not invalidated)", after)
+	}
+	if !strings.Contains(after, "only in a") {
+		t.Fatalf("projection = %q, want the remaining subscription", after)
+	}
+	if loop.unsubscribeSubgraph("sg-b") {
+		t.Fatal("unsubscribeSubgraph(sg-b) = true on a second call, want idempotent removal")
+	}
+}

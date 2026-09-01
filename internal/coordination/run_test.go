@@ -19,12 +19,13 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
-func TestGraphRunAbsorbsAndReleasesLiveAfterRoles(t *testing.T) {
+func TestGraphRunRetainsRootFilesForManagerPublish(t *testing.T) {
 	t.Parallel()
 
 	graph := newGraph()
 	task := graph.AddTask()
-	files := vfs.NewStore(t.TempDir())
+	base := t.TempDir()
+	files := vfs.NewStore(base)
 	var live string
 	assemble := func(task Task) (Roles, error) {
 		return Roles{
@@ -47,12 +48,12 @@ func TestGraphRunAbsorbsAndReleasesLiveAfterRoles(t *testing.T) {
 	if _, err := graph.Run(context.Background(), task.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	got, err := files.View(task.Env.ID).Read("from-bash.txt")
-	if err != nil {
-		t.Fatalf("Absorb did not pick up live write: %v", err)
+	if _, err := os.Stat(filepath.Join(base, "from-bash.txt")); !os.IsNotExist(err) {
+		t.Fatalf("Run published before manager selection: %v", err)
 	}
-	if string(got) != "from-live" {
-		t.Fatalf("from-bash.txt = %q, want from-live", got)
+	got, err := files.View(task.Env.ID).Read("from-bash.txt")
+	if err != nil || string(got) != "from-live" {
+		t.Fatalf("retained from-bash.txt = %q, %v, want from-live", got, err)
 	}
 	if live == "" {
 		t.Fatal("executor did not materialize")
@@ -60,14 +61,32 @@ func TestGraphRunAbsorbsAndReleasesLiveAfterRoles(t *testing.T) {
 	if _, err := os.Stat(live); !os.IsNotExist(err) {
 		t.Fatalf("live dir still exists after Run: %v", err)
 	}
+	if stats := files.Stats(); stats.Environments != 2 || stats.LiveDirs != 0 {
+		t.Fatalf("completed root snapshot stats = %+v, want task and archive", stats)
+	}
+	if err := files.Discard(task.Env.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executeGraphTool(
+		t,
+		GraphTools(graph, Stores{Memory: ctxgraph.NewStore(), Files: files}),
+		coordPublishTaskName,
+		`{"task_id":"`+task.ID+`"}`,
+	); err != nil {
+		t.Fatalf("publish archived task: %v", err)
+	}
+	got, err = os.ReadFile(filepath.Join(base, "from-bash.txt"))
+	if err != nil || string(got) != "from-live" {
+		t.Fatalf("published archived from-bash.txt = %q, %v", got, err)
+	}
 }
 
-func TestGraphRunLaterRootReplacesPersistentParentFiles(t *testing.T) {
+func TestGraphRunLaterRootInheritsBeforeManagerPublishes(t *testing.T) {
 	t.Parallel()
 
 	graph := newGraph()
 	first := graph.AddTask()
-	child := mustSpawn(t, graph, first.Planner.ID, first.Verifier.ID)
+	_ = mustSpawn(t, graph, first.Planner.ID, first.Verifier.ID)
 	second := graph.AddTask()
 	base := t.TempDir()
 	state := t.TempDir()
@@ -80,13 +99,19 @@ func TestGraphRunLaterRootReplacesPersistentParentFiles(t *testing.T) {
 		return Roles{
 			Planner: instantAsker(),
 			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
-				if task.ID == first.ID {
+				switch task.ID {
+				case first.ID:
 					live, err := files.Materialize(task.Env.ID)
 					if err != nil {
 						return "", err
 					}
 					if err := os.WriteFile(filepath.Join(live, "first.txt"), []byte("kept"), 0o600); err != nil {
 						return "", err
+					}
+				case second.ID:
+					got, err := files.View(task.Env.ID).Read("first.txt")
+					if err != nil || string(got) != "kept" {
+						return "", fmt.Errorf("inherited first.txt = %q: %v", got, err)
 					}
 				}
 				return query + "/executor", nil
@@ -98,47 +123,34 @@ func TestGraphRunLaterRootReplacesPersistentParentFiles(t *testing.T) {
 	if _, err := graph.Run(context.Background(), first.ID, "first", stores, assemble); err != nil {
 		t.Fatalf("first Run() error = %v", err)
 	}
-	firstLive, err := files.Materialize(first.Env.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstLiveInfo, err := os.Stat(firstLive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range []string{
-		first.Env.ID + ":planner",
-		first.Env.ID + ":verifier",
-		child.Env.ID,
-		child.Env.ID + ":verifier",
-	} {
-		if err := files.Fork(first.Env.ID, id); err != nil {
-			t.Fatalf("create retained task workspace %s: %v", id, err)
-		}
+	if _, err := os.Stat(filepath.Join(base, "first.txt")); !os.IsNotExist(err) {
+		t.Fatalf("first root published before manager selection: %v", err)
 	}
 	if _, err := graph.Run(context.Background(), second.ID, "second", stores, assemble); err != nil {
 		t.Fatalf("second Run() error = %v", err)
 	}
-	got, err := files.View(second.Env.ID).Read("first.txt")
+	if _, err := os.Stat(filepath.Join(base, "first.txt")); !os.IsNotExist(err) {
+		t.Fatalf("second root published before manager selection: %v", err)
+	}
+	if _, err := executeGraphTool(
+		t,
+		GraphTools(graph, stores),
+		coordPublishTaskName,
+		`{"task_id":"`+second.ID+`"}`,
+	); err != nil {
+		t.Fatalf("publish second root: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(base, "first.txt"))
 	if err != nil {
 		t.Fatalf("second root missed parent files: %v", err)
 	}
 	if string(got) != "kept" {
 		t.Fatalf("second root first.txt = %q, want kept", got)
 	}
-	if got := files.Stats().LiveDirs; got != 1 {
-		t.Fatalf("persistent live dirs = %d, want only the latest root", got)
-	}
-	secondLive, err := files.Materialize(second.Env.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondLiveInfo, err := os.Stat(secondLive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !os.SameFile(firstLiveInfo, secondLiveInfo) {
-		t.Fatal("later root copied the released parent live directory instead of taking ownership")
+	// Publication renders; it does not reclaim. The checkpoints stay available
+	// so a later one can be shown, or an earlier one shown again.
+	if stats := files.Stats(); stats.Environments == 0 {
+		t.Fatalf("publication consumed the root snapshots: %+v", stats)
 	}
 	restored, err := vfs.NewPersistentStore(base, state)
 	if err != nil {
@@ -150,6 +162,41 @@ func TestGraphRunLaterRootReplacesPersistentParentFiles(t *testing.T) {
 	got, err = restored.View(second.Env.ID).Read("first.txt")
 	if err != nil || string(got) != "kept" {
 		t.Fatalf("restored second root first.txt = %q, %v", got, err)
+	}
+}
+
+func TestGraphRunDoesNotPublishFailedRoot(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	task := graph.AddTask()
+	base := t.TempDir()
+	files := vfs.NewStore(base)
+	wantErr := errors.New("executor failed")
+	assemble := func(task Task) (Roles, error) {
+		return Roles{
+			Planner: instantAsker(),
+			Executor: askerFunc(func(_ context.Context, _ string) (string, error) {
+				if err := files.View(task.Env.ID).Write("failed.txt", []byte("must not publish")); err != nil {
+					return "", err
+				}
+				return "", wantErr
+			}),
+			Verifier: instantAsker(),
+		}, nil
+	}
+
+	if _, err := graph.Run(
+		context.Background(),
+		task.ID,
+		"in",
+		Stores{Memory: ctxgraph.NewStore(), Files: files},
+		assemble,
+	); !errors.Is(err, wantErr) {
+		t.Fatalf("Run() error = %v, want %v", err, wantErr)
+	}
+	if _, err := os.Stat(filepath.Join(base, "failed.txt")); !os.IsNotExist(err) {
+		t.Fatalf("failed root published files: %v", err)
 	}
 }
 
@@ -195,6 +242,85 @@ func TestGraphRunPlannerExecutorVerifierInOrder(t *testing.T) {
 	}
 	if got != "in/planner/executor/verifier" {
 		t.Fatalf("Run() = %q, want in/planner/executor/verifier", got)
+	}
+}
+
+func TestGraphRunResumesRecoverableRoleErrors(t *testing.T) {
+	t.Parallel()
+
+	for name, recoverable := range map[string]error{
+		"step slice":    agent.ErrMaxSteps,
+		"memory format": fmt.Errorf("compact failed: %w", agent.ErrMemoryFormat),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			graph := newGraph()
+			task := graph.AddTask()
+			calls := 0
+			got, err := graph.Run(
+				context.Background(),
+				task.ID,
+				"in",
+				Stores{Memory: ctxgraph.NewStore()},
+				func(Task) (Roles, error) {
+					return Roles{
+						Planner: askerFunc(func(_ context.Context, query string) (string, error) {
+							calls++
+							if calls == 1 {
+								return "", recoverable
+							}
+							return query + "/planner", nil
+						}),
+						Executor: instantAsker(),
+						Verifier: instantAsker(),
+					}, nil
+				},
+			)
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+			if calls != 2 {
+				t.Fatalf("planner calls = %d, want 2", calls)
+			}
+			if got != "in/planner" {
+				t.Fatalf("Run() = %q, want continued role output", got)
+			}
+		})
+	}
+}
+
+func TestGraphRunReportsRepeatedRecoverableRoleErrorAsStall(t *testing.T) {
+	t.Parallel()
+
+	graph := newGraph()
+	task := graph.AddTask()
+	calls := 0
+	var reported error
+	_, err := graph.RunWithReport(
+		context.Background(),
+		task.ID,
+		"in",
+		Stores{Memory: ctxgraph.NewStore()},
+		func(Task) (Roles, error) {
+			return Roles{
+				Planner: askerFunc(func(context.Context, string) (string, error) {
+					calls++
+					return "", agent.ErrMemoryFormat
+				}),
+				Executor: instantAsker(),
+				Verifier: instantAsker(),
+			}, nil
+		},
+		func(_ Task, _ string, taskErr error) error {
+			reported = taskErr
+			return nil
+		},
+	)
+	if !errors.Is(err, ErrRoleStalled) || !errors.Is(reported, ErrRoleStalled) {
+		t.Fatalf("errors = (%v, %v), want %v", err, reported, ErrRoleStalled)
+	}
+	if calls < 2 || calls > 10 {
+		t.Fatalf("planner calls = %d, want bounded recovery attempts", calls)
 	}
 }
 

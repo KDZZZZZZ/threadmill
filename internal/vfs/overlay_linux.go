@@ -241,7 +241,7 @@ func (s *Store) restoreOverlay(envID string) (string, bool, error) {
 		return live, true, nil
 	}
 	mount, err := s.overlay.mount(
-		s.baseDir,
+		s.floorDir,
 		filepath.Join(state, "upper"),
 		filepath.Join(state, "work"),
 		live,

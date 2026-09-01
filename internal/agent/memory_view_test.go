@@ -11,7 +11,7 @@ func viewFixture() ctxgraph.Graph {
 		Revision: 4,
 		Subgraphs: []ctxgraph.Subgraph{
 			{ID: "sg-a", Name: "包 A", Summary: "任务启动包", Revision: 2, Kind: "package"},
-			{ID: "sg-b", Name: "包 B", Summary: "主题子图", Revision: 3, Kind: "general"},
+			{ID: "sg-b", Name: "包 B", Summary: "主题子图", Admission: "只收带命令与退出码的 fact", Scope: "verifier 验收阶段", Revision: 3, Kind: "general"},
 		},
 		Nodes: []ctxgraph.Node{
 			{ID: "n-1", Kind: "fact", Statement: "命令 go test 退出码 0", Status: "accepted", SubgraphIDs: []string{"sg-a"}, SourceRefs: []string{"src-1"}, CreatorAgentID: "task-1:executor"},
@@ -47,6 +47,13 @@ func TestBuildMemoryViewLevelOneKeepsSubgraphFieldsOnly(t *testing.T) {
 	}
 	if view.UnassignedCount != 1 || len(view.Unassigned) != 0 {
 		t.Errorf("unassigned = %d/%d, want count 1 and no detail", view.UnassignedCount, len(view.Unassigned))
+	}
+
+	// 子图说明是级别 1 的内容：所有 Agent 都要能看到准入内容和适用范围，
+	// 否则无从判断该往哪张子图放节点、该不该继续订阅它。
+	described := subgraphByID(t, view, "sg-b")
+	if described.Admission != "只收带命令与退出码的 fact" || described.Scope != "verifier 验收阶段" {
+		t.Fatalf("level 1 dropped the subgraph description: %+v", described)
 	}
 }
 

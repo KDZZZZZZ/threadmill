@@ -5,7 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/KDZZZZZZ/threadmill/internal/agent"
 )
+
+const maxAutomaticRoleRecoveries = 2
 
 var (
 	// ErrUnknownTask 表示要执行的 task 不在图中。
@@ -15,7 +19,9 @@ var (
 	// ErrNilAsker 表示某个角色没有可调用的 Asker。
 	ErrNilAsker = errors.New("coordination: nil asker")
 	// ErrNilStore 表示缺少按环境隔离的记忆存储。
-	ErrNilStore             = errors.New("coordination: nil store")
+	ErrNilStore = errors.New("coordination: nil store")
+	// ErrRoleStalled 表示角色的持久回合在自动续接后仍遇到可恢复故障，需交给 manager 改变恢复策略。
+	ErrRoleStalled          = errors.New("coordination: role stalled")
 	errTaskReportProjection = errors.New("coordination: task report projection failed")
 )
 
@@ -216,7 +222,9 @@ func (r *runner) runTask(ctx context.Context, taskID, input string) (output stri
 		if r.stores.Files == nil {
 			return
 		}
-		err = errors.Join(err, r.stores.Files.Release(task.Env.ID))
+		releaseErr := r.stores.Files.Release(task.Env.ID)
+		archiveErr := r.stores.Files.Archive(task.Env.ID, taskSnapshotEnvID(task))
+		err = errors.Join(err, releaseErr, archiveErr)
 	}()
 
 	parentID := task.Env.ParentID
@@ -335,8 +343,11 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 	}
 
 	if !completed {
-		output, err = asker.Ask(ctx, input)
+		output, err = askRole(ctx, asker, input)
 		if err != nil {
+			if errors.Is(err, ErrRoleStalled) {
+				err = fmt.Errorf("%s (%s): %w", node.ID, node.Role, err)
+			}
 			if scope.cleanup != nil {
 				err = errors.Join(err, scope.cleanup(false))
 			}
@@ -376,6 +387,23 @@ func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input stri
 		}
 	}
 	return output, nil
+}
+
+func askRole(ctx context.Context, asker Asker, input string) (string, error) {
+	for recoveries := 0; ; recoveries++ {
+		output, err := asker.Ask(ctx, input)
+		if err == nil || !agent.IsRecoverableTurnError(err) {
+			return output, err
+		}
+		if recoveries >= maxAutomaticRoleRecoveries {
+			return "", fmt.Errorf(
+				"%w after %d automatic recoveries: %w",
+				ErrRoleStalled,
+				recoveries,
+				err,
+			)
+		}
+	}
 }
 
 type joinedFiles struct {

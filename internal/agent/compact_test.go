@@ -324,17 +324,43 @@ func TestKeepRecentIndex(t *testing.T) {
 	}
 }
 
-func TestEstimateTokensIncludesReplayModelData(t *testing.T) {
+func TestEstimateTokensUsesReplayModelDataInsteadOfDerivedAssistantFields(t *testing.T) {
 	t.Parallel()
 
 	message := Message{
 		Role:      RoleAssistant,
-		Content:   "text",
+		Content:   strings.Repeat("content", 100),
+		Thinking:  strings.Repeat("thinking", 100),
 		ModelData: json.RawMessage(`"` + strings.Repeat("x", 400) + `"`),
+		ToolCalls: []agenttool.Call{{
+			Name:      "echo",
+			Arguments: json.RawMessage(`{"text":"ignored when replay data exists"}`),
+		}},
 	}
-	want := (len(message.Content) + len(message.ModelData) + 3) / 4
+	want := (len(message.ModelData) + 3) / 4
 	if got := estimateTokens(message); got != want {
-		t.Fatalf("estimateTokens() = %d, want %d including replay model data", got, want)
+		t.Fatalf("estimateTokens() = %d, want %d from replay model data", got, want)
+	}
+}
+
+func TestEstimateTokensCountsToolResultOnce(t *testing.T) {
+	t.Parallel()
+
+	result := &agenttool.Result{
+		CallID:  "call-1",
+		Name:    "bash",
+		Content: strings.Repeat("output", 100),
+		Details: json.RawMessage(`"` + strings.Repeat("internal", 100) + `"`),
+	}
+	message := Message{
+		Role:       RoleTool,
+		Content:    result.Content,
+		ToolResult: result,
+	}
+	wantChars := len(result.CallID) + len(result.Name) + len(result.Content)
+	want := (wantChars + 3) / 4
+	if got := estimateTokens(message); got != want {
+		t.Fatalf("estimateTokens() = %d, want %d from replayed tool result", got, want)
 	}
 }
 
@@ -601,6 +627,27 @@ func TestCompactHistoryRetriesInvalidJSONWithReminder(t *testing.T) {
 	}
 }
 
+func TestCompactHistoryClassifiesExhaustedInvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	provider := &stubProvider{response: `{"nodes":[`}
+	_, _, err := CompactHistory(
+		context.Background(),
+		provider,
+		ctxgraph.Graph{},
+		[]Message{{Role: RoleUser, Content: "old work"}},
+		nil,
+		0,
+		"agent-a",
+	)
+	if !errors.Is(err, ErrMemoryFormat) {
+		t.Fatalf("error = %v, want %v", err, ErrMemoryFormat)
+	}
+	if provider.calls != maxOrganizeFormatAttempts {
+		t.Fatalf("model calls = %d, want %d", provider.calls, maxOrganizeFormatAttempts)
+	}
+}
+
 func TestSerializeConversationIncludesThinking(t *testing.T) {
 	t.Parallel()
 
@@ -723,5 +770,52 @@ func TestCompactHistoryBoundsLargeOrganizerPrompt(t *testing.T) {
 		if !strings.Contains(payload, want) {
 			t.Fatalf("organizer prompt lost %q", want)
 		}
+	}
+}
+
+func TestCompactHistoryUsesKnownContextWindowBeforeClipping(t *testing.T) {
+	t.Parallel()
+
+	provider := &stubProvider{response: `{"nodes":[]}`}
+	messages := []Message{{Role: RoleUser, Content: "ORIGINAL_GOAL"}}
+	for i := range 12 {
+		messages = append(messages, Message{
+			Role:    RoleTool,
+			Content: strings.Repeat(fmt.Sprintf("middle-%02d ", i), 1024),
+		})
+	}
+	messages = append(messages, Message{Role: RoleTool, Content: "RECENT_EVIDENCE"})
+	ctx := WithTranscript(context.Background(), Transcript{
+		CacheKey:      "planner",
+		CompactPrompt: "yaml compact",
+		ContextWindow: 272000,
+	})
+
+	_, tail, err := CompactHistory(
+		ctx,
+		provider,
+		ctxgraph.Graph{},
+		messages,
+		nil,
+		0,
+		"planner",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tail) != 0 {
+		t.Fatalf("tail = %#v, want fully compacted history", tail)
+	}
+	payload := provider.last.Messages[0].Content
+	if len(payload) <= maxOrganizePromptBytes {
+		t.Fatalf("organizer prompt = %d bytes, want known window to exceed fallback cap", len(payload))
+	}
+	for _, want := range []string{"ORIGINAL_GOAL", "middle-06", "RECENT_EVIDENCE"} {
+		if !strings.Contains(payload, want) {
+			t.Fatalf("organizer prompt lost %q", want)
+		}
+	}
+	if strings.Contains(payload, "middle omitted") {
+		t.Fatal("organizer prompt clipped history that fits the known context window")
 	}
 }

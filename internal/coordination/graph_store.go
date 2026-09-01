@@ -10,11 +10,13 @@ import (
 )
 
 type graphState struct {
-	Revision int64       `json:"revision"`
-	NextID   uint64      `json:"next_id"`
-	Tasks    []Task      `json:"tasks"`
-	Edges    []Edge      `json:"edges"`
-	Helps    []helpState `json:"helps,omitempty"`
+	Revision         int64       `json:"revision"`
+	NextID           uint64      `json:"next_id"`
+	PublishingTaskID string      `json:"publishing_task_id,omitempty"`
+	PublishedTaskID  string      `json:"published_task_id,omitempty"`
+	Tasks            []Task      `json:"tasks"`
+	Edges            []Edge      `json:"edges"`
+	Helps            []helpState `json:"helps,omitempty"`
 }
 
 // OpenGraph 打开一张持久化协调图；文件不存在时创建空图。
@@ -86,6 +88,22 @@ func validateGraphState(state graphState) error {
 	if state.NextID < maxID {
 		return fmt.Errorf("next id %d precedes task %d", state.NextID, maxID)
 	}
+	for field, taskID := range map[string]string{
+		"publishing task": state.PublishingTaskID,
+		"published task":  state.PublishedTaskID,
+	} {
+		if taskID == "" {
+			continue
+		}
+		if _, ok := knownTasks[taskID]; !ok {
+			return fmt.Errorf("%s %q is unknown", field, taskID)
+		}
+		for _, task := range state.Tasks {
+			if task.ID == taskID && task.Outcome != OutcomeDone && task.Outcome != OutcomeFailed {
+				return fmt.Errorf("%s %q has outcome %q", field, taskID, task.Outcome)
+			}
+		}
+	}
 	for _, edge := range state.Edges {
 		if _, ok := knownNodes[edge.From]; !ok {
 			return fmt.Errorf("edge from unknown node %q", edge.From)
@@ -111,6 +129,11 @@ func validateGraphState(state graphState) error {
 		if _, ok := knownNodes[help.NodeID]; !ok {
 			return fmt.Errorf("help request %q has unknown node %q", help.ID, help.NodeID)
 		}
+		if help.Units != nil {
+			if err := validateHelpUnits(help.Units); err != nil {
+				return fmt.Errorf("help request %q has invalid frontier: %w", help.ID, err)
+			}
+		}
 		for _, child := range help.Children {
 			if _, ok := knownNodes[child.From]; !ok {
 				return fmt.Errorf("help request %q has unknown source %q", help.ID, child.From)
@@ -131,11 +154,13 @@ func (g *Graph) stateLocked() graphState {
 		tasks[i].JoinedBy = nil
 	}
 	return graphState{
-		Revision: g.revision,
-		NextID:   g.nextID,
-		Tasks:    tasks,
-		Edges:    append([]Edge(nil), g.edges...),
-		Helps:    cloneHelpStates(g.helps),
+		Revision:         g.revision,
+		NextID:           g.nextID,
+		PublishingTaskID: g.publishingTaskID,
+		PublishedTaskID:  g.publishedTaskID,
+		Tasks:            tasks,
+		Edges:            append([]Edge(nil), g.edges...),
+		Helps:            cloneHelpStates(g.helps),
 	}
 }
 
@@ -150,12 +175,15 @@ func (g *Graph) applyStateLocked(state graphState) {
 	g.nextID = state.NextID
 	g.helps = cloneHelpStates(state.Helps)
 	g.revision = state.Revision
+	g.publishingTaskID = state.PublishingTaskID
+	g.publishedTaskID = state.PublishedTaskID
 	g.executing = false
 }
 
 func cloneHelpStates(states []helpState) []helpState {
 	cloned := append([]helpState(nil), states...)
 	for i := range cloned {
+		cloned[i].Units = cloneHelpUnits(states[i].Units)
 		cloned[i].Children = append([]helpChildState(nil), states[i].Children...)
 	}
 	return cloned

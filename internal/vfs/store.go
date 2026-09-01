@@ -20,10 +20,11 @@ import (
 
 // ErrInvalidPath 表示路径越出工作区或不是相对路径。
 var (
-	ErrInvalidPath       = errors.New("vfs: invalid path")
-	ErrSpecialFile       = errors.New("vfs: special file not supported")
-	ErrFileTooLarge      = errors.New("vfs: file too large")
-	ErrTotalSizeExceeded = errors.New("vfs: total size exceeded")
+	ErrInvalidPath        = errors.New("vfs: invalid path")
+	ErrUnknownEnvironment = errors.New("vfs: unknown environment")
+	ErrSpecialFile        = errors.New("vfs: special file not supported")
+	ErrFileTooLarge       = errors.New("vfs: file too large")
+	ErrTotalSizeExceeded  = errors.New("vfs: total size exceeded")
 )
 
 // Default limits for VFS absorb/file operations.
@@ -74,8 +75,14 @@ type Options struct {
 
 // Store 按环境保存 overlay。Fork 拍父 overlay 快照作基线，不复制 host 树。
 type Store struct {
-	mu            sync.Mutex // ponytail: one store mutex, per-env locks if throughput matters
-	baseDir       string
+	mu sync.Mutex // ponytail: one store mutex, per-env locks if throughput matters
+	// floorDir is the immutable tree every environment reads through and the
+	// overlay lower directory. displayDir is where Publish renders checkpoints
+	// for the user. A persistent store keeps them apart so publication never
+	// mutates what a running environment reads; NewStore collapses them, which
+	// only suits ephemeral stores with no environment outliving a publication.
+	floorDir      string
+	displayDir    string
 	liveRoot      string
 	envs          map[string]*layer
 	lives         map[string]string
@@ -90,8 +97,13 @@ type Store struct {
 	epochMu sync.Mutex
 	epoch   string // 基线仓一次性 stat 纪元，见 fingerprint.go
 
+	// publishedPaths tracks display paths added by earlier publications when the
+	// store has no live root to persist them to; see publish.go.
+	publishedPaths map[string]struct{}
+
 	baseFilesOnce sync.Once
 	baseFiles     map[string]fileSnapshot
+	baseDirs      map[string]struct{}
 	baseFilesErr  error
 
 	materializeCopies        uint64
@@ -121,6 +133,11 @@ type Store struct {
 	absorbPeakActive         int
 	absorbWaitDuration       time.Duration
 	handoffs                 uint64
+	publishAttempts          uint64
+	publishCommits           uint64
+	publishErrors            uint64
+	publishCleanupErrors     uint64
+	publishDuration          time.Duration
 }
 
 // Stats 是 VFS 当前持有的有界资源清单。
@@ -164,13 +181,21 @@ type Stats struct {
 	AbsorbPeakActive         int           `json:"absorb_peak_active"`
 	AbsorbWaitDuration       time.Duration `json:"absorb_wait_duration"`
 	Handoffs                 uint64        `json:"handoffs"`
+	PublishAttempts          uint64        `json:"publish_attempts"`
+	PublishCommits           uint64        `json:"publish_commits"`
+	PublishErrors            uint64        `json:"publish_errors"`
+	PublishCleanupErrors     uint64        `json:"publish_cleanup_errors"`
+	PublishDuration          time.Duration `json:"publish_duration"`
 }
 
-// NewStore 以只读 host 树为 base。写入不会改 baseDir。
-func NewStore(baseDir string) *Store {
+// NewStore 以 host 树为 base。环境执行期间 base 不变；只有 Publish 会提交最终结果。
+// NewStore reads through dir and also publishes into it. Environments must not
+// outlive a publication in this mode; NewPersistentStore separates the two.
+func NewStore(dir string) *Store {
 	materializeCapacity := min(runtime.NumCPU(), maxMaterializeCopies)
 	return &Store{
-		baseDir:       baseDir,
+		floorDir:      dir,
+		displayDir:    dir,
 		envs:          make(map[string]*layer),
 		lives:         make(map[string]string),
 		liveBaselines: make(map[string]*liveFingerprint),
@@ -180,15 +205,25 @@ func NewStore(baseDir string) *Store {
 	}
 }
 
+// WorkspaceRoot returns the canonical host path backing every environment: the
+// read floor, not the display surface. Execution backends use it only as a mount
+// target; agents never receive the backing tree directly.
+func (s *Store) WorkspaceRoot() (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("vfs: nil store")
+	}
+	return confinedRoot(s.floorDir)
+}
+
 // NewPersistentStore keeps materialized environments under liveRoot so another
 // Store instance can resume them after an ungraceful process exit.
-func NewPersistentStore(baseDir, liveRoot string) (*Store, error) {
-	return NewPersistentStoreWithOptions(baseDir, liveRoot, Options{})
+func NewPersistentStore(projectDir, liveRoot string) (*Store, error) {
+	return NewPersistentStoreWithOptions(projectDir, liveRoot, Options{})
 }
 
 // NewPersistentStoreWithOptions enables optional acceleration for a persistent store.
 func NewPersistentStoreWithOptions(
-	baseDir, liveRoot string,
+	projectDir, liveRoot string,
 	options Options,
 ) (*Store, error) {
 	if liveRoot == "" {
@@ -201,11 +236,18 @@ func NewPersistentStoreWithOptions(
 	if err != nil {
 		return nil, fmt.Errorf("vfs: open persistent live root: %w", err)
 	}
-	store := NewStore(baseDir)
+	floor, err := prepareFloor(projectDir, root)
+	if err != nil {
+		return nil, err
+	}
+	store := NewStore(floor)
+	store.displayDir = projectDir
 	store.liveRoot = root
 	if options.Overlay {
 		store.overlay = detectOverlayDriver()
-		if store.overlay != nil && !ReflinkCloneable(baseDir, root) {
+		// The floor lives under liveRoot, so a reflink clone is available
+		// whenever the filesystem supports it at all.
+		if store.overlay != nil && !ReflinkCloneable(floor, root) {
 			limit := options.OverlayLimit
 			if limit <= 0 {
 				limit = defaultOverlayLimit
@@ -289,6 +331,11 @@ func (s *Store) Stats() Stats {
 		AbsorbPeakActive:         s.absorbPeakActive,
 		AbsorbWaitDuration:       s.absorbWaitDuration,
 		Handoffs:                 s.handoffs,
+		PublishAttempts:          s.publishAttempts,
+		PublishCommits:           s.publishCommits,
+		PublishErrors:            s.publishErrors,
+		PublishCleanupErrors:     s.publishCleanupErrors,
+		PublishDuration:          s.publishDuration,
 	}
 	for _, layer := range s.envs {
 		for _, item := range layer.files {
@@ -1116,7 +1163,7 @@ func applyLayerList(files map[string]blob, rel string, ents map[string]DirEnt, t
 }
 
 func (s *Store) resolveHost(rel string) (string, error) {
-	root, err := confinedRoot(s.baseDir)
+	root, err := confinedRoot(s.floorDir)
 	if err != nil {
 		return "", err
 	}
@@ -1137,8 +1184,8 @@ func (s *Store) resolveHost(rel string) (string, error) {
 	return resolved, nil
 }
 
-func confinedRoot(baseDir string) (string, error) {
-	abs, err := filepath.Abs(baseDir)
+func confinedRoot(floorDir string) (string, error) {
+	abs, err := filepath.Abs(floorDir)
 	if err != nil {
 		return "", err
 	}

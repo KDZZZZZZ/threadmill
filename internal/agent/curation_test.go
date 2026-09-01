@@ -65,6 +65,7 @@ func TestDeepCurationQueryListsAllNodes(t *testing.T) {
 	query := deepCurationQuery(snapshot)
 	for _, want := range []string{
 		"深度整理请求",
+		"只审核下列实际提供的有界节点",
 		"memory_apply",
 		"- mem-1 [fact/disputed]（task-1:executor）无证据的已通过",
 		"- task-info-task-1 [directive/accepted]（unknown）实现 X",
@@ -72,6 +73,9 @@ func TestDeepCurationQueryListsAllNodes(t *testing.T) {
 		if !strings.Contains(query, want) {
 			t.Errorf("query missing %q:\n%s", want, query)
 		}
+	}
+	if strings.Contains(query, "全图执行审核") {
+		t.Fatalf("query overclaims full-graph visibility:\n%s", query)
 	}
 }
 

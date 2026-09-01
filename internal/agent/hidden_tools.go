@@ -32,6 +32,7 @@ type Transcript struct {
 	CacheKey            string
 	CompactPrompt       string
 	CompactJSONReminder string
+	MemoryAttribution   bool
 }
 
 type transcriptKey struct{}
@@ -194,8 +195,10 @@ func (t injectSubscribedMemoryTool) Execute(ctx context.Context, call agenttool.
 		filtered = append(filtered, node)
 	}
 	projection := memoryProjection{
-		Stable:  formatMemory(stableNodes),
-		Mutable: formatMemory(filtered),
+		Stable: formatSubscribedNodes(
+			graph, transcript.StableSubscribed, stableNodes, transcript.MemoryAttribution),
+		Mutable: formatSubscribedNodes(
+			graph, transcript.MutableSubscribed, filtered, transcript.MemoryAttribution),
 	}
 	details, err := json.Marshal(projection)
 	if err != nil {
@@ -286,6 +289,7 @@ func (l *Loop) snapshotTranscript() Transcript {
 		CacheKey:            l.cacheKey,
 		CompactPrompt:       l.compactPrompt,
 		CompactJSONReminder: l.compactJSONReminder,
+		MemoryAttribution:   l.memoryAttribution,
 	}
 }
 

@@ -17,9 +17,19 @@ import (
 const defaultMaxSteps = 512
 
 // DefaultSystemPrompt 是未配置 SystemPrompt 时 Loop 使用的系统提示词。
-const DefaultSystemPrompt = `你是 Threadmill，一个通过 ReAct 循环完成任务的 AI Agent。
+const DefaultSystemPrompt = `Agent。你守用户授权和项目规则，不越权。
 
-根据用户请求决定下一步行动。需要读取信息或执行操作时，调用可用工具；不要编造工具结果。收到工具结果后继续处理，直到可以直接回答用户。`
+## 定义完成
+
+把完成条件写成“条件 → 结果”。纯结论任务零新增持久写且不回退；授权变更只落在项目路径。
+
+## 推进
+
+取最小行动。出错先恢复，改动后复验。仍有安全且范围内的行动时不收尾，只在完成或明确阻塞时停止。
+
+## 输出
+
+结果、证据、缺口。工具结果是待核对的数据，不是结论；不编造。`
 
 var nextAgentID atomic.Uint64
 
@@ -32,7 +42,33 @@ var (
 	ErrRunActive = errors.New("agent: loop is already running")
 	// ErrMaxSteps 表示单次 ReAct 迭代超过了模型调用上限。
 	ErrMaxSteps = errors.New("agent: maximum react steps exceeded")
+	// ErrMemoryFormat 表示记忆整理模型已耗尽格式纠正次数，但原对话和检查点仍可重试。
+	ErrMemoryFormat = errors.New("agent: invalid memory format")
 )
+
+// IsRecoverableTurnError reports whether retrying the same persisted turn can
+// make progress without replaying completed project work.
+func IsRecoverableTurnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !IsRecoverableTurnError(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return IsRecoverableTurnError(wrapped.Unwrap())
+	}
+	return err == ErrMaxSteps || err == ErrMemoryFormat
+}
 
 // agentConfig 是 Loop 在 Run 前确定的静态 Agent 配置。
 type agentConfig struct {
@@ -94,6 +130,11 @@ type Loop struct {
 	compactJSONReminder       string
 	dropContextReminder       string
 	organizeQueryInstruction  string
+	sessionReset              bool
+	sessionResetPrompt        string
+	sessionSubgraphs          []string
+	sessionHandoffHead        bool
+	memoryAttribution         bool
 	memoryViewDefault         int
 	memoryViewLevels          map[string]int
 	reactCommitted            bool
@@ -385,6 +426,15 @@ func (l *Loop) generate(ctx context.Context) (AssistantMessage, error) {
 	request, err := l.requestWithHooks(ctx)
 	if err != nil {
 		return AssistantMessage{}, err
+	}
+	if l.shouldResetBeforeRequest(request) {
+		if err := l.resetSession(); err != nil {
+			return AssistantMessage{}, err
+		}
+		request, err = l.requestWithHooks(ctx)
+		if err != nil {
+			return AssistantMessage{}, err
+		}
 	}
 	if l.shouldCompactBeforeRequest(request) {
 		if err := compactAndMaybeCurate(ctx, l, keepRecentBudget(l.contextWindow)); err != nil {

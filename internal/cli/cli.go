@@ -37,6 +37,55 @@ type options struct {
 	message    string
 }
 
+type messageSender interface {
+	Send(tea.Msg)
+}
+
+// tuiEventBridge preserves events emitted while manager.Open resumes work,
+// before Bubble Tea has entered its event loop.
+type tuiEventBridge struct {
+	mu      sync.Mutex
+	target  messageSender
+	pending []tea.Msg
+}
+
+func newTUIEventBridge() *tuiEventBridge {
+	return &tuiEventBridge{}
+}
+
+func (b *tuiEventBridge) send(msg tea.Msg) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.target == nil {
+		b.pending = append(b.pending, msg)
+		return
+	}
+	b.target.Send(msg)
+}
+
+func (b *tuiEventBridge) bind(target messageSender) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, msg := range b.pending {
+		target.Send(msg)
+	}
+	b.pending = nil
+	b.target = target
+}
+
+func newTUIManagerOptions(opts options, bridge *tuiEventBridge) manager.Options {
+	return manager.Options{
+		Root:       opts.dir,
+		ConfigPath: opts.configPath,
+		Output: func(text string) {
+			bridge.send(tui.OutputMsg{Text: text})
+		},
+		OnEvent: func(_ context.Context, ev event.RuntimeEvent) {
+			bridge.send(ev)
+		},
+	}
+}
+
 // Run 解析参数：-p 单发纯文本，默认进入 TUI。
 func Run(args []string, stdio IO) int {
 	errOut := stdio.Err
@@ -138,27 +187,16 @@ func runTUI(
 		}
 		setupComplete = true
 	}
-	var p *tea.Program
-	managerOptions := manager.Options{
-		Root:       opts.dir,
-		ConfigPath: opts.configPath,
-		Output: func(text string) {
-			if p != nil {
-				p.Send(tui.OutputMsg{Text: text})
-			}
-		},
-		OnEvent: func(_ context.Context, ev event.RuntimeEvent) {
-			if p != nil {
-				p.Send(ev)
-			}
-		},
-	}
+	bridge := newTUIEventBridge()
+	managerOptions := newTUIManagerOptions(opts, bridge)
 	mgr, err := open(ctx, managerOptions)
 	if !setupComplete && errors.Is(err, provider.ErrCredentialNotFound) {
 		if err := firstTimeSetup(opts, stdio.In, stdio.Err, stdio.ReadSecret); err != nil {
 			fmt.Fprintln(stdio.Err, err)
 			return 1
 		}
+		bridge = newTUIEventBridge()
+		managerOptions = newTUIManagerOptions(opts, bridge)
 		mgr, err = open(ctx, managerOptions)
 	}
 	if err != nil {
@@ -167,9 +205,18 @@ func runTUI(
 	}
 	defer mgr.Close()
 
-	p = tui.NewProgram(ctx, mgr, tui.Info{Root: opts.dir, Model: mgr.ModelName()})
-	if _, err := p.Run(); err != nil {
-		fmt.Fprintln(stdio.Err, err)
+	p := tui.NewProgram(ctx, mgr, tui.Info{Root: opts.dir, Model: mgr.ModelName()})
+	// Program.Send blocks until Run starts. Bind in parallel so queued startup
+	// events enter the same ordered path as live manager events.
+	bound := make(chan struct{})
+	go func() {
+		bridge.bind(p)
+		close(bound)
+	}()
+	_, runErr := p.Run()
+	<-bound
+	if runErr != nil {
+		fmt.Fprintln(stdio.Err, runErr)
 		return 1
 	}
 	return 0

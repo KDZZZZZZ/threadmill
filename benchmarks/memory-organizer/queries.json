@@ -1,0 +1,113 @@
+[
+  {
+    "id": "prune-and-frontier",
+    "group": "control",
+    "task": "请求方已从局部 Autotools 清理转入全局收口；先清退失效订阅，再建立可供后续查询复用的当前风险前沿。",
+    "query": "整理当前仍可能阻断最终交付的最小风险前沿。以 mem-109、mem-160、mem-161 为待核候选，只纳入尚未闭合、会改变后续验收行动且带直接证据锚的节点；新子图要让后来者能判断下一步查 ABI/对象等价、源码覆盖还是 ARM/toolchain，不复述完整任务历史。本次判断同时经过两组时间化清理证据：mem-164 与后来的 mem-175，以及 mem-165 与后来的 mem-177；读取这些节点后，若新证据已使旧的“当前失败”观察只剩历史意义，就顺手把旧普通节点标为 outdated，若条件或对象并不相同则保持不动。任何不确定内容保持 disputed。",
+    "exclude": "当前请求方明确声明 sg-q-1 与 sg-q-2 的局部清理范围已经失效：两者合计内容过宽、重复且不再匹配全局收口职责，请取消这两个动态订阅。排除已闭合的过程叙述、无独有证据的重复节点和不改变下一步行动的历史细节；不要删除受保护的 Task Info 或报告证据。",
+    "assert": {
+      "must_include": [
+        "mem-161"
+      ],
+      "expect_min_selected": 2,
+      "expect_max_selected": 20
+    }
+  },
+  {
+    "id": "legacy-cleanup",
+    "group": "control",
+    "task": "收口旧构建系统删除与源码包纯净性；需要区分已修复事实、过期失败和仍未闭合的证据。",
+    "query": "召回与 Autotools 清理和 CPack source archive 直接相关的历史：m4、build-aux、Makefile.am、configure.ac 的物理删除，源码包清单是否仍包含旧构建目录，以及删除目录在 Fork 后复活的最新证据。保留互相冲突的时间化观察，不要只给最终结论。",
+    "exclude": "排除 CTest 数量、ISA/feature probes、pkg-config consumer 和一般安装结果，除非它们直接证明源码包或旧构建目录状态。",
+    "assert": {
+      "expect_min_selected": 3
+    }
+  },
+  {
+    "id": "probe-reconfiguration",
+    "group": "control",
+    "task": "修复编译器、sysroot 或输入 flag 改变后探针缓存仍复用旧能力结论的问题。",
+    "query": "召回 CMake feature/header/symbol/compiler-flag/ISA probe 的历史证据，重点是同一 build directory 重新配置、CMAKE_SYSROOT 或 CMAKE_C_FLAGS 改变、sys/random.h 缺失、指定 flag 被拒绝时，宏、源资格和 fallback 是否随之变化；同时保留已知未覆盖项。",
+    "exclude": "排除 Autotools 文件清理、CPack、CTest 注册数量、pkg-config 重定位和普通安装清单。",
+    "assert": {
+      "expect_min_selected": 3,
+      "expect_max_selected": 30
+    }
+  },
+  {
+    "id": "install-consumers",
+    "group": "control",
+    "task": "验收安装后的 CMake package 与 pkg-config 是否可被独立项目和搬迁后的安装树消费。",
+    "query": "召回安装与 consumer 契约的历史证据：shared/static/default 安装形状，libsodium CMake package export 与 find_package targets，libsodium.pc metadata 和 relocatable prefix，移动整个安装树后的 pkg-config cflags/libs，以及尚未复验或相互冲突的观察。",
+    "exclude": "排除 feature/ISA probes、CTest 数量、Autotools 清理和 CPack source archive，除非它们直接影响安装或 consumer。",
+    "assert": {
+      "expect_min_selected": 3
+    }
+  },
+  {
+    "id": "ctest-matrix",
+    "group": "control",
+    "task": "验收默认、minimal 和 tests-off 三种配置的 CTest 注册与执行语义。",
+    "query": "召回 test/default 的 CTest 历史证据：默认恰好 80 个测试、SODIUM_MINIMAL 恰好 71 个且少 9 个、SODIUM_BUILD_TESTS=OFF 为 0，测试名、并行执行、golden .exp/.res 和 TEST_SRCDIR 语义，以及仍然失败或缺证据的配置。",
+    "exclude": "排除安装/package export、pkg-config、Autotools 清理、feature probes、SONAME 和 ABI，除非它直接解释测试矩阵结果。",
+    "assert": {
+      "expect_min_selected": 3
+    }
+  },
+  {
+    "id": "version-abi",
+    "group": "control",
+    "task": "决定版本来源、共享库身份以及 State A/B 等价性还缺哪些可靠证据。",
+    "query": "召回 libsodium 1.0.20、SODIUM_LIBRARY_VERSION 28:0:2、输出文件 26.2.0、SONAME 26 的来源与最新验证，并召回 exported symbol set、逐对象 machine code 或 ABI 等价性哪些已经证明、哪些只是 disputed hypothesis 或旧构建产物观察。",
+    "exclude": "排除 CTest、pkg-config、CPack、旧目录清理和一般 feature probes，除非它直接证明版本、SONAME、符号或对象等价性。",
+    "assert": {
+      "must_include": [
+        "mem-161"
+      ],
+      "expect_min_selected": 3,
+      "must_share_with": "prune-and-frontier"
+    }
+  },
+  {
+    "id": "absent-topic-negative-control",
+    "group": "extended",
+    "task": "确认图里没有某主题时，整理 Agent 是否照提示词返回空集，而不是硬凑相关节点。",
+    "query": "召回 Kubernetes 集群里 Ingress TLS 证书轮换的历史证据：cert-manager Issuer 配置、证书到期告警和轮换后的滚动重启结果。只要与该主题直接相关、带证据锚的节点。",
+    "exclude": "排除 libsodium 构建、安装、测试与 ABI 的全部内容——它们与本查询无关。",
+    "assert": {
+      "expect_max_selected": 0
+    }
+  },
+  {
+    "id": "partial-invalidation",
+    "group": "extended",
+    "task": "某张已订阅子图只有少数节点失效，需要 detach 而不是整图退订。",
+    "query": "更新“当前风险前沿”这张已订阅子图：其中关于 CTest 计数的成员已被后续证据取代，不再属于风险前沿；仍未闭合的 ABI/对象等价与 ARM/toolchain 证据继续留在里面。把失效的少数成员移出该子图（memory_apply detach，带 reason），并把本次判断写进它的 scope。",
+    "exclude": "请求方声明：只有该子图里 CTest 计数相关的少数成员已经失效，子图整体仍然适用；不要取消对它的订阅。",
+    "assert": {
+      "must_stay_subscribed": [
+        "sg-q-3"
+      ],
+      "expect_min_selected": 1
+    }
+  },
+  {
+    "id": "multi-membership",
+    "group": "extended",
+    "task": "两个查询天然共享证据：同一批对象构建证据既证明 ABI 等价，也证明源码覆盖。",
+    "query": "整理“逐对象构建证据”这一条线：哪些节点同时能证明 State A/B 的 ABI 等价性和源码包覆盖是否完整。同一节点若同时服务本子图和已有的版本/ABI 子图，两边都要归属，不要复制出新节点。",
+    "exclude": "排除 CTest 数量、pkg-config 重定位和 feature probe，除非它直接给出逐对象证据。",
+    "assert": {
+      "must_share_with": "version-abi",
+      "expect_min_selected": 1
+    }
+  },
+  {
+    "id": "deep-curation",
+    "group": "extended",
+    "mode": "curate",
+    "task": "深度整理模式：冲突裁决、无证据锚的完成断言降级、重复节点合并。",
+    "query": "（深度整理模式由 driver 直接触发，query 字段不进入模型请求）",
+    "assert": {}
+  }
+]

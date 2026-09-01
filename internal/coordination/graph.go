@@ -112,19 +112,26 @@ type Edge struct {
 
 // Graph 是可并发访问的协调图。
 type Graph struct {
-	mu        sync.Mutex
-	tasks     []Task
-	edges     []Edge
-	nextID    uint64
-	helps     []helpState
-	progress  ProgressStore
-	help      *helpCoordinator
-	join      *joinCoordinator
-	taskSink  TaskSink
-	statePath string
-	executing bool
-	running   *runner
-	revision  int64
+	mu               sync.Mutex
+	tasks            []Task
+	edges            []Edge
+	nextID           uint64
+	helps            []helpState
+	progress         ProgressStore
+	help             *helpCoordinator
+	join             *joinCoordinator
+	taskSink         TaskSink
+	statePath        string
+	executing        bool
+	running          *runner
+	revision         int64
+	publishingTaskID string
+	publishedTaskID  string
+
+	// publishMu serialises publications against each other. They deliberately do
+	// not serialise against execution: rendering a checkpoint onto the display
+	// surface touches neither the read floor nor any environment.
+	publishMu sync.Mutex
 }
 
 func newGraph() *Graph {
@@ -174,6 +181,8 @@ func (g *Graph) reset() {
 	g.executing = false
 	g.running = nil
 	g.revision = 0
+	g.publishingTaskID = ""
+	g.publishedTaskID = ""
 }
 
 // AddTask 追加一个图上独立的 task，内部连好 planner → executor → verifier。
@@ -217,27 +226,34 @@ func (g *Graph) spawnLocked(from, join string) (Task, error) {
 		return Task{}, fmt.Errorf("%w: %q", ErrUnknownNode, join)
 	}
 	if g.treeRootLocked(fromNode.TaskID) != g.treeRootLocked(joinNode.TaskID) ||
-		g.reachesStartAskLocked(join+"/start", from+"/ask") {
+		g.reachesNodeLocked(join, from) {
 		return Task{}, fmt.Errorf("%w: %q -> %q", ErrJoinCycle, from, join)
 	}
 	parent, ok := g.taskByIDLocked(fromNode.TaskID)
 	if !ok {
 		return Task{}, fmt.Errorf("%w: %q", ErrUnknownNode, from)
 	}
-	child := g.addTaskLocked(parent.Env.ID)
+	child := g.addSpawnLocked(parent.Env.ID, from, join)
+	return g.decorateLocked(child), nil
+}
+
+func (g *Graph) addSpawnLocked(parentEnvID, from, join string) Task {
+	child := g.addTaskLocked(parentEnvID)
 	g.edges = append(g.edges,
 		Edge{From: from, To: child.Planner.ID, Kind: EdgeKindSpawn},
 		Edge{From: child.Verifier.ID, To: join, Kind: EdgeKindJoin},
 	)
-	return g.decorateLocked(child), nil
+	return child
 }
 
 // Snapshot 是图的只读拷贝，供 manager 查看。
 type Snapshot struct {
-	Revision  int64  `json:"revision"`
-	Executing bool   `json:"executing"`
-	Tasks     []Task `json:"tasks"`
-	Edges     []Edge `json:"edges"`
+	Revision         int64  `json:"revision"`
+	Executing        bool   `json:"executing"`
+	PublishingTaskID string `json:"publishing_task_id,omitempty"`
+	PublishedTaskID  string `json:"published_task_id,omitempty"`
+	Tasks            []Task `json:"tasks"`
+	Edges            []Edge `json:"edges"`
 }
 
 // PromptProjection 返回注入提示词用的稳定投影：剥掉逐请求易变的 Revision 和
@@ -249,9 +265,16 @@ type Snapshot struct {
 // 的递增计数，字典序在第 10 个 task 之后就与创建顺序不一致（task-10 < task-2）。
 func (s Snapshot) PromptProjection() ([]byte, error) {
 	return json.Marshal(struct {
-		Tasks []Task `json:"tasks"`
-		Edges []Edge `json:"edges"`
-	}{Tasks: s.Tasks, Edges: s.Edges})
+		PublishingTaskID string `json:"publishing_task_id,omitempty"`
+		PublishedTaskID  string `json:"published_task_id,omitempty"`
+		Tasks            []Task `json:"tasks"`
+		Edges            []Edge `json:"edges"`
+	}{
+		PublishingTaskID: s.PublishingTaskID,
+		PublishedTaskID:  s.PublishedTaskID,
+		Tasks:            s.Tasks,
+		Edges:            s.Edges,
+	})
 }
 
 // Snapshot 返回当前 tasks 和边；Run 期间 executing 为 true。
@@ -262,16 +285,73 @@ func (g *Graph) Snapshot() Snapshot {
 }
 
 func (g *Graph) snapshotLocked() Snapshot {
-	tasks := make([]Task, 0, len(g.tasks))
-	for _, task := range g.tasks {
-		tasks = append(tasks, g.decorateLocked(task))
-	}
 	return Snapshot{
-		Revision:  g.revision,
-		Executing: g.executing,
-		Tasks:     tasks,
-		Edges:     append([]Edge(nil), g.edges...),
+		Revision:         g.revision,
+		Executing:        g.executing,
+		PublishingTaskID: g.publishingTaskID,
+		PublishedTaskID:  g.publishedTaskID,
+		Tasks:            g.decoratedTasksLocked(),
+		Edges:            append([]Edge(nil), g.edges...),
 	}
+}
+
+func (g *Graph) decoratedTasksLocked() []Task {
+	nodeTasks := make(map[string]string, len(g.tasks)*3)
+	plannerTasks := make(map[string]string, len(g.tasks))
+	verifierTasks := make(map[string]string, len(g.tasks))
+	for _, task := range g.tasks {
+		nodeTasks[task.Planner.ID] = task.ID
+		nodeTasks[task.Executor.ID] = task.ID
+		nodeTasks[task.Verifier.ID] = task.ID
+		plannerTasks[task.Planner.ID] = task.ID
+		verifierTasks[task.Verifier.ID] = task.ID
+	}
+
+	spawnedFrom := make(map[string]string, len(g.tasks))
+	joins := make(map[string][]string, len(g.tasks))
+	joinedBy := make(map[string][]string, len(g.tasks))
+	seenJoins := make(map[[2]string]struct{}, len(g.tasks))
+	seenJoinedBy := make(map[[2]string]struct{}, len(g.tasks))
+	for _, edge := range g.edges {
+		switch edge.Kind {
+		case EdgeKindSpawn:
+			fromTask, fromKnown := nodeTasks[edge.From]
+			toTask, toKnown := plannerTasks[edge.To]
+			if !fromKnown || !toKnown {
+				continue
+			}
+			if _, exists := spawnedFrom[toTask]; !exists {
+				spawnedFrom[toTask] = fromTask
+			}
+		case EdgeKindJoin:
+			fromTask, fromKnown := nodeTasks[edge.From]
+			toTask, toKnown := nodeTasks[edge.To]
+			if !fromKnown || !toKnown {
+				continue
+			}
+			pair := [2]string{fromTask, toTask}
+			if _, exists := seenJoinedBy[pair]; !exists {
+				seenJoinedBy[pair] = struct{}{}
+				joinedBy[toTask] = append(joinedBy[toTask], fromTask)
+			}
+			if verifierTasks[edge.From] != fromTask {
+				continue
+			}
+			if _, exists := seenJoins[pair]; !exists {
+				seenJoins[pair] = struct{}{}
+				joins[fromTask] = append(joins[fromTask], toTask)
+			}
+		}
+	}
+
+	tasks := make([]Task, len(g.tasks))
+	for i, task := range g.tasks {
+		task.SpawnedFrom = spawnedFrom[task.ID]
+		task.Joins = append([]string{}, joins[task.ID]...)
+		task.JoinedBy = append([]string{}, joinedBy[task.ID]...)
+		tasks[i] = task
+	}
+	return tasks
 }
 
 // SnapshotAt 返回 revision-consistent 快照；revision=0 表示最新。
@@ -319,6 +399,14 @@ func (g *Graph) unspawnLocked(taskID string) ([]string, error) {
 		return nil, fmt.Errorf("%w: %q", ErrUnspawnRoot, taskID)
 	}
 	remove := g.spawnedSubtreeLocked(taskID)
+	for _, publicationTaskID := range []string{g.publishingTaskID, g.publishedTaskID} {
+		if _, ok := remove[publicationTaskID]; ok {
+			return nil, fmt.Errorf(
+				"coordination: cannot unspawn publication task %q",
+				publicationTaskID,
+			)
+		}
+	}
 	nodeIDs := make(map[string]struct{})
 	removed := make([]string, 0, len(remove))
 	for _, existing := range g.tasks {
@@ -353,30 +441,33 @@ func (g *Graph) unspawnLocked(taskID string) ([]string, error) {
 }
 
 func (g *Graph) spawnedSubtreeLocked(rootID string) map[string]struct{} {
-	seen := map[string]struct{}{rootID: {}}
-	queue := []string{rootID}
-	for len(queue) > 0 {
-		id := queue[0]
-		queue = queue[1:]
-		task, ok := g.taskByIDLocked(id)
-		if !ok {
+	nodeTasks := make(map[string]string, len(g.tasks)*3)
+	for _, task := range g.tasks {
+		for _, node := range task.Sequence() {
+			nodeTasks[node.ID] = task.ID
+		}
+	}
+	children := make(map[string][]string, len(g.tasks))
+	for _, edge := range g.edges {
+		if edge.Kind != EdgeKindSpawn {
 			continue
 		}
-		for _, node := range task.Sequence() {
-			for _, edge := range g.edges {
-				if edge.Kind != EdgeKindSpawn || edge.From != node.ID {
-					continue
-				}
-				to, ok := g.nodeByIDLocked(edge.To)
-				if !ok || to.TaskID == "" {
-					continue
-				}
-				if _, dup := seen[to.TaskID]; dup {
-					continue
-				}
-				seen[to.TaskID] = struct{}{}
-				queue = append(queue, to.TaskID)
+		parentID, parentKnown := nodeTasks[edge.From]
+		childID, childKnown := nodeTasks[edge.To]
+		if parentKnown && childKnown {
+			children[parentID] = append(children[parentID], childID)
+		}
+	}
+
+	seen := map[string]struct{}{rootID: {}}
+	queue := []string{rootID}
+	for i := 0; i < len(queue); i++ {
+		for _, childID := range children[queue[i]] {
+			if _, dup := seen[childID]; dup {
+				continue
 			}
+			seen[childID] = struct{}{}
+			queue = append(queue, childID)
 		}
 	}
 	return seen
@@ -636,24 +727,18 @@ func (g *Graph) treeRootLocked(taskID string) string {
 	return id
 }
 
-func (g *Graph) reachesStartAskLocked(start, goal string) bool {
+func (g *Graph) reachesNodeLocked(start, goal string) bool {
 	if start == "" || goal == "" {
 		return false
 	}
-	adj := make(map[string][]string)
-	add := func(from, to string) {
-		adj[from] = append(adj[from], to)
-	}
-	for _, task := range g.tasks {
-		for _, node := range task.Sequence() {
-			add(node.ID+"/start", node.ID+"/ask")
-		}
-	}
+	_, ok := g.reachableNodesLocked(start)[goal]
+	return ok
+}
+
+func (g *Graph) reachableNodesLocked(start string) map[string]struct{} {
+	adj := make(map[string][]string, len(g.tasks)*3)
 	for _, edge := range g.edges {
-		add(edge.From+"/ask", edge.To+"/start")
-	}
-	if start == goal {
-		return true
+		adj[edge.From] = append(adj[edge.From], edge.To)
 	}
 	seen := map[string]struct{}{start: {}}
 	queue := []string{start}
@@ -661,9 +746,6 @@ func (g *Graph) reachesStartAskLocked(start, goal string) bool {
 		cur := queue[0]
 		queue = queue[1:]
 		for _, next := range adj[cur] {
-			if next == goal {
-				return true
-			}
 			if _, ok := seen[next]; ok {
 				continue
 			}
@@ -671,7 +753,7 @@ func (g *Graph) reachesStartAskLocked(start, goal string) bool {
 			queue = append(queue, next)
 		}
 	}
-	return false
+	return seen
 }
 
 func (g *Graph) decorateLocked(task Task) Task {

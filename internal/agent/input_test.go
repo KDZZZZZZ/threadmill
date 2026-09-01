@@ -529,3 +529,46 @@ func TestSubscribedMemoryBlockInvalidatesOnBind(t *testing.T) {
 		t.Fatalf("child memory block = %q, want %q", second, want)
 	}
 }
+
+func TestFormatSubscribedMemoryAnnotatesSourceAndMultiMembership(t *testing.T) {
+	t.Parallel()
+
+	graph := ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{
+			{ID: "sg-a", Name: "ABI 等价"},
+			{ID: "sg-b", Name: "源码覆盖"},
+		},
+		Nodes: []ctxgraph.Node{
+			{
+				ID:          "mem-1",
+				Kind:        ctxgraph.NodeKindFact,
+				Status:      ctxgraph.NodeStatusAccepted,
+				Statement:   "对象构建证据",
+				SubgraphIDs: []string{"sg-a", "sg-b"},
+			},
+			{
+				ID:          "mem-2",
+				Kind:        ctxgraph.NodeKindFact,
+				Status:      ctxgraph.NodeStatusDisputed,
+				Statement:   "仅覆盖侧证据",
+				SubgraphIDs: []string{"sg-b"},
+			},
+		},
+	}
+	subs := []string{"sg-a", "sg-b"}
+
+	flat := FormatSubscribedMemory(graph, subs, false)
+	if strings.Contains(flat, "sg-a") {
+		t.Fatalf("flat projection = %q, want no attribution", flat)
+	}
+
+	grouped := FormatSubscribedMemory(graph, subs, true)
+	for _, want := range []string{"[sg-a ABI 等价]", "[sg-b 源码覆盖]", "（另属 sg-b）", "仅覆盖侧证据"} {
+		if !strings.Contains(grouped, want) {
+			t.Fatalf("grouped projection = %q, want %q", grouped, want)
+		}
+	}
+	if got := strings.Count(grouped, "对象构建证据"); got != 1 {
+		t.Fatalf("shared node listed %d times, want once", got)
+	}
+}

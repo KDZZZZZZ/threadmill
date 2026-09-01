@@ -9,6 +9,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -34,7 +35,7 @@ func (s *Store) Materialize(envID string) (live string, retErr error) {
 		close(call.done)
 		s.mu.Unlock()
 	}()
-	base, err := confinedRoot(s.baseDir)
+	base, err := confinedRoot(s.floorDir)
 	if err != nil {
 		s.mu.Unlock()
 		return "", fmt.Errorf("vfs: materialize: %w", err)
@@ -195,16 +196,21 @@ func (s *Store) Absorb(envID string) error {
 		s.recordAbsorbScan(scanStarted, nil)
 		return nil
 	}
-	before, err := s.visibleRegularFiles(envID)
+	beforeFiles, err := s.visibleRegularFiles(envID)
+	var beforeDirectories map[string]struct{}
+	if err == nil {
+		beforeDirectories, err = s.visibleDirectories(envID)
+	}
 	s.mu.Unlock()
 	if err != nil {
 		err = fmt.Errorf("vfs: absorb: %w", err)
 		s.recordAbsorbScan(scanStarted, err)
 		return err
 	}
-	liveFiles, comparisons, err := walkRegularFiles(
+	liveFiles, liveDirectories, comparisons, err := walkRegularFiles(
 		live,
-		before,
+		beforeFiles,
+		beforeDirectories,
 		unchangedLiveBuckets(baseline, current),
 	)
 	s.mu.Lock()
@@ -222,13 +228,22 @@ func (s *Store) Absorb(envID string) error {
 		return nil
 	}
 	dst := s.ensure(envID)
-	for path := range before {
+	deletedDirectories := shallowMissingDirectories(beforeDirectories, liveDirectories)
+	deletedDirectorySet := make(map[string]struct{}, len(deletedDirectories))
+	for _, path := range deletedDirectories {
+		deletedDirectorySet[path] = struct{}{}
+		applyBlob(dst, path, blob{tombstone: true})
+	}
+	for path := range beforeFiles {
+		if hasPathAncestor(deletedDirectorySet, path) {
+			continue
+		}
 		if _, ok := liveFiles[path]; !ok {
 			applyBlob(dst, path, blob{tombstone: true})
 		}
 	}
 	for path, current := range liveFiles {
-		old, existed := before[path]
+		old, existed := beforeFiles[path]
 		if existed && snapshotsEqual(old, current) {
 			continue
 		}
@@ -312,6 +327,98 @@ func (s *Store) Release(envID string) error {
 	return aerr
 }
 
+// Freeze absorbs an environment and releases its live workspace while keeping
+// the logical snapshot available for later reads or publication. Persistent
+// copy/reflink workspaces stay on disk because they are the snapshot; persistent
+// OverlayFS workspaces keep only their upper/work state after unmounting.
+func (s *Store) Freeze(envID string) error {
+	if envID == "" {
+		return nil
+	}
+	if err := s.Absorb(envID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	live := s.lives[envID]
+	s.mu.Unlock()
+	if live == "" {
+		return nil
+	}
+	persistentOverlay := s.overlayStateExists(envID)
+	if err := s.closeOverlay(envID); err != nil {
+		return err
+	}
+	if s.liveRoot != "" && !persistentOverlay {
+		return nil
+	}
+	s.mu.Lock()
+	delete(s.lives, envID)
+	delete(s.liveBaselines, envID)
+	s.mu.Unlock()
+	if err := os.RemoveAll(live); err != nil {
+		return fmt.Errorf("vfs: freeze: %w", err)
+	}
+	return nil
+}
+
+// Archive records sourceID under archiveID without changing the source. The
+// archive is persisted when the store has a live root, so it survives manager
+// restarts after the source task workspace has been handed off or discarded.
+func (s *Store) Archive(sourceID, archiveID string) error {
+	if sourceID == "" || archiveID == "" || sourceID == archiveID {
+		return fmt.Errorf("vfs: archive: %w", ErrInvalidPath)
+	}
+	if err := s.Restore(sourceID); err != nil {
+		return fmt.Errorf("vfs: archive source: %w", err)
+	}
+	if err := s.Discard(archiveID); err != nil {
+		return fmt.Errorf("vfs: replace archive: %w", err)
+	}
+	if err := s.Fork(sourceID, archiveID); err != nil {
+		return fmt.Errorf("vfs: fork archive: %w", err)
+	}
+	if s.liveRoot == "" {
+		return nil
+	}
+	if _, err := s.Materialize(archiveID); err != nil {
+		return errors.Join(err, s.Discard(archiveID))
+	}
+	if err := s.Freeze(archiveID); err != nil {
+		return fmt.Errorf("vfs: freeze archive: %w", err)
+	}
+	return nil
+}
+
+// Restore opens an existing in-memory or persistent environment without
+// silently creating an empty one.
+func (s *Store) Restore(envID string) error {
+	if envID == "" {
+		return ErrUnknownEnvironment
+	}
+	s.mu.Lock()
+	_, envOK := s.envs[envID]
+	_, liveOK := s.lives[envID]
+	s.mu.Unlock()
+	if envOK || liveOK {
+		return nil
+	}
+	if s.liveRoot == "" {
+		return fmt.Errorf("%w: %s", ErrUnknownEnvironment, envID)
+	}
+	live, ok, err := s.persistedLive(envID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrUnknownEnvironment, envID)
+	}
+	s.mu.Lock()
+	s.envs[envID] = &layer{files: make(map[string]blob)}
+	s.lives[envID] = live
+	s.mu.Unlock()
+	return nil
+}
+
 // Discard 删除 env 的 live 目录和 overlay，不吸收尚未收回的写入。
 func (s *Store) Discard(envID string) error {
 	if envID == "" {
@@ -383,9 +490,11 @@ type fileSnapshot struct {
 func walkRegularFiles(
 	root string,
 	before map[string]fileSnapshot,
+	beforeDirectories map[string]struct{},
 	unchangedBuckets [liveFingerprintBuckets]bool,
-) (map[string]fileSnapshot, uint64, error) {
+) (map[string]fileSnapshot, map[string]struct{}, uint64, error) {
 	out := map[string]fileSnapshot{}
+	directories := map[string]struct{}{}
 	var totalSize int64
 	var contentComparisons uint64
 	compareA := make([]byte, 32*1024)
@@ -409,13 +518,18 @@ func walkRegularFiles(
 		}
 		if directory, ok := ignored[rel]; ok {
 			retainIgnoredBase(out, before, rel)
+			retainIgnoredDirectories(directories, beforeDirectories, rel)
 			if directory && d.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 		mode := d.Type()
-		if mode&os.ModeSymlink != 0 || d.IsDir() {
+		if d.IsDir() {
+			directories[rel] = struct{}{}
+			return nil
+		}
+		if mode&os.ModeSymlink != 0 {
 			return nil
 		}
 		// 校验是否为普通文件（非 FIFO、Socket、Device 等特殊文件）
@@ -482,9 +596,9 @@ func walkRegularFiles(
 		return nil
 	})
 	if err != nil {
-		return nil, contentComparisons, err
+		return nil, nil, contentComparisons, err
 	}
-	return out, contentComparisons, nil
+	return out, directories, contentComparisons, nil
 }
 
 func gitIgnoredPaths(root string) map[string]bool {
@@ -525,6 +639,21 @@ func retainIgnoredBase(
 	for path, old := range before {
 		if old.source != "" && strings.HasPrefix(path, prefix) {
 			out[path] = old
+		}
+	}
+}
+
+func retainIgnoredDirectories(
+	out, before map[string]struct{},
+	rel string,
+) {
+	if _, ok := before[rel]; ok {
+		out[rel] = struct{}{}
+	}
+	prefix := rel + "/"
+	for path := range before {
+		if strings.HasPrefix(path, prefix) {
+			out[path] = struct{}{}
 		}
 	}
 }
@@ -580,12 +709,13 @@ func (s *Store) visibleRegularFiles(envID string) (map[string]fileSnapshot, erro
 
 func (s *Store) cachedBaseRegularFiles() (map[string]fileSnapshot, error) {
 	s.baseFilesOnce.Do(func() {
-		base, err := confinedRoot(s.baseDir)
+		base, err := confinedRoot(s.floorDir)
 		if err != nil {
 			s.baseFilesErr = err
 			return
 		}
 		files := make(map[string]fileSnapshot)
+		directories := make(map[string]struct{})
 		s.baseFilesErr = filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -599,7 +729,11 @@ func (s *Store) cachedBaseRegularFiles() (map[string]fileSnapshot, error) {
 				return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
 			}
 			mode := d.Type()
-			if mode&os.ModeSymlink != 0 || d.IsDir() {
+			if d.IsDir() {
+				directories[rel] = struct{}{}
+				return nil
+			}
+			if mode&os.ModeSymlink != 0 {
 				return nil
 			}
 			if mode.Type() != 0 {
@@ -618,9 +752,70 @@ func (s *Store) cachedBaseRegularFiles() (map[string]fileSnapshot, error) {
 		})
 		if s.baseFilesErr == nil {
 			s.baseFiles = files
+			s.baseDirs = directories
 		}
 	})
 	return s.baseFiles, s.baseFilesErr
+}
+
+func (s *Store) visibleDirectories(envID string) (map[string]struct{}, error) {
+	if _, err := s.cachedBaseRegularFiles(); err != nil {
+		return nil, err
+	}
+	candidates := make(map[string]struct{}, len(s.baseDirs))
+	for path := range s.baseDirs {
+		candidates[path] = struct{}{}
+	}
+	for _, files := range s.overlayMaps(envID) {
+		for path := range files {
+			candidates[path] = struct{}{}
+			for parent := path; ; {
+				i := strings.LastIndex(parent, "/")
+				if i <= 0 {
+					break
+				}
+				parent = parent[:i]
+				candidates[parent] = struct{}{}
+			}
+		}
+	}
+
+	visible := make(map[string]struct{}, len(candidates))
+	for path := range candidates {
+		info, handled, statErr := s.lookupStat(envID, path)
+		if handled {
+			if statErr == nil && info.IsDir {
+				visible[path] = struct{}{}
+			}
+			continue
+		}
+		if _, ok := s.baseDirs[path]; ok {
+			visible[path] = struct{}{}
+		}
+	}
+	return visible, nil
+}
+
+func shallowMissingDirectories(
+	before, after map[string]struct{},
+) []string {
+	missing := make([]string, 0)
+	for path := range before {
+		if _, ok := after[path]; !ok {
+			missing = append(missing, path)
+		}
+	}
+	slices.Sort(missing)
+	selected := make(map[string]struct{}, len(missing))
+	shallow := missing[:0]
+	for _, path := range missing {
+		if hasPathAncestor(selected, path) {
+			continue
+		}
+		selected[path] = struct{}{}
+		shallow = append(shallow, path)
+	}
+	return shallow
 }
 
 func hasPathAncestor(paths map[string]struct{}, rel string) bool {

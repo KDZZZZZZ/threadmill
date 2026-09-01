@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
+	"github.com/KDZZZZZZ/threadmill/internal/event"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
@@ -22,6 +23,9 @@ func TestResponsesGenerateCallsResponsesAPI(t *testing.T) {
 		}
 		if got := request.Header.Get("Authorization"); got != "Bearer test-key" {
 			t.Errorf("Authorization = %q, want Bearer test-key", got)
+		}
+		if got := request.UserAgent(); got != "threadmill" {
+			t.Errorf("User-Agent = %q, want threadmill", got)
 		}
 
 		var got map[string]any
@@ -127,6 +131,61 @@ func TestResponsesGenerateCallsResponsesAPI(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Generate() = %#v, want %#v", got, want)
+	}
+}
+
+func TestResponsesAssistantMessageUsesReasoningTextWhenSummaryMissing(t *testing.T) {
+	t.Parallel()
+
+	response := createResponseResponse{
+		Status: "completed",
+		Output: []json.RawMessage{
+			json.RawMessage(`{"type":"reasoning","content":[{"type":"reasoning_text","text":"closed the routing decision"}],"summary":[]}`),
+			json.RawMessage(`{"type":"function_call","call_id":"call-1","name":"read","arguments":"{\"path\":\"router.go\"}"}`),
+		},
+	}
+
+	got, err := response.assistantMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Thinking != "closed the routing decision" {
+		t.Fatalf("Thinking = %q, want raw reasoning fallback", got.Thinking)
+	}
+}
+
+func TestResponsesUsesConfiguredProviderProxy(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if got := request.URL.Host; got != "127.0.0.2:65534" {
+			t.Errorf("request host = %q, want 127.0.0.2:65534", got)
+		}
+		if got := request.URL.Path; got != "/v1/responses" {
+			t.Errorf("request path = %q, want /v1/responses", got)
+		}
+		if got := request.UserAgent(); got != "threadmill" {
+			t.Errorf("User-Agent = %q, want threadmill", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+  "status":"completed",
+  "output":[{"type":"message","content":[{"type":"output_text","text":"proxied"}]}]
+}`))
+	}))
+	defer proxy.Close()
+
+	config := testLLMConfig(t, "http://127.0.0.2:65534/v1")
+	config.ProxyURL = proxy.URL
+	model, err := NewResponses(config, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	message, err := model.Generate(context.Background(), agent.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.Content != "proxied" {
+		t.Fatalf("message content = %q, want proxied", message.Content)
 	}
 }
 
@@ -470,6 +529,57 @@ func TestResponsesGenerateRetriesFiveTimesBeforeSuccess(t *testing.T) {
 	}
 	if got := requests.Load(); got != 6 {
 		t.Fatalf("requests = %d, want one initial request plus five retries", got)
+	}
+}
+
+func TestResponsesGenerateRetriesInterruptedResponseBody(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", "1000")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"completed"`))
+			connection, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			_ = connection.Close()
+			return
+		}
+		_, _ = w.Write([]byte(`{
+  "status":"completed",
+  "output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+}`))
+	}))
+	defer server.Close()
+
+	model, err := NewResponses(testLLMConfig(t, server.URL+"/v1"), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.retryInterval = time.Millisecond
+	var retries int
+	var retryReason string
+	ctx := event.WithRetrySink(context.Background(), func(reason string) {
+		retries++
+		retryReason = reason
+	})
+	got, err := model.Generate(ctx, agent.Request{
+		Messages: []agent.Message{{Role: agent.RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Content != "ok" || requests.Load() != 2 || retries != 1 || retryReason != "response_read" {
+		t.Fatalf(
+			"Generate() = %#v, requests = %d, retries = %d, reason = %q",
+			got,
+			requests.Load(),
+			retries,
+			retryReason,
+		)
 	}
 }
 

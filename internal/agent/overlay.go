@@ -30,6 +30,10 @@ func applyFileOverlay(loop *Loop, overlay FileOverlay) error {
 	if overlay.Prompts.OrganizeQuery != "" {
 		loop.organizeQueryInstruction = overlay.Prompts.OrganizeQuery
 	}
+	if overlay.Prompts.SessionResetHandoff != "" {
+		loop.sessionResetPrompt = overlay.Prompts.SessionResetHandoff
+	}
+	loop.memoryAttribution = overlay.SubscriptionAttribution
 	loop.curation = overlay.Curation.Normalized()
 	if len(overlay.Tools) == 0 {
 		return nil

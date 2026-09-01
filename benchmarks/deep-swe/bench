@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly UPSTREAM_URL="https://github.com/datacurve-ai/deep-swe.git"
+readonly UPSTREAM_REVISION="0b9fabbb63b9104d678fe965e1632f2dd9eaa2ea"
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+benchmark_dir="$(cd -- "$script_dir/.." && pwd)"
+work_root="${THREADMILL_BENCHMARK_HOME:-$benchmark_dir/.work}"
+source_dir="$work_root/deep-swe/source"
+harbor_tools="$benchmark_dir/harbor"
+runtime="${THREADMILL_HARBOR_BIN:-pier}"
+
+usage() {
+  cat <<'EOF'
+Usage: ./bench <command> [arguments]
+
+Commands:
+  doctor
+  fetch
+  path
+  list
+  validate [task|all]
+  run <task|all> <provider/model> [Pier args...]
+EOF
+}
+
+check_source() {
+  [[ -d "$source_dir/.git" ]] || { printf 'deep-swe: run fetch first\n' >&2; exit 1; }
+  [[ "$(git -C "$source_dir" rev-parse HEAD)" == "$UPSTREAM_REVISION" ]] || {
+    printf 'deep-swe: checkout is not pinned; run fetch\n' >&2
+    exit 1
+  }
+  [[ -z "$(git -C "$source_dir" status --porcelain)" ]] || {
+    printf 'deep-swe: pinned checkout is modified\n' >&2
+    exit 1
+  }
+}
+
+task_path() {
+  local task="$1"
+  if [[ "$task" == all ]]; then
+    printf '%s\n' "$source_dir/tasks"
+  else
+    [[ "$task" != */* && -d "$source_dir/tasks/$task" ]] || {
+      printf 'deep-swe: unknown task: %s\n' "$task" >&2
+      exit 1
+    }
+    printf '%s\n' "$source_dir/tasks/$task"
+  fi
+}
+
+case "${1:-}" in
+  doctor)
+    THREADMILL_HARBOR_BIN="$runtime" "$harbor_tools/bench" doctor
+    ;;
+  fetch)
+    "$harbor_tools/fetch-pinned" "$UPSTREAM_URL" "$UPSTREAM_REVISION" "$source_dir"
+    ;;
+  path)
+    check_source
+    printf '%s\n' "$source_dir"
+    ;;
+  list)
+    check_source
+    find "$source_dir/tasks" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
+    ;;
+  validate)
+    check_source
+    target="${2:-all}"
+    if [[ "$target" == all ]]; then
+      while IFS= read -r task; do "$runtime" tasks check "$task"; done < <(
+        find "$source_dir/tasks" -mindepth 1 -maxdepth 1 -type d | sort
+      )
+    else
+      "$runtime" tasks check "$(task_path "$target")"
+    fi
+    ;;
+  run)
+    [[ $# -ge 3 ]] || { usage >&2; exit 2; }
+    check_source
+    target="$(task_path "$2")"
+    shift 2
+    THREADMILL_BENCHMARK_NAME=deep-swe \
+      THREADMILL_HARBOR_BIN="$runtime" \
+      "$harbor_tools/bench" run-path "$target" "$@"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

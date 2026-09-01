@@ -8,7 +8,7 @@ import (
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 )
 
-const dropContextPressureReminder = "上下文已接近窗口上限。请调用 " + memoryDropFromContextToolName + " 丢掉暂时用不到的节点详情；这不会修改记忆图。"
+const dropContextPressureReminder = "上下文已接近窗口上限。成功标准：保留原始目标、逐字契约、未决失败和当前证据。方法：调用 " + memoryDropFromContextToolName + " 移除近期历史中已展开且过期、有持久副本或与当前步骤无关的节点详情；不修改记忆图，并以工具返回的 rewritten_messages 判断是否释放空间。"
 
 type dropFromContextTool struct {
 	loop *Loop
