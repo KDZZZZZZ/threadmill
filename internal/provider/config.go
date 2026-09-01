@@ -60,11 +60,12 @@ type VFSFileConfig struct {
 
 // ExecConfig 配置命令执行槽位、超时、输出上限和沙箱边界。
 type ExecConfig struct {
-	Slots           int    `yaml:"slots"`
-	Timeout         int    `yaml:"timeout"`       // 秒；0 表示只跟 ctx
-	OutputCapKB     int    `yaml:"output_cap_kb"` // 0 时调度器默认 256KB
-	ContainerImage  string `yaml:"container_image"`
-	ExternalSandbox bool   `yaml:"external_sandbox"`
+	Slots                      int    `yaml:"slots"`
+	Timeout                    int    `yaml:"timeout"`       // 秒；0 表示只跟 ctx
+	OutputCapKB                int    `yaml:"output_cap_kb"` // 0 时调度器默认 256KB
+	ContainerImage             string `yaml:"container_image"`
+	ExternalSandbox            bool   `yaml:"external_sandbox"`
+	ExternalWorkspaceIsolation bool   `yaml:"external_workspace_isolation"`
 	// Cache 配置命令结果缓存：依赖文件版本一致的 agent 复用彼此的执行结果与产物。
 	Cache ExecCacheConfig `yaml:"cache"`
 }
@@ -96,6 +97,7 @@ type ExecCacheConfig struct {
 type LLMConfig struct {
 	Provider      string `yaml:"provider"`
 	BaseURL       string `yaml:"base_url"`
+	ProxyURL      string `yaml:"proxy_url"`
 	Credential    string `yaml:"credential"`
 	Model         string `yaml:"model"`
 	ContextWindow int    `yaml:"context_window"`
@@ -397,6 +399,12 @@ func (c *ExecConfig) validate() error {
 	if strings.TrimSpace(c.ContainerImage) != c.ContainerImage {
 		return fmt.Errorf("%w: exec.container_image must not have surrounding whitespace", ErrInvalidConfig)
 	}
+	if c.ExternalWorkspaceIsolation && !c.ExternalSandbox {
+		return fmt.Errorf(
+			"%w: exec.external_workspace_isolation requires exec.external_sandbox",
+			ErrInvalidConfig,
+		)
+	}
 	if c.Slots == 0 {
 		c.Slots = runtime.NumCPU()
 	}
@@ -420,6 +428,7 @@ func (c ExecCacheConfig) validate() error {
 func (config LLMConfig) validate() error {
 	if strings.TrimSpace(config.Provider) != config.Provider ||
 		strings.TrimSpace(config.BaseURL) != config.BaseURL ||
+		strings.TrimSpace(config.ProxyURL) != config.ProxyURL ||
 		strings.TrimSpace(config.Credential) != config.Credential ||
 		strings.TrimSpace(config.Model) != config.Model {
 		return fmt.Errorf("%w: llm fields must not have surrounding whitespace", ErrInvalidConfig)
@@ -445,6 +454,17 @@ func (config LLMConfig) validate() error {
 	}
 	if baseURL.Scheme == "http" && !isLoopbackHost(baseURL.Hostname()) {
 		return fmt.Errorf("%w: llm.base_url must use https outside loopback", ErrInvalidConfig)
+	}
+	if config.ProxyURL != "" {
+		proxyURL, err := url.Parse(config.ProxyURL)
+		if err != nil ||
+			(proxyURL.Scheme != "http" && proxyURL.Scheme != "https") ||
+			proxyURL.Host == "" {
+			return fmt.Errorf(
+				"%w: llm.proxy_url must be an absolute http(s) URL",
+				ErrInvalidConfig,
+			)
+		}
 	}
 	return nil
 }

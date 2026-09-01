@@ -19,6 +19,7 @@ const (
 	maxResponseBody      = 16 << 20
 	maxRequestRetries    = 5
 	defaultRetryInterval = time.Second
+	providerUserAgent    = "threadmill"
 )
 
 // transport 保存 OpenAI-compatible Provider 共用的 HTTP 配置。
@@ -52,8 +53,9 @@ func newTransport(
 	if err != nil {
 		return transport{}, err
 	}
-	if client == nil {
-		client = &http.Client{}
+	client, err = httpClientWithProxy(client, config.ProxyURL)
+	if err != nil {
+		return transport{}, err
 	}
 
 	baseURL, _ := url.Parse(config.BaseURL)
@@ -68,6 +70,40 @@ func newTransport(
 	}, nil
 }
 
+func httpClientWithProxy(client *http.Client, rawProxyURL string) (*http.Client, error) {
+	if rawProxyURL == "" {
+		if client == nil {
+			return &http.Client{}, nil
+		}
+		return client, nil
+	}
+	proxyURL, err := url.Parse(rawProxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("%w: parse llm.proxy_url: %v", ErrInvalidConfig, err)
+	}
+	if client == nil {
+		client = &http.Client{}
+	} else {
+		clone := *client
+		client = &clone
+	}
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	baseTransport, ok := base.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf(
+			"%w: llm.proxy_url requires an HTTP transport",
+			ErrInvalidConfig,
+		)
+	}
+	transport := baseTransport.Clone()
+	transport.Proxy = http.ProxyURL(proxyURL)
+	client.Transport = transport
+	return client, nil
+}
+
 // post 发送 JSON 请求并解码有大小上限的 JSON 响应。
 func (transport transport) post(ctx context.Context, payload any, output any) error {
 	body, err := json.Marshal(payload)
@@ -76,23 +112,39 @@ func (transport transport) post(ctx context.Context, payload any, output any) er
 	}
 
 	retries := 0
-	response, err := transport.do(ctx, body, "", &retries)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
+	for {
+		response, err := transport.do(ctx, body, "", &retries)
+		if err != nil {
+			return err
+		}
 
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBody+1))
-	if err != nil {
-		return fmt.Errorf("read provider response: %w", err)
+		responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBody+1))
+		closeErr := response.Body.Close()
+		if readErr != nil {
+			readErr = fmt.Errorf("read provider response: %w", readErr)
+		}
+		if closeErr != nil {
+			closeErr = fmt.Errorf("close provider response: %w", closeErr)
+		}
+		if responseErr := errors.Join(readErr, closeErr); responseErr != nil {
+			if ctx.Err() != nil || retries >= maxRequestRetries {
+				return responseErr
+			}
+			retries++
+			notifyRetry(ctx, "response_read")
+			if err := waitRetry(ctx, transport.retryInterval); err != nil {
+				return err
+			}
+			continue
+		}
+		if len(responseBody) > maxResponseBody {
+			return errors.New("provider response exceeds 16 MiB")
+		}
+		if err := json.Unmarshal(responseBody, output); err != nil {
+			return fmt.Errorf("decode provider response: %w", err)
+		}
+		return nil
 	}
-	if len(responseBody) > maxResponseBody {
-		return errors.New("provider response exceeds 16 MiB")
-	}
-	if err := json.Unmarshal(responseBody, output); err != nil {
-		return fmt.Errorf("decode provider response: %w", err)
-	}
-	return nil
 }
 
 // do 从共享预算中重试尚未开始交付响应体的瞬时请求失败。
@@ -110,6 +162,7 @@ func (transport transport) do(ctx context.Context, body []byte, accept string, r
 		}
 		request.Header.Set("Authorization", "Bearer "+transport.apiKey)
 		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("User-Agent", providerUserAgent)
 		if accept != "" {
 			request.Header.Set("Accept", accept)
 		}

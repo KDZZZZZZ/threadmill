@@ -407,7 +407,11 @@ func (response createResponseResponse) assistantMessage() (agent.AssistantMessag
 				Arguments: json.RawMessage(output.Arguments),
 			})
 		case "reasoning":
-			for _, part := range output.Summary {
+			parts := output.Summary
+			if len(parts) == 0 {
+				parts = output.Content
+			}
+			for _, part := range parts {
 				if text := strings.TrimSpace(part.Text); text == "" {
 					continue
 				}
