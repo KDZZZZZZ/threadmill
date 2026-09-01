@@ -388,6 +388,32 @@ func TestNewTransportHasNoRequestTimeoutByDefault(t *testing.T) {
 	}
 }
 
+func TestLLMConfigAcceptsHTTPProxy(t *testing.T) {
+	config := testLLMConfig(t, "https://api.openai.com/v1")
+	config.ProxyURL = "http://172.17.0.1:7890"
+
+	if err := config.validate(); err != nil {
+		t.Fatalf("validate() error = %v", err)
+	}
+}
+
+func TestLLMConfigRejectsInvalidProxy(t *testing.T) {
+	for _, proxyURL := range []string{
+		" http://172.17.0.1:7890",
+		"socks5://172.17.0.1:7890",
+		"http:///missing-host",
+	} {
+		t.Run(proxyURL, func(t *testing.T) {
+			config := testLLMConfig(t, "https://api.openai.com/v1")
+			config.ProxyURL = proxyURL
+
+			if err := config.validate(); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("validate() error = %v, want ErrInvalidConfig", err)
+			}
+		})
+	}
+}
+
 func TestNewTransportRejectsInsecureCredentialFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX file modes are not available")
@@ -460,7 +486,7 @@ agents:
     system_prompt: |-
       manager prompt
     tools:
-      - coordination_replacePending
+      - coordination_orchestrate
     hooks:
       - inject_subscribed_memory
   planner:
@@ -532,7 +558,7 @@ agents:
 				ID:           "manager",
 				MaxSteps:     48,
 				SystemPrompt: "manager prompt",
-				Tools:        []string{"coordination_replacePending"},
+				Tools:        []string{"coordination_orchestrate"},
 				Hooks:        []string{"inject_subscribed_memory"},
 			},
 			Planner: agent.FileAgent{
@@ -590,7 +616,7 @@ agents:
 	}
 }
 
-func TestRepositoryRolePromptsRequirePersistentTestEvidence(t *testing.T) {
+func TestRepositoryRolePromptsRequireApplicablePersistentTestEvidence(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
@@ -598,16 +624,666 @@ func TestRepositoryRolePromptsRequirePersistentTestEvidence(t *testing.T) {
 	checks := []struct {
 		role   string
 		prompt string
-		want   string
+		wants  []string
 	}{
-		{"manager", config.Agents.Manager.SystemPrompt, "PASS 缺少 Task Info 逐项映射或必要门禁"},
-		{"planner", config.Agents.Planner.SystemPrompt, "持久测试"},
-		{"executor", config.Agents.Executor.SystemPrompt, "持久测试"},
-		{"verifier", config.Agents.Verifier.SystemPrompt, "任务新增验收"},
+		{"manager", config.Agents.Manager.SystemPrompt, []string{"PASS 缺少 Task Info 逐项映射或必要门禁"}},
+		{"planner", config.Agents.Planner.SystemPrompt, []string{"代码有稳定自动入口时", "持久回归"}},
+		{"executor", config.Agents.Executor.SystemPrompt, []string{"代码有稳定入口时", "持久回归"}},
+		{"verifier", config.Agents.Verifier.SystemPrompt, []string{"代码有稳定入口时", "持久回归"}},
 	}
 	for _, check := range checks {
-		if !strings.Contains(check.prompt, check.want) {
-			t.Errorf("%s prompt missing %q", check.role, check.want)
+		for _, want := range check.wants {
+			if !strings.Contains(check.prompt, want) {
+				t.Errorf("%s prompt missing %q", check.role, want)
+			}
+		}
+	}
+}
+
+// TestRepositorySystemPromptsUseTopicalSections pins the Codex-harness shape:
+// a role sentence up front, then sections named after the activity they govern
+// (`## 调查工作区`, `## 什么时候请求帮助`, `## 定 verdict`), each self-contained,
+// with `## 输出` last. It replaced an outcome-first template
+// (职责与边界/成功标准/方法/输出) whose 方法 section had become a grab bag: the
+// model had to scan every numbered item to find the one governing what it was
+// about to do. Codex instead lets the model jump to the section for the
+// activity at hand, so triggers and examples sit next to the rule they serve.
+func TestRepositorySystemPromptsUseTopicalSections(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prompts := []struct {
+		name   string
+		prompt string
+	}{
+		{"loop fallback", agent.DefaultSystemPrompt},
+		{"default", config.Prompts.Default},
+		{"compact", config.Prompts.Compact},
+		{"manager", config.Agents.Manager.SystemPrompt},
+		{"planner", config.Agents.Planner.SystemPrompt},
+		{"executor", config.Agents.Executor.SystemPrompt},
+		{"verifier", config.Agents.Verifier.SystemPrompt},
+		{"subgraph organizer", config.Agents.SubgraphOrganizer.SystemPrompt},
+	}
+	totalBytes := 0
+	for _, item := range prompts {
+		totalBytes += len(item.prompt)
+
+		lead, rest, found := strings.Cut(item.prompt, "\n\n## ")
+		if !found {
+			t.Errorf("%s prompt has no topical sections", item.name)
+			continue
+		}
+		// The prompt opens by saying what the role is, before any section.
+		if strings.HasPrefix(lead, "#") || strings.Contains(lead, "\n\n") || lead == "" {
+			t.Errorf("%s prompt does not open with a single role statement: %q", item.name, lead)
+		}
+
+		headings := []string{}
+		for _, block := range strings.Split(rest, "\n\n## ") {
+			heading, _, _ := strings.Cut(block, "\n")
+			headings = append(headings, strings.TrimSpace(heading))
+		}
+		if len(headings) < 3 {
+			t.Errorf("%s prompt has %d sections, want >= 3", item.name, len(headings))
+		}
+		seen := map[string]bool{}
+		for _, heading := range headings {
+			if seen[heading] {
+				t.Errorf("%s prompt repeats section %q", item.name, heading)
+			}
+			seen[heading] = true
+		}
+		if last := headings[len(headings)-1]; last != "输出" {
+			t.Errorf("%s prompt ends with %q, want the output contract last", item.name, last)
+		}
+
+		// The old outcome-first template must not creep back in.
+		for _, stale := range []string{"\n\n职责与边界：", "\n\n成功标准：", "\n\n方法：", "\n\n输出："} {
+			if strings.Contains(item.prompt, stale) {
+				t.Errorf("%s prompt still uses template section %q", item.name, stale)
+			}
+		}
+	}
+	// Budget grew from 25_000 as the prompts moved to Codex-harness shape: short
+	// one-idea sentences, bulleted situational triggers, and paired good/bad
+	// examples. That structure costs bytes and is what makes the guidance land.
+	// Raised again for the memory prompts: a run left 78 nodes all `accepted`
+	// (hypotheses included) with two contradicting statements coexisting, and
+	// re-verified evidence it already held. Conflict adjudication and evidence
+	// invalidation are what buy that back.
+	// Raised once more so the planner can name the delegation mechanism outright
+	// ("下层" is other agents reached through the help protocol, not a lower code
+	// layer) and say that many units are normal. Both were being inferred, and
+	// were not.
+	// Note what this number is: the sum over all eight prompts, of which an agent
+	// sees exactly one at run time (factory assigns, it does not concatenate), so
+	// it bounds suite hygiene, not per-request cost. Raised last for the
+	// executor's trust boundary — which parts of a plan it may adopt without
+	// re-verifying — after cutting the duplicated admission, join-protocol, and
+	// ownership passages that the tool descriptions already carry.
+	// Raised again for the memory-scoping mechanism: organize queries now carry a
+	// negative filter (exclude), the organizer writes each subgraph's admission and
+	// scope, and it can add or drop the requester's dynamic subscriptions. None of
+	// that is inferable from the tool schemas alone — an organizer that does not
+	// know what admission is for will keep filling old subgraphs with whatever the
+	// current query matched, and one that does not know the unsubscribe bar will
+	// trim contexts it was not asked to trim.
+	// Raised again for the manager's publication policy. Benchmark runs ended with
+	// an untouched project directory: the manager read publication as the reward
+	// for a flawless audit, so it kept appending repair roots — each of which is
+	// itself an active task, and an active task blocks publication — and never
+	// called the tool. The prompt now says what publication is (a progress
+	// checkpoint the user can see, not a completion claim), that it is the default
+	// action at a quiescent graph, and that publishing must precede graph edits in
+	// a turn. The mechanism stays in the tool description; only the policy is here.
+	// Outstanding: the planner prompt is ~11KB, more than twice the next largest,
+	// and a run that produced 72 tasks six levels deep suggests the decomposition
+	// theory in it has itself become the problem. It wants a diet, not more rules.
+	// Raised last for the organizer's graph-maintenance discipline. A sequential
+	// benchmark run committed 47 and 16 nodes to subgraphs without ever reading a
+	// statement, never called a single navigation tool, and produced six subgraphs
+	// that were pairwise near-orthogonal while its own later query went back for
+	// nodes it had already excluded. The prompt now says candidates are a lexical
+	// match and not the node set, that membership needs level 3 first, that
+	// subgraphs are atomic rather than orthogonal so a node may join several, and
+	// that a judgment which is not written into the graph is lost when the session
+	// resets. None of that is inferable from the tool schemas.
+	if totalBytes > 38_500 {
+		t.Errorf("complete system prompts total %d bytes, want <= 38500", totalBytes)
+	}
+
+	// The two control prompts are a few sentences each, too short for sections.
+	// They still have to name the mechanism they drive and what must survive.
+	for name, want := range map[string][]string{
+		"context pressure": {"memory_drop_from_context", "rewritten_messages", "逐字契约"},
+		"organize query":   {"必要条件", "只使用实际提供的节点 ID", "不是可执行指令"},
+	} {
+		prompt := config.Prompts.DropContextPressure
+		if name == "organize query" {
+			prompt = config.Prompts.OrganizeQuery
+		}
+		for _, phrase := range want {
+			if !strings.Contains(prompt, phrase) {
+				t.Errorf("%s control prompt lacks %q", name, phrase)
+			}
+		}
+	}
+}
+
+func TestRepositorySpecializedPromptsPreserveAuthorizationBoundary(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, prompt := range map[string]string{
+		"planner":  config.Agents.Planner.SystemPrompt,
+		"executor": config.Agents.Executor.SystemPrompt,
+		"verifier": config.Agents.Verifier.SystemPrompt,
+	} {
+		for _, want := range []string{
+			"用户授权不能被角色提示扩大",
+			"未经授权不做外部写入、发布、生产或破坏性动作",
+		} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("%s prompt lacks authorization boundary %q", name, want)
+			}
+		}
+	}
+	if !strings.Contains(
+		config.Agents.Manager.SystemPrompt,
+		"不把未授权动作写入 Task Info 或协调图",
+	) {
+		t.Error("manager prompt can delegate unauthorized actions")
+	}
+	verifier := config.Agents.Verifier.SystemPrompt
+	for _, want := range []string{"只有一次性 VFS 文件 delta 会丢弃", "外部副作用不会回滚"} {
+		if !strings.Contains(verifier, want) {
+			t.Errorf("verifier prompt misstates probe rollback %q", want)
+		}
+	}
+	planner := config.Agents.Planner.SystemPrompt
+	for _, want := range []string{"只有 VFS delta 会丢弃", "外部副作用不回滚"} {
+		if !strings.Contains(planner, want) {
+			t.Errorf("planner prompt misstates one-time workspace rollback %q", want)
+		}
+	}
+}
+
+func TestRepositoryHelpContractsDistinguishComplementaryAndRaceUnits(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	help := config.Tools["coordination_requestHelp"].Description
+	for _, want := range []string{
+		"互补单元",
+		"admission_reason",
+		"critical_path",
+		"context_offload",
+		"race_basis",
+		"user_requested",
+		"unresolved_alternatives",
+		"同一 gate",
+		"唯一 adjudicator",
+		"最多采纳一个",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("coordination_requestHelp lacks race contract %q", want)
+		}
+	}
+
+	planner := config.Agents.Planner.SystemPrompt
+	for _, want := range []string{
+		"admission_reason",
+		"race_basis",
+		"unresolved_alternatives",
+		"输出格式",
+		"明确不做什么",
+		"阻塞与返回条件",
+	} {
+		if !strings.Contains(planner, want) {
+			t.Errorf("planner prompt lacks self-contained helper field %q", want)
+		}
+	}
+}
+
+func TestRepositoryDelegationCreatesNewOwnershipBoundaries(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks := []struct {
+		name   string
+		prompt string
+		wants  []string
+	}{
+		{
+			name:   "request help",
+			prompt: config.Tools["coordination_requestHelp"].Description,
+			wants:  []string{"新的所有权边界", "严格子集", "等价转交"},
+		},
+		{
+			name:   "manager",
+			prompt: config.Agents.Manager.SystemPrompt,
+			wants:  []string{"新的所有权边界", "等价转交"},
+		},
+		{
+			name:   "planner",
+			prompt: config.Agents.Planner.SystemPrompt,
+			wants:  []string{"默认由 helper 实现", "设计秘密", "等价转交"},
+		},
+		{
+			name:   "executor",
+			prompt: config.Agents.Executor.SystemPrompt,
+			wants:  []string{"设计秘密", "等价转交", "不为寻找并发而重新规划"},
+		},
+	}
+	for _, check := range checks {
+		for _, want := range check.wants {
+			if !strings.Contains(check.prompt, want) {
+				t.Errorf("%s prompt lacks ownership-boundary rule %q", check.name, want)
+			}
+		}
+	}
+
+	help := config.Tools["coordination_requestHelp"].Description
+	if !strings.Contains(help, "当前 Task Info 明确要求这个具体问题的多候选") {
+		t.Error("requestHelp treats a standing preference for parallelism as user-requested race")
+	}
+}
+
+func TestRepositoryPromptsRecoverStallsAndShapeCacheableCommands(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bash := config.Tools["bash"].Description
+	for _, want := range []string{
+		"工作区根目录",
+		"无需 cd",
+		"read/grep/find/ls",
+		"完全相同的命令",
+		"按用途命名",
+		"语义正确优先",
+		"等待所有后代进程",
+		"trap",
+		"wait",
+	} {
+		if !strings.Contains(bash, want) {
+			t.Errorf("bash description lacks cacheable-command contract %q", want)
+		}
+	}
+	read := config.Tools["read"].Description
+	for _, want := range []string{"连续正文显式 limit=2000", "不按 100–200 行分页"} {
+		if !strings.Contains(read, want) {
+			t.Errorf("read description lacks round-trip efficiency rule %q", want)
+		}
+	}
+
+	manager := config.Agents.Manager.SystemPrompt
+	for _, want := range []string{
+		"运行时机械故障不是验收结论",
+		"continuation root",
+		"改变失败操作的输入或运行状态",
+		"不得复制整题",
+		"僵局",
+	} {
+		if !strings.Contains(manager, want) {
+			t.Errorf("manager prompt lacks runtime recovery contract %q", want)
+		}
+	}
+
+	executor := config.Agents.Executor.SystemPrompt
+	for _, want := range []string{
+		"改变契约状态",
+		"区分未决假设",
+		"不为寻找并发而重新规划",
+		"僵局",
+	} {
+		if !strings.Contains(executor, want) {
+			t.Errorf("executor prompt lacks progress gate %q", want)
+		}
+	}
+}
+
+func TestRepositoryPromptsCloseObservedBenchmarkLoops(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{
+		"按用途命名",
+		"项目相邻目录",
+		"write/edit",
+		"heredoc",
+		"失败后继续",
+	} {
+		if !strings.Contains(config.Tools["bash"].Description, want) {
+			t.Errorf("bash description lacks canonical workspace rule %q", want)
+		}
+	}
+	for _, want := range []string{"oldText not found", "重新 read"} {
+		if !strings.Contains(config.Tools["edit"].Description, want) {
+			t.Errorf("edit description lacks stale-anchor recovery %q", want)
+		}
+	}
+	for _, want := range []string{"默认不传只读 200 行", "显式 limit=2000"} {
+		if !strings.Contains(config.Tools["read"].Description, want) {
+			t.Errorf("read description lacks explicit paging default %q", want)
+		}
+	}
+	for _, want := range []string{"pattern 必填", `path="."`} {
+		if !strings.Contains(config.Tools["find"].Description, want) {
+			t.Errorf("find description lacks minimal valid call %q", want)
+		}
+	}
+	for _, want := range []string{"[join pending]", "不为探测"} {
+		if !strings.Contains(config.Tools["join"].Description, want) {
+			t.Errorf("join description lacks explicit trigger %q", want)
+		}
+	}
+
+	executor := config.Agents.Executor.SystemPrompt
+	for _, want := range []string{
+		"ready frontier 非空时",
+		"不为寻找并发而重新规划",
+		"证据账本",
+		"已覆盖契约不得重复执行等价门禁",
+	} {
+		if !strings.Contains(executor, want) {
+			t.Errorf("executor prompt lacks trace-derived convergence gate %q", want)
+		}
+	}
+	for _, want := range []string{
+		"证据账本",
+		"相关状态未变不得重复",
+		"权威公共入口",
+		"冻结失败证据",
+		"不得先修复或改变现场",
+	} {
+		if !strings.Contains(config.Agents.Verifier.SystemPrompt, want) {
+			t.Errorf("verifier prompt lacks compaction-stable evidence rule %q", want)
+		}
+	}
+
+	for _, want := range []string{
+		"新增节点只写相对已有节点的差量",
+		"证据账本",
+		"已关闭的决策",
+		"当前 frontier",
+		`{"nodes":[]}`,
+	} {
+		if !strings.Contains(config.Prompts.Compact, want) {
+			t.Errorf("compact prompt lacks delta-only rule %q", want)
+		}
+	}
+}
+
+func TestRepositoryPromptsConvergeOnDirectEvidence(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks := []struct {
+		name   string
+		prompt string
+		wants  []string
+	}{
+		{
+			name:   "manager",
+			prompt: config.Agents.Manager.SystemPrompt,
+			wants:  []string{"每条硬契约", "证据锚", "未验证项为 0"},
+		},
+		{
+			name:   "planner",
+			prompt: config.Agents.Planner.SystemPrompt,
+			wants:  []string{"最强直接门禁", "假绿风险", "不安排同义代理检查"},
+		},
+		{
+			name:   "executor",
+			prompt: config.Agents.Executor.SystemPrompt,
+			wants:  []string{"DONE / UNVERIFIED / BLOCKED", "最高假绿风险", "概括不能代替证据"},
+		},
+		{
+			name:   "verifier",
+			prompt: config.Agents.Verifier.SystemPrompt,
+			wants: []string{
+				"首次工具调用前建立验收表",
+				"每条硬契约选择一项最强直接门禁",
+				"证据覆盖后停止",
+				"UNVERIFIED",
+			},
+		},
+		{
+			name:   "compact",
+			prompt: config.Prompts.Compact,
+			wants:  []string{"主体、条件、结果和范围", "报告摘要或 verdict", "只能写 hypothesis"},
+		},
+	}
+	for _, check := range checks {
+		for _, want := range check.wants {
+			if !strings.Contains(check.prompt, want) {
+				t.Errorf("%s prompt lacks convergence contract %q", check.name, want)
+			}
+		}
+	}
+}
+
+func TestRepositoryDecompositionPromptsUseSemanticRefinement(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	planner := config.Agents.Planner.SystemPrompt
+	for _, want := range []string{
+		"语义精化",
+		"知识边界",
+		"认知闭包",
+		"只有语义变化穿过边界",
+		"扩展性和并行度是正确抽象的副产品",
+		"认知闭包三问只找例外",
+		"下层实现",
+		"本层自己写",
+		"正交证据面本身可以独立交付",
+		"现有实现的耦合是待解释的事实，不是所有权结论",
+		"共同目的只要求共享契约，不要求共享 owner",
+		"合流是组合责任，不是共同所有权",
+		"`split: none` 是尝试抽象后仍只剩一个责任边界的结论",
+	} {
+		if !strings.Contains(planner, want) {
+			t.Errorf("planner prompt lacks semantic-refinement principle %q", want)
+		}
+	}
+	if examples := strings.Count(planner, "例："); examples < 1 || examples > 3 {
+		t.Errorf("planner prompt examples = %d, want 1..3 short examples", examples)
+	}
+	for _, unwanted := range []string{
+		"两个以上可隔离验收的写入组不得",
+		"逐组证明不能独立验收且共享可变状态",
+		"CMakeLists.txt",
+		"cmake/*.cmake",
+		"共享判断与门禁的改动，可以是一个叶子",
+	} {
+		if strings.Contains(planner, unwanted) {
+			t.Errorf("planner prompt retains task-shaped decomposition rule %q", unwanted)
+		}
+	}
+
+	for name, prompt := range map[string]string{
+		"manager": config.Agents.Manager.SystemPrompt,
+	} {
+		for _, want := range []string{"认知闭包", "如何使用", "如何验收", "上层决策"} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("%s prompt lacks cognitive-closure question %q", name, want)
+			}
+		}
+	}
+}
+
+func TestRepositoryMemoryFactsAcceptLocatableToolEvidence(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, prompt := range map[string]string{
+		"compact":   config.Prompts.Compact,
+		"organizer": config.Agents.SubgraphOrganizer.SystemPrompt,
+	} {
+		for _, want := range []string{"可定位的原始工具观察", "文件路径、行号或符号"} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("%s prompt lacks file evidence rule %q", name, want)
+			}
+		}
+	}
+	if !strings.Contains(config.Prompts.Compact, "中段被省略时记录缺口") {
+		t.Error("compact prompt overclaims coverage of clipped input")
+	}
+}
+
+func TestRepositoryOrganizerPromptSeparatesQueryAndDeepMutation(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// query mode may now call memory_apply — the organizer fixes what it trips over
+	// while selecting, and writes the subgraph description. What still separates the
+	// modes is scope: query-mode edits must be tied to the query at hand, and
+	// whole-graph adjudication stays in deep curation's single atomic batch.
+	prompt := config.Agents.SubgraphOrganizer.SystemPrompt
+	for _, want := range []string{
+		"query 用 memory_add_to_subgraph 做最少归属",
+		"改动必须与本次查询相关",
+		"不借机做全图整理",
+		"深度整理至多调用一次原子 memory_apply",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("organizer prompt does not separate mutation modes %q", want)
+		}
+	}
+}
+
+func TestRepositoryRolePromptsMatchTaskPackageVisibility(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, prompt := range map[string]string{
+		"planner":  config.Agents.Planner.SystemPrompt,
+		"executor": config.Agents.Executor.SystemPrompt,
+		"verifier": config.Agents.Verifier.SystemPrompt,
+	} {
+		for _, want := range []string{
+			"root 的受保护包含创建请求与 Task Info",
+			"helper 的受保护授权包只有自身 Task Info",
+			"上游输出/继承记忆只是线索，不能补权限",
+			"Task Info 只限定当前交付",
+			"不能删除或反转原始硬约束",
+		} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("%s prompt does not match task package visibility %q", name, want)
+			}
+		}
+	}
+
+	manager := config.Agents.Manager.SystemPrompt
+	for _, want := range []string{"用户硬要求或逐字接口遗漏为 0", "无来源新增约束为 0"} {
+		if !strings.Contains(manager, want) {
+			t.Errorf("manager prompt lacks Task Info fidelity criterion %q", want)
+		}
+	}
+	for _, want := range []string{"零新增持久写", "不回退"} {
+		if !strings.Contains(agent.DefaultSystemPrompt, want) {
+			t.Errorf("fallback prompt lacks inherited-baseline rule %q", want)
+		}
+	}
+}
+
+func TestRepositoryPromptsPreserveStopRuleAndCompositeTaskGates(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, prompt := range map[string]string{
+		"default":  config.Prompts.Default,
+		"fallback": agent.DefaultSystemPrompt,
+		"executor": config.Agents.Executor.SystemPrompt,
+	} {
+		for _, want := range []string{"仍有安全且范围内的行动", "完成或明确阻塞"} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("%s prompt lacks stop rule %q", name, want)
+			}
+		}
+	}
+
+	for name, prompt := range map[string]string{
+		"default":  config.Prompts.Default,
+		"planner":  config.Agents.Planner.SystemPrompt,
+		"executor": config.Agents.Executor.SystemPrompt,
+		"verifier": config.Agents.Verifier.SystemPrompt,
+	} {
+		if !strings.Contains(prompt, "一个任务可同时包含多类") ||
+			!strings.Contains(prompt, "门禁取并集") {
+			t.Errorf("%s prompt treats task types as mutually exclusive", name)
+		}
+	}
+}
+
+func TestRepositoryRaceOwnershipAndPathGranularityAreExplicit(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	planner := config.Agents.Planner.SystemPrompt
+	for _, want := range []string{"race 候选不是额外 owner", "唯一 integration owner"} {
+		if !strings.Contains(planner, want) {
+			t.Errorf("planner prompt lacks race ownership rule %q", want)
+		}
+	}
+
+	executor := config.Agents.Executor.SystemPrompt
+	for _, want := range []string{"修改同一路径", "人工合成", "不得用 replace", "discard"} {
+		if !strings.Contains(executor, want) {
+			t.Errorf("executor prompt lacks path-granular join rule %q", want)
+		}
+	}
+}
+
+func TestAcceptanceProjectsInheritBuiltInPromptContracts(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	builtIn, err := LoadRuntimeConfig(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, project := range []string{"real-project", "crash-recovery-project"} {
+		root := filepath.Join("..", "..", "test", project)
+		got, err := LoadRuntimeConfig(root, "")
+		if err != nil {
+			t.Fatalf("load %s: %v", project, err)
+		}
+		if !reflect.DeepEqual(got.Prompts, builtIn.Prompts) {
+			t.Errorf("%s overrides built-in control prompts", project)
+		}
+		if !reflect.DeepEqual(got.Agents, builtIn.Agents) {
+			t.Errorf("%s overrides built-in role contracts", project)
+		}
+		if !reflect.DeepEqual(got.Tools, builtIn.Tools) {
+			t.Errorf("%s overrides built-in tool contracts", project)
 		}
 	}
 }
@@ -644,7 +1320,8 @@ func TestRepositoryPlannerPromptTreatsRepairRootsIncrementally(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"最近失败证据和原始累计契约",
+		"最近失败证据",
+		"累计契约",
 		"不重复已经失败的同型方案",
 	} {
 		if !strings.Contains(config.Agents.Planner.SystemPrompt, want) {
@@ -766,7 +1443,7 @@ func TestRepositoryRepairPromptsRejectCollapsedCumulativeEvidence(t *testing.T) 
 		{
 			role:   "verifier",
 			prompt: config.Agents.Verifier.SystemPrompt,
-			wants:  []string{"完整累计契约", "将每个 Ci 映射"},
+			wants:  []string{"完整累计契约", "每个 Ci 记录", "显式映射"},
 		},
 	}
 	for _, check := range checks {
@@ -824,11 +1501,41 @@ func TestRepositoryManagerAuditsVerifierEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"verifier 报告是待审计证据",
+		"verifier 报告是待审计的自报",
 		"PASS 缺少 Task Info 逐项映射或必要门禁",
 	} {
 		if !strings.Contains(config.Agents.Manager.SystemPrompt, want) {
 			t.Fatalf("manager prompt does not audit verifier evidence %q", want)
+		}
+	}
+}
+
+func TestRepositoryTaskReportsUseGenericEvidenceRecords(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, prompt := range map[string]string{
+		"manager":  config.Agents.Manager.SystemPrompt,
+		"executor": config.Agents.Executor.SystemPrompt,
+		"verifier": config.Agents.Verifier.SystemPrompt,
+	} {
+		for _, want := range []string{"证据锚", "原始观察", "适用范围"} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("%s prompt lacks generic report field %q", name, want)
+			}
+		}
+	}
+
+	verifier := config.Agents.Verifier.SystemPrompt
+	for _, want := range []string{
+		"可定位来源",
+		"没有证据锚",
+		"UNVERIFIED",
+	} {
+		if !strings.Contains(verifier, want) {
+			t.Errorf("verifier prompt lacks research-safe report rule %q", want)
 		}
 	}
 }
@@ -838,7 +1545,7 @@ func TestRepositoryDefaultPromptRecoversFromToolFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(config.Prompts.Default, "工具失败时先根据错误恢复") {
+	if !strings.Contains(config.Prompts.Default, "工具失败按错误恢复") {
 		t.Error("default prompt treats a recoverable mechanical mismatch as a blocker")
 	}
 }
@@ -895,8 +1602,8 @@ func TestRepositoryPlannerPromptBatchesReadyWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"同一 frontier 中全部写入不冲突的单元放进同一 concurrency group",
-		"共享前置只做一次，完成后立即 fan-out",
+		"ready 且互不改变彼此定义的结果同组",
+		"共享前置只做一次并立即 fan-out",
 	} {
 		if !strings.Contains(config.Agents.Planner.SystemPrompt, want) {
 			t.Errorf("planner prompt does not batch ready work %q", want)
@@ -904,51 +1611,148 @@ func TestRepositoryPlannerPromptBatchesReadyWork(t *testing.T) {
 	}
 }
 
-func TestRepositoryPlannerPromptUsesIPDLoop(t *testing.T) {
+func TestRepositoryPlannerRejectsSerialCriticalPathDelegation(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	prompt := config.Agents.Planner.SystemPrompt
 	for _, want := range []string{
-		"S0 契约展开",
-		"S1 完成流程",
-		"S2 多轴候选",
-		"S3 写入矩阵",
-		"S4 解耦决策",
-		"S5 依赖闭包",
-		"S6 叶判定",
-		"S7 审计举证",
-		"A1 交付物轴",
-		"A5 接缝轴",
-		"I1 覆盖唯一",
-		"I2 写入隔离",
-		"I3 独立可判定",
-		"`split: none` 需逐轴否证",
+		"当前 task 已经是上层交付的 owner 边界",
+		"同一 ready wave 至少两个 helper",
+		"单个 helper 不能缩短关键路径",
+		"context_offload 或 race",
 	} {
-		if !strings.Contains(config.Agents.Planner.SystemPrompt, want) {
-			t.Fatalf("planner prompt missing IPD requirement %q", want)
+		if !strings.Contains(prompt, want) {
+			t.Errorf("planner prompt allows serial critical-path delegation; missing %q", want)
 		}
 	}
 }
 
-func TestRepositoryManagerPromptUsesIPDAudit(t *testing.T) {
+func TestRepositoryPromptsKeepEnvironmentClaimsUnverified(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{
-		"planner 的 IPD 审计",
-		"I1/I2/I3",
-		"当前 ready frontier",
-		"不要把多个互补单元压成一个泛化 helper",
+
+	for role, prompt := range map[string]string{
+		"manager":  config.Agents.Manager.SystemPrompt,
+		"planner":  config.Agents.Planner.SystemPrompt,
+		"executor": config.Agents.Executor.SystemPrompt,
+		"verifier": config.Agents.Verifier.SystemPrompt,
 	} {
+		for _, want := range []string{"环境事实", "待核验", "唯一实现路径"} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("%s prompt upgrades environment claims; missing %q", role, want)
+			}
+		}
+	}
+}
+
+func TestRepositoryManagerRepairRootsConsumeEvidenceLedger(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{"已完成 + 证据锚", "已阻塞 + 反证", "剩余 delta"} {
 		if !strings.Contains(config.Agents.Manager.SystemPrompt, want) {
-			t.Fatalf("manager prompt missing IPD admission rule %q", want)
+			t.Errorf("manager prompt can replay repair work; missing %q", want)
 		}
 	}
 }
 
-func TestRepositoryOnlyExecutorRequestsHelp(t *testing.T) {
+func TestRepositoryPlannerFrontierMatchesRequestHelpSchema(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prompt := config.Agents.Planner.SystemPrompt
+	for _, want := range []string{
+		"units[]", "id", "goal", "admission_reason", "inputs", "writes", "depends_on", "deliverable",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("planner frontier cannot be forwarded to requestHelp; missing %q", want)
+		}
+	}
+}
+
+func TestRepositoryPlannerPlanTellsExecutorToRequestHelp(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const want = "Executor 先调用 coordination_requestHelp 按 ready frontier 拆分，再开始实现"
+	if !strings.Contains(config.Agents.Planner.SystemPrompt, want) {
+		t.Errorf("planner prompt does not tell executor to request help; missing %q", want)
+	}
+}
+
+func TestRepositoryPlannerPromptUsesOutcomeDrivenDecomposition(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := config.Agents.Planner.SystemPrompt
+	for _, want := range []string{
+		"条件 → 可观察结果",
+		"语义精化",
+		"知识边界",
+		"认知闭包",
+		"唯一 integration owner",
+		"`split: none`",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("planner prompt missing decomposition contract %q", want)
+		}
+	}
+	for _, field := range []string{
+		"admission_reason", "目标", "输入", "约束", "交付物", "写入面", "输出格式",
+		"evidence recipe", "依赖", "明确不做什么", "阻塞与返回条件",
+	} {
+		if !strings.Contains(prompt, field) {
+			t.Errorf("planner helper contract lacks field %q", field)
+		}
+	}
+	for _, unwanted := range []string{"S0 契约展开", "逐轴否证", "width_class"} {
+		if strings.Contains(prompt, unwanted) {
+			t.Errorf("planner prompt retains redundant decomposition protocol %q", unwanted)
+		}
+	}
+}
+
+func TestRepositoryManagerPromptAuditsDelegationContracts(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := config.Agents.Manager.SystemPrompt
+	for _, want := range []string{
+		"coordination_orchestrate 的 provide_help 字段",
+		"I1/I2/I3",
+		"只物化 ready frontier",
+		"不压并互补结果",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("manager prompt missing delegation admission rule %q", want)
+		}
+	}
+	help := config.Tools["coordination_orchestrate"].Description
+	for _, field := range []string{
+		"admission_reason", "目标", "输入", "约束", "交付物", "写入面", "输出格式",
+		"evidence recipe", "依赖", "明确不做什么", "阻塞与返回条件",
+		"user_requested", "unresolved_alternatives",
+	} {
+		if !strings.Contains(help, field) {
+			t.Errorf("manager helper admission lacks field %q", field)
+		}
+	}
+}
+
+func TestRepositoryTaskRolesCanRequestHelp(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
@@ -956,14 +1760,13 @@ func TestRepositoryOnlyExecutorRequestsHelp(t *testing.T) {
 	for _, role := range []struct {
 		name  string
 		tools []string
-		want  bool
 	}{
 		{name: "planner", tools: config.Agents.Planner.Tools},
-		{name: "executor", tools: config.Agents.Executor.Tools, want: true},
+		{name: "executor", tools: config.Agents.Executor.Tools},
 		{name: "verifier", tools: config.Agents.Verifier.Tools},
 	} {
-		if got := slices.Contains(role.tools, "coordination_requestHelp"); got != role.want {
-			t.Errorf("%s coordination_requestHelp = %v, want %v", role.name, got, role.want)
+		if !slices.Contains(role.tools, "coordination_requestHelp") {
+			t.Errorf("%s lacks coordination_requestHelp", role.name)
 		}
 	}
 }
@@ -998,8 +1801,8 @@ func TestRepositoryRolePromptsPreserveExactPublicContracts(t *testing.T) {
 		prompt string
 		wants  []string
 	}{
-		{"planner", config.Agents.Planner.SystemPrompt, []string{"逐字保留 Task Info 的硬要求", "构建/编译"}},
-		{"executor", config.Agents.Executor.SystemPrompt, []string{"Task Info", "构建/编译"}},
+		{"planner", config.Agents.Planner.SystemPrompt, []string{"逐字保留 Task Info 的硬要求", "产物参加构建时才要求构建"}},
+		{"executor", config.Agents.Executor.SystemPrompt, []string{"Task Info", "产物参加构建才构建"}},
 		{"verifier", config.Agents.Verifier.SystemPrompt, []string{"逐字 API/字段/字符串/退出码/默认值", "Task Info 承诺的公共入口"}},
 	}
 	for _, check := range checks {
@@ -1191,7 +1994,7 @@ func TestLoadConfigRejectsPlannerGraphTool(t *testing.T) {
 agents:
   planner:
     tools:
-      - coordination_replacePending
+      - coordination_orchestrate
 `)
 	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
 		t.Fatal(err)
@@ -1356,6 +2159,7 @@ func TestLoadConfigAcceptsExternalSandbox(t *testing.T) {
   model: gpt-5
 exec:
   external_sandbox: true
+  external_workspace_isolation: true
 `)
 	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
 		t.Fatal(err)
@@ -1367,6 +2171,28 @@ exec:
 	}
 	if !got.Exec.ExternalSandbox {
 		t.Fatal("Exec.ExternalSandbox = false, want true")
+	}
+	if !got.Exec.ExternalWorkspaceIsolation {
+		t.Fatal("Exec.ExternalWorkspaceIsolation = false, want true")
+	}
+}
+
+func TestLoadConfigRejectsExternalWorkspaceIsolationWithoutExternalSandbox(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  credential: test
+  model: gpt-5
+exec:
+  external_workspace_isolation: true
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadConfig(root); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig() error = %v, want ErrInvalidConfig", err)
 	}
 }
 
@@ -1506,22 +2332,26 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 	if got.Prompts.Default == "" {
 		t.Fatal("workspace prompts.default is empty")
 	}
-	if !strings.Contains(got.Prompts.Default, "每个来源必须 apply 或 discard，结束角色前 finish") {
-		t.Fatal("workspace prompts.default missing join disposition contract")
+	for _, want := range []string{"逐源 apply/discard", "finish"} {
+		if !strings.Contains(got.Prompts.Default, want) {
+			t.Fatalf("workspace prompts.default missing join contract %q", want)
+		}
 	}
 	if got.Agents.Manager.SystemPrompt == "" {
 		t.Fatal("workspace manager system_prompt is empty")
 	}
 	for _, want := range []string{
-		"核心职责是编排和维护全局协调图",
-		"manager 决定 root 与 helper 的放置、依赖、准入、去重和增量改图",
-		"planner 的拆分提案是 manager 编排全局图的输入，不是对全局图的直接决定",
-		"普通用户消息与 `[拆分请求]` 是两种不同输入",
-		"普通用户消息不得触发 coordination_provideHelp",
+		"编排并维护全局协调图",
+		"决定 root/helper 的放置、依赖、准入、去重和增量修改",
+		"planner 提案不是全局决定",
+		"普通用户消息与 `[拆分请求]` 是不同输入",
+		"普通用户消息不得触发 provide_help 动作",
 		"manager 永远不调用、也不声称调用 coordination_requestHelp",
 		"工具成功返回前，不得声称 task、helper 或图变更已经创建",
-		"寒暄和直接问答不要主动介绍内部角色、协调图或 help 协议",
+		"问答不介绍内部机制",
 		"workflow done 不等于验收通过",
+		"coordination_publishTask",
+		"成功前不得声称已落盘",
 	} {
 		if !strings.Contains(got.Agents.Manager.SystemPrompt, want) {
 			t.Errorf("workspace manager system_prompt missing %q", want)
@@ -1533,8 +2363,8 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"验收对象是 Task Info 所表达的预期目的",
-		"尽可能成为 G 的充要条件",
+		"从 Task Info 恢复预期目的",
+		"所有 Ci 都成立但 G 仍未实现是否可能",
 		"对每个拟阻断结论做高置信复核",
 		"未证实的可能性、风格偏好和一般质量建议只能列为非阻断观察",
 	} {
@@ -1557,11 +2387,16 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 	if slices.Contains(got.Agents.Manager.Tools, "join") {
 		t.Fatalf("manager tools include role-local %q", "join")
 	}
-	if got.Tools["coordination_replacePending"].Description == "" {
-		t.Fatal("workspace tools.coordination_replacePending.description is empty")
+	for _, name := range []string{"coordination_orchestrate", "coordination_publishTask"} {
+		if got.Tools[name].Description == "" {
+			t.Fatalf("workspace tools.%s.description is empty", name)
+		}
+	}
+	if !slices.Contains(got.Agents.Manager.Tools, "coordination_publishTask") {
+		t.Fatalf("manager tools = %v, want coordination_publishTask", got.Agents.Manager.Tools)
 	}
 	for _, name := range got.Agents.Planner.Tools {
-		if name == "coordination_replacePending" {
+		if name == "coordination_orchestrate" {
 			t.Fatalf("planner tools include manager-only %q", name)
 		}
 	}
@@ -1571,7 +2406,9 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 			t.Fatalf("manager tools include file/exec %q", name)
 		}
 	}
-	if got.Tools["read"].Description != "读取工作区相对路径中的文本文件。offset 是从 1 起的行号，limit 是最大行数。约 2000 行或 50KB 截断；截断时给出下一个 offset。" {
-		t.Fatalf("tools.read.description = %q", got.Tools["read"].Description)
+	for _, want := range []string{"offset 从 1 起", "一次最多 2000 行/50KB", "截断返回下个 offset"} {
+		if !strings.Contains(got.Tools["read"].Description, want) {
+			t.Errorf("tools.read.description missing %q", want)
+		}
 	}
 }
