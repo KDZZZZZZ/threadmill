@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/../.." && pwd)"
+work_root="${THREADMILL_BENCHMARK_HOME:-$repo_root/benchmarks/.work}"
+binary="$work_root/harbor/bin/threadmill"
+jobs_root="${THREADMILL_BENCHMARK_JOBS:-$work_root/jobs/${THREADMILL_BENCHMARK_NAME:-harbor}}"
+runtime="${THREADMILL_HARBOR_BIN:-harbor}"
+workspace_isolation_compose="$repo_root/benchmarks/harbor/docker-compose-workspace-isolation.yaml"
+build_proxy_compose="$repo_root/benchmarks/harbor/docker-compose-build-proxy.yaml"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  benchmarks/harbor/bench doctor
+  benchmarks/harbor/bench build
+  benchmarks/harbor/bench test
+  benchmarks/harbor/bench run-path <task-or-dataset-path> <provider/model> [Harbor args...]
+  benchmarks/harbor/bench run-dataset <dataset[@version]> <provider/model> [Harbor args...]
+EOF
+}
+
+die() {
+  printf 'threadmill-harbor: %s\n' "$*" >&2
+  exit 1
+}
+
+doctor() {
+  command -v go >/dev/null 2>&1 || die "missing command: go"
+  command -v "$runtime" >/dev/null 2>&1 || die "missing command: $runtime"
+  command -v docker >/dev/null 2>&1 || die "missing command: docker"
+  docker info >/dev/null 2>&1 || die "Docker daemon is unavailable"
+  printf 'ok  runtime %s\n' "$($runtime --version)"
+  printf 'ok  go %s\n' "$(go version)"
+  printf 'ok  docker %s\n' "$(docker version --format '{{.Server.Version}}')"
+}
+
+build() {
+  mkdir -p -- "$(dirname -- "$binary")"
+  (cd "$repo_root" && CGO_ENABLED=0 go build -trimpath -o "$binary" ./cmd/threadmill)
+  printf '%s\n' "$binary"
+}
+
+run_adapter() {
+  local source_flag="$1"
+  local source="$2"
+  local model="$3"
+  shift 3
+  build >/dev/null
+  mkdir -p -- "$jobs_root"
+
+  local version
+  version="$(git -C "$repo_root" describe --always --dirty)"
+  local -a agent_args=(
+    --agent benchmarks.harbor.threadmill_agent:Threadmill
+    --model "$model"
+    --agent-kwarg "binary=$binary"
+    --agent-kwarg "version=$version"
+  )
+  local -a compose_args=(
+    --extra-docker-compose "$workspace_isolation_compose"
+  )
+  if [[ -n "${THREADMILL_BUILD_PROXY:-}" ]]; then
+    compose_args+=(--extra-docker-compose "$build_proxy_compose")
+  fi
+  if [[ -n "${THREADMILL_CONTEXT_WINDOW:-}" ]]; then
+    agent_args+=(--agent-kwarg "context_window=$THREADMILL_CONTEXT_WINDOW")
+  fi
+  if [[ -n "${THREADMILL_EXEC_SLOTS:-}" ]]; then
+    agent_args+=(--agent-kwarg "exec_slots=$THREADMILL_EXEC_SLOTS")
+  fi
+  if [[ -n "${THREADMILL_MODEL_PROXY:-}" ]]; then
+    agent_args+=(--agent-kwarg "model_proxy=$THREADMILL_MODEL_PROXY")
+  fi
+  if [[ -n "${THREADMILL_BENCH_CONFIG:-}" ]]; then
+    agent_args+=(--agent-kwarg "config=$THREADMILL_BENCH_CONFIG")
+  fi
+  if [[ -n "${THREADMILL_STRACE_BINARY:-}" ]]; then
+    agent_args+=(--agent-kwarg "tracer=$THREADMILL_STRACE_BINARY")
+  fi
+
+  PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" \
+    "$runtime" run "$source_flag" "$source" \
+    "${agent_args[@]}" \
+    "${compose_args[@]}" \
+    --jobs-dir "$jobs_root" --yes "$@"
+}
+
+case "${1:-}" in
+  doctor)
+    doctor
+    ;;
+  build)
+    build
+    ;;
+  test)
+    harbor_entry="$(readlink -f -- "$(command -v "$runtime")")"
+    harbor_python="$(dirname -- "$harbor_entry")/python"
+    [[ -x "$harbor_python" ]] || die "cannot locate Harbor's Python interpreter"
+    (cd "$repo_root" && "$harbor_python" -m unittest benchmarks.harbor.test_threadmill_agent -v)
+    ;;
+  run-path)
+    [[ $# -ge 3 ]] || { usage >&2; exit 2; }
+    run_adapter --path "$2" "$3" "${@:4}"
+    ;;
+  run-dataset)
+    [[ $# -ge 3 ]] || { usage >&2; exit 2; }
+    run_adapter --dataset "$2" "$3" "${@:4}"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

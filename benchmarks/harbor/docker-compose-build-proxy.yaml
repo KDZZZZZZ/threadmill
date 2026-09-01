@@ -1,0 +1,10 @@
+services:
+  main:
+    build:
+      args:
+        HTTP_PROXY: "${THREADMILL_BUILD_PROXY}"
+        HTTPS_PROXY: "${THREADMILL_BUILD_PROXY}"
+        http_proxy: "${THREADMILL_BUILD_PROXY}"
+        https_proxy: "${THREADMILL_BUILD_PROXY}"
+        NO_PROXY: "${THREADMILL_BUILD_NO_PROXY:-localhost,127.0.0.1,::1}"
+        no_proxy: "${THREADMILL_BUILD_NO_PROXY:-localhost,127.0.0.1,::1}"
