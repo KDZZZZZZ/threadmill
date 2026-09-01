@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -36,10 +36,10 @@ const (
 	fileFindToolName  = "find"
 	bashToolName      = "bash"
 
-	coordReplacePendingToolName = "coordination_replacePending"
-	coordRequestHelpToolName    = "coordination_requestHelp"
-	coordProvideHelpToolName    = "coordination_provideHelp"
-	coordJoinToolName           = "join"
+	coordOrchestrateToolName = "coordination_orchestrate"
+	coordPublishTaskToolName = "coordination_publishTask"
+	coordRequestHelpToolName = "coordination_requestHelp"
+	coordJoinToolName        = "join"
 
 	hookInjectSubscribedMemory      = "inject_subscribed_memory"
 	hookCompactOnOverflow           = "compact_on_overflow"
@@ -54,7 +54,9 @@ const (
 	managerID  = "manager"
 )
 
-var nextQuerySubgraphID atomic.Uint64
+// querySubgraphPrefix 是 organize 查询子图的 ID 前缀；序号从当前图里已有的最大值往后取，
+// 这样重启后不会撞上持久化图里的同名子图、把订阅目标悄悄换成别的内容。
+const querySubgraphPrefix = "sg-q-"
 
 var knownFileTools = map[string]struct{}{
 	organizeSubgraphToolName:      {},
@@ -66,6 +68,7 @@ var knownFileTools = map[string]struct{}{
 	memoryDropFromContextToolName: {},
 	memoryExpandToolName:          {},
 	memoryCollapseToolName:        {},
+	memorySubscribeToolName:       {},
 	agenttool.MemoryApplyName:     {},
 	fileReadToolName:              {},
 	fileWriteToolName:             {},
@@ -74,15 +77,16 @@ var knownFileTools = map[string]struct{}{
 	fileGrepToolName:              {},
 	fileFindToolName:              {},
 	bashToolName:                  {},
-	coordReplacePendingToolName:   {},
+	coordOrchestrateToolName:      {},
+	coordPublishTaskToolName:      {},
 	coordRequestHelpToolName:      {},
-	coordProvideHelpToolName:      {},
 	coordJoinToolName:             {},
 }
 
 // organizerOnlyTools 只允许 subgraph_organizer 装配：记忆图的批量改写权集中在整理 Agent。
 var organizerOnlyTools = map[string]struct{}{
 	agenttool.MemoryApplyName: {},
+	memorySubscribeToolName:   {},
 }
 
 var knownFileHooks = map[string]struct{}{
@@ -93,8 +97,8 @@ var knownFileHooks = map[string]struct{}{
 }
 
 var managerOnlyTools = map[string]struct{}{
-	coordReplacePendingToolName: {},
-	coordProvideHelpToolName:    {},
+	coordOrchestrateToolName: {},
+	coordPublishTaskToolName: {},
 }
 
 var taskRoleOnlyTools = map[string]struct{}{
@@ -125,6 +129,7 @@ type FilePrompts struct {
 	CompactJSONReminder string `yaml:"compact_json_reminder"`
 	DropContextPressure string `yaml:"drop_context_pressure"`
 	OrganizeQuery       string `yaml:"organize_query"`
+	SessionResetHandoff string `yaml:"session_reset_handoff"`
 }
 
 // FileOverlay 把 yaml 的 tools/prompts 盖到装配出的 Agent 上，并可注入运行时工具和事件总线。
@@ -134,6 +139,12 @@ type FileOverlay struct {
 	NamedTools map[string]agenttool.Tool
 	Events     *event.Bus
 	Curation   CurationConfig
+	// NoSessionReset 关掉整理 Agent 的窗口压力会话重置。生产默认开启；
+	// 这个开关只给评测做同 workload 的 A/B 对照用。
+	NoSessionReset bool
+	// SubscriptionAttribution 让订阅注入块按来源子图分组并标注归属，
+	// 使订阅者能看见边界、自行降权不相干节点。默认关闭，等 A/B 数据再定默认值。
+	SubscriptionAttribution bool
 }
 
 // FileAgents 是 threadmill.yaml 里内置 Agent 的配置。
@@ -214,6 +225,7 @@ func (p FilePrompts) Validate() error {
 		{"prompts.compact_json_reminder", p.CompactJSONReminder},
 		{"prompts.drop_context_pressure", p.DropContextPressure},
 		{"prompts.organize_query", p.OrganizeQuery},
+		{"prompts.session_reset_handoff", p.SessionResetHandoff},
 	} {
 		if strings.TrimSpace(item.value) != item.value {
 			return fmt.Errorf("%s must not have surrounding whitespace", item.name)
@@ -260,7 +272,7 @@ func NewSubgraphOrganizer(config Config) (*Loop, error) {
 	}
 
 	tools, definitions, err := prepareTools(append(
-		agenttool.MemoryTools(nil, nil),
+		append(agenttool.MemoryTools(nil, nil), MemorySubscribeTool()),
 		extra...,
 	))
 	if err != nil {
@@ -268,6 +280,7 @@ func NewSubgraphOrganizer(config Config) (*Loop, error) {
 	}
 	loop.tools = tools
 	loop.definitions = definitions
+	loop.sessionReset = true
 	return loop, nil
 }
 
@@ -555,6 +568,9 @@ func newFileLoop(
 	if err := applyFileOverlay(loop, overlay); err != nil {
 		return nil, err
 	}
+	if defaultID == subgraphOrganizerID {
+		loop.sessionReset = !overlay.NoSessionReset
+	}
 	return loop, nil
 }
 
@@ -658,6 +674,8 @@ func toolsFromNames(
 			out = append(out, MemoryExpandTool(loop))
 		case memoryCollapseToolName:
 			out = append(out, MemoryCollapseTool(loop))
+		case memorySubscribeToolName:
+			out = append(out, MemorySubscribeTool())
 		default:
 			if memory == nil {
 				memory = memoryToolsByName()
@@ -771,7 +789,8 @@ func newMemoryLoop(config Config, defaultID string, organizer *Loop) (*Loop, err
 }
 
 // OrganizeSubgraphTool 把向子图整理 Agent 发送 query 包装成工具。
-// 执行后返回新子图，并给发起请求的 Agent 订阅该子图。
+// 执行后返回新子图，并给发起请求的 Agent 订阅该子图；整理期间 organizer 通过
+// memory_subscribe 表达的订阅增删也在这里统一应用。
 func OrganizeSubgraphTool(organizer *Loop) agenttool.Tool {
 	return &organizeSubgraphTool{organizer: organizer}
 }
@@ -796,9 +815,14 @@ func (t *organizeSubgraphTool) BindEnv(e env.Env) agenttool.Tool {
 
 func (*organizeSubgraphTool) Definition() agenttool.Definition {
 	return agenttool.Definition{
-		Name:        organizeSubgraphToolName,
-		Description: "根据查询整理出一张对应的记忆子图并返回该子图。发起请求的 Agent 会自动订阅这张新子图。",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"要整理进子图的查询"}},"required":["query"],"additionalProperties":false}`),
+		Name: organizeSubgraphToolName,
+		Description: "按 query 召回记忆，结果作为新子图返回并自动订阅；整理 Agent 也可能据 exclude 取消你的动态订阅。" +
+			"三个正当触发：Task Info 含“记忆依赖”声明时开工第一个回合调用一次，query 逐字携带声明内容；" +
+			"核对过 Task Info、已注入记忆和当前工作区后，仍缺一个会改变下一步行动的历史事实；" +
+			"注入记忆里有大片与当前职责无关、或适用范围确已失效的内容，用 exclude 声明范围。" +
+			"每次调用是一次完整的整理 Loop，成本高：query 一次写全全部必要条件；返回 0 个节点说明记忆图没有，改去工作区核对，不换措辞重查；" +
+			"无声明且无决定级缺口时不调用。exclude 的退订是持久的，只写确已失效的范围。",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"要整理进子图的查询：你需要哪些记忆"},"exclude":{"type":"string","description":"可选的负向过滤：哪些记忆你不需要，或哪些已订阅的内容对当前职责已经失效"}},"required":["query"],"additionalProperties":false}`),
 	}
 }
 
@@ -811,7 +835,8 @@ func (t *organizeSubgraphTool) Execute(ctx context.Context, call agenttool.Call)
 	}
 
 	var args struct {
-		Query string `json:"query"`
+		Query   string `json:"query"`
+		Exclude string `json:"exclude"`
 	}
 	raw := call.Arguments
 	if len(raw) == 0 {
@@ -824,57 +849,156 @@ func (t *organizeSubgraphTool) Execute(ctx context.Context, call agenttool.Call)
 	if query == "" {
 		return agenttool.Output{}, fmt.Errorf("%s: missing query", organizeSubgraphToolName)
 	}
+	exclude := strings.TrimSpace(args.Exclude)
 
+	if t.memory == nil {
+		return agenttool.Output{}, fmt.Errorf("%s: unbound memory", organizeSubgraphToolName)
+	}
+	before := t.memory.Snapshot()
 	subgraph := ctxgraph.Subgraph{
-		ID:      fmt.Sprintf("sg-q-%d", nextQuerySubgraphID.Add(1)),
+		ID:      nextQuerySubgraphID(before),
 		Name:    query,
 		Summary: query,
 		Kind:    ctxgraph.SubgraphKindTask,
 	}
-	if t.memory == nil {
-		return agenttool.Output{}, fmt.Errorf("%s: unbound memory", organizeSubgraphToolName)
-	}
-	graph := t.memory.Snapshot().WithSubgraph(subgraph)
+	graph := before.WithSubgraph(subgraph)
 	if err := t.memory.Commit(graph); err != nil {
 		return agenttool.Output{}, fmt.Errorf("commit organized subgraph: %w", err)
 	}
 
+	// sink 只挂在这一条 Ask 的 ctx 上：organizer 的 memory_subscribe 在别处调用会直接报错。
+	sink := &subscriptionSink{}
 	if err := organizeMemory(
-		ctx,
+		withSubscriptionSink(ctx, sink),
 		t.organizer,
 		t.memory,
 		organizeSubgraphToolName,
 		query,
+		exclude,
 		subgraph.ID,
 	); err != nil {
 		return agenttool.Output{}, err
 	}
 
-	if found, ok := subgraphFromGraph(t.memory.Snapshot(), subgraph.ID); ok {
+	snapshot := t.memory.Snapshot()
+	if found, ok := subgraphFromGraph(snapshot, subgraph.ID); ok {
 		subgraph = found
 	}
+	// 先应用 organizer 的增删，再补上目标子图的自动订阅：本次查询的结果必然可见。
+	subscriptions := t.applySubscriptions(sink, snapshot, subgraph.ID)
 	if t.requester != nil {
 		t.requester.subscribeSubgraph(subgraph.ID)
 	}
 
-	payload, err := json.Marshal(subgraph)
-	if err != nil {
-		return agenttool.Output{}, fmt.Errorf("encode subgraph: %w", err)
+	return marshalToolJSON(organizeSubgraphResult{
+		Subgraph:      subgraph,
+		Subscriptions: subscriptions,
+	})
+}
+
+// organizeSubgraphResult 是 organize_subgraph 的返回：整理出的子图，加上本次查询对请求方
+// 动态订阅的实际改动。逐项报告而不是整体失败——个别 ID 无效不该让整次整理白做。
+type organizeSubgraphResult struct {
+	Subgraph      ctxgraph.Subgraph   `json:"subgraph"`
+	Subscriptions subscriptionOutcome `json:"subscriptions"`
+}
+
+type subscriptionOutcome struct {
+	Subscribed   []string           `json:"subscribed"`
+	Unsubscribed []string           `json:"unsubscribed"`
+	Skipped      []subscriptionSkip `json:"skipped,omitempty"`
+}
+
+type subscriptionSkip struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+}
+
+// applySubscriptions 把 organizer 记录的订阅增删落到请求方身上。
+// subscribe 需要子图在当前快照里真实存在；unsubscribe 只过滤动态订阅列表，
+// 任务启动包（stable）与运行时固定订阅（fixed）在结构上不可取消。
+func (t *organizeSubgraphTool) applySubscriptions(
+	sink *subscriptionSink,
+	graph ctxgraph.Graph,
+	targetID string,
+) subscriptionOutcome {
+	subscribe, unsubscribe := sink.pending()
+	outcome := subscriptionOutcome{Subscribed: []string{}, Unsubscribed: []string{}}
+	if len(subscribe) == 0 && len(unsubscribe) == 0 {
+		return outcome
 	}
-	return agenttool.Output{Content: string(payload)}, nil
+	if t.requester == nil {
+		for _, id := range append(append([]string(nil), subscribe...), unsubscribe...) {
+			outcome.Skipped = append(outcome.Skipped, subscriptionSkip{
+				ID:     id,
+				Reason: "no requester is bound to this organize_subgraph tool",
+			})
+		}
+		return outcome
+	}
+	for _, id := range subscribe {
+		if _, ok := subgraphFromGraph(graph, id); !ok {
+			outcome.Skipped = append(outcome.Skipped, subscriptionSkip{
+				ID:     id,
+				Reason: "subgraph does not exist in the current memory graph",
+			})
+			continue
+		}
+		t.requester.subscribeSubgraph(id)
+		outcome.Subscribed = append(outcome.Subscribed, id)
+	}
+	for _, id := range unsubscribe {
+		if id == targetID {
+			outcome.Skipped = append(outcome.Skipped, subscriptionSkip{
+				ID:     id,
+				Reason: "this is the subgraph organized for the current query and stays subscribed",
+			})
+			continue
+		}
+		if !t.requester.unsubscribeSubgraph(id) {
+			outcome.Skipped = append(outcome.Skipped, subscriptionSkip{
+				ID:     id,
+				Reason: "not a dynamic subscription; the task package and runtime-fixed subscriptions cannot be dropped",
+			})
+			continue
+		}
+		outcome.Unsubscribed = append(outcome.Unsubscribed, id)
+	}
+	return outcome
+}
+
+// nextQuerySubgraphID 在当前图已有的 sg-q-N 之后取号，避免重启后与持久化子图重名。
+func nextQuerySubgraphID(graph ctxgraph.Graph) string {
+	highest := uint64(0)
+	for _, subgraph := range graph.Subgraphs {
+		rest, ok := strings.CutPrefix(subgraph.ID, querySubgraphPrefix)
+		if !ok {
+			continue
+		}
+		n, err := strconv.ParseUint(rest, 10, 64)
+		if err != nil {
+			continue
+		}
+		if n > highest {
+			highest = n
+		}
+	}
+	return fmt.Sprintf("%s%d", querySubgraphPrefix, highest+1)
 }
 
 func organizeMemory(
 	ctx context.Context,
 	organizer *Loop,
 	memory env.MemoryView,
-	operation, query, subgraphID string,
+	operation, query, exclude, subgraphID string,
 ) error {
 	before := memory.Snapshot()
 	started := time.Now()
+	organizer.noteSessionSubgraph(subgraphID)
 	organizer.publish(ctx, event.MemoryStart(organizer.agentID, operation, subgraphID))
 	_, err := organizer.Ask(ctx, organizeQuery(
 		query,
+		exclude,
 		subgraphID,
 		before,
 		organizer.organizeQueryText(),
@@ -885,22 +1009,27 @@ func organizeMemory(
 		operation,
 		subgraphID,
 		started,
-		len(before.Nodes),
+		countQueryMatches(before, query),
 		selected,
 		err,
 	))
 	return err
 }
 
-func organizeQuery(query, subgraphID string, graph ctxgraph.Graph, instruction string) string {
+func organizeQuery(query, exclude, subgraphID string, graph ctxgraph.Graph, instruction string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n\n目标子图 ID：%s\n%s\n", query, subgraphID, instruction)
+	fmt.Fprintf(&b, "%s\n", query)
+	if exclude != "" {
+		fmt.Fprintf(&b, "\n请求方声明不需要的记忆：%s\n", exclude)
+	}
+	fmt.Fprintf(&b, "\n目标子图 ID：%s\n%s\n", subgraphID, instruction)
 	b.WriteString("\n已有子图：\n")
 	if len(graph.Subgraphs) == 0 {
 		b.WriteString("（无）\n")
 	}
 	for _, subgraph := range graph.Subgraphs {
 		fmt.Fprintf(&b, "- %s kind=%s name=%s\n", subgraph.ID, subgraph.Kind, subgraph.Name)
+		writeSubgraphDescription(&b, subgraph, "  ")
 	}
 	b.WriteString("\n查询可能命中的节点：\n")
 	hits := 0
@@ -915,6 +1044,18 @@ func organizeQuery(query, subgraphID string, graph ctxgraph.Graph, instruction s
 		b.WriteString("（无）\n")
 	}
 	return b.String()
+}
+
+// countQueryMatches 数查询消息里真实列出的候选节点数。
+// 报告里的“候选”必须和模型实际看到的候选列表一致；用全图节点数会把召回率读成几乎为零。
+func countQueryMatches(graph ctxgraph.Graph, query string) int {
+	matches := 0
+	for _, node := range graph.Nodes {
+		if nodeMatchesQuery(node, query) {
+			matches++
+		}
+	}
+	return matches
 }
 
 func nodeMatchesQuery(node ctxgraph.Node, query string) bool {

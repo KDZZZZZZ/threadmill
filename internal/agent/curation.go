@@ -85,7 +85,7 @@ func compactAndMaybeCurate(ctx context.Context, loop *Loop, keep int) error {
 	return nil
 }
 
-// maybeDeepCuration 在节点总量或单次新增跨过阈值时，让整理 Agent 对全图执行审核。
+// maybeDeepCuration 在节点总量或单次新增跨过阈值时，让整理 Agent 审核有界快照。
 // 整理是尽力而为：失败只进事件流，不让外层钩子失败。
 func maybeDeepCuration(ctx context.Context, loop *Loop, before int) {
 	if err := ctx.Err(); err != nil {
@@ -128,6 +128,16 @@ func (l *Loop) isRunning() bool {
 	return l.running
 }
 
+// RunDeepCuration 让整理 Agent 审核一份有界图快照。
+// 生产路径由 compact 后的阈值触发（maybeDeepCuration）；导出是为了让评测
+// 直接覆盖深度整理模式，而不是在评测里另写一份请求构造。
+func RunDeepCuration(ctx context.Context, organizer *Loop, snapshot ctxgraph.Graph) {
+	if organizer == nil {
+		return
+	}
+	runDeepCuration(ctx, organizer, snapshot)
+}
+
 func runDeepCuration(ctx context.Context, organizer *Loop, snapshot ctxgraph.Graph) {
 	const operation = "curation_audit"
 	started := time.Now()
@@ -136,10 +146,10 @@ func runDeepCuration(ctx context.Context, organizer *Loop, snapshot ctxgraph.Gra
 	organizer.publish(ctx, event.MemoryOrganized(organizer.agentID, operation, "", started, len(snapshot.Nodes), -1, err))
 }
 
-// deepCurationQuery 构造全图审核请求：逐节点列出 ID、kind/status、创建者与陈述。
+// deepCurationQuery 构造有界审核请求：逐节点列出 ID、kind/status、创建者与陈述。
 func deepCurationQuery(snapshot ctxgraph.Graph) string {
 	var b strings.Builder
-	b.WriteString("深度整理请求：对当前环境记忆图全图执行审核，规则见你的系统提示（证据准入、报告可信度、矛盾仲裁、合并去重、噪音清除、保护层）。")
+	b.WriteString("深度整理请求：只审核下列实际提供的有界节点；输入可能因大小限制省略中段，不得声称看到全图。规则见系统提示（证据准入、矛盾仲裁、去重和保护层）。")
 	b.WriteString("所有修改用 memory_apply 提交，每条带 reason；不确定的节点不要动。完成后简短确认操作摘要。\n\n")
 	b.WriteString("节点清单（ID [kind/status] 创建者）：\n")
 	for _, node := range snapshot.Nodes {

@@ -131,6 +131,30 @@ func (l *Loop) subscribeSubgraph(id string) {
 	l.subscribedSubgraphs = append(l.subscribedSubgraphs, id)
 }
 
+// unsubscribeSubgraph 从动态订阅列表里保序移除一个子图，返回是否真的移除过。
+// 只过滤动态列表：package（stable）与运行时固定订阅（fixed）在结构上不可取消。
+func (l *Loop) unsubscribeSubgraph(id string) bool {
+	if id == "" {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kept := make([]string, 0, len(l.subscribedSubgraphs))
+	removed := false
+	for _, existing := range l.subscribedSubgraphs {
+		if existing == id {
+			removed = true
+			continue
+		}
+		kept = append(kept, existing)
+	}
+	if !removed {
+		return false
+	}
+	l.subscribedSubgraphs = kept
+	return true
+}
+
 // assembleRequest 将静态 Agent 配置、当前消息和工具定义组装成请求快照。
 func (l *Loop) assembleRequest() Request {
 	l.mu.Lock()
@@ -205,6 +229,86 @@ func materializedStateBlock(block Block) string {
 	return block.Text
 }
 
+// FormatSubscribedMemory 渲染一次订阅注入块。
+// attribution 为真时按来源子图分组并标注多归属，让订阅者看得见边界；
+// 为假时是扁平列表（当前生产默认）。两种渲染的成本差由评测直接对比。
+func FormatSubscribedMemory(graph ctxgraph.Graph, subgraphIDs []string, attribution bool) string {
+	return formatSubscribedNodes(graph, subgraphIDs, graph.NodesInSubgraphs(subgraphIDs), attribution)
+}
+
+func formatSubscribedNodes(
+	graph ctxgraph.Graph,
+	subgraphIDs []string,
+	nodes []ctxgraph.Node,
+	attribution bool,
+) string {
+	if attribution {
+		return formatMemoryBySubgraph(graph, subgraphIDs, nodes)
+	}
+	return formatMemory(nodes)
+}
+
+// formatMemoryBySubgraph 把节点按订阅顺序归到第一张命中的子图下，并标注它的其他归属。
+func formatMemoryBySubgraph(graph ctxgraph.Graph, subgraphIDs []string, nodes []ctxgraph.Node) string {
+	placed := make(map[string]struct{}, len(nodes))
+	var b strings.Builder
+	for _, id := range subgraphIDs {
+		subgraph, ok := subgraphFromGraph(graph, id)
+		if !ok {
+			continue
+		}
+		section := false
+		for _, node := range nodes {
+			if node.Statement == "" || !nodeInSubgraph(node, id) {
+				continue
+			}
+			if _, done := placed[node.ID]; done && node.ID != "" {
+				continue
+			}
+			placed[node.ID] = struct{}{}
+			if b.Len() == 0 {
+				b.WriteString("记忆：")
+			}
+			if !section {
+				fmt.Fprintf(&b, "\n[%s %s]", subgraph.ID, subgraph.Name)
+				section = true
+			}
+			writeMemoryNode(&b, node)
+			if others := otherSubgraphs(node, id); len(others) > 0 {
+				fmt.Fprintf(&b, "（另属 %s）", strings.Join(others, "、"))
+			}
+		}
+	}
+	return b.String()
+}
+
+func nodeInSubgraph(node ctxgraph.Node, id string) bool {
+	for _, existing := range node.SubgraphIDs {
+		if existing == id {
+			return true
+		}
+	}
+	return false
+}
+
+func otherSubgraphs(node ctxgraph.Node, id string) []string {
+	others := make([]string, 0, len(node.SubgraphIDs))
+	for _, existing := range node.SubgraphIDs {
+		if existing != id {
+			others = append(others, existing)
+		}
+	}
+	return others
+}
+
+func writeMemoryNode(b *strings.Builder, node ctxgraph.Node) {
+	b.WriteString("\n- ")
+	if node.Kind != "" || node.Status != "" {
+		fmt.Fprintf(b, "[%s/%s] ", node.Kind, node.Status)
+	}
+	b.WriteString(node.Statement)
+}
+
 func formatMemory(nodes []ctxgraph.Node) string {
 	var b strings.Builder
 	for _, node := range nodes {
@@ -214,11 +318,7 @@ func formatMemory(nodes []ctxgraph.Node) string {
 		if b.Len() == 0 {
 			b.WriteString("记忆：")
 		}
-		b.WriteString("\n- ")
-		if node.Kind != "" || node.Status != "" {
-			fmt.Fprintf(&b, "[%s/%s] ", node.Kind, node.Status)
-		}
-		b.WriteString(node.Statement)
+		writeMemoryNode(&b, node)
 	}
 	return b.String()
 }

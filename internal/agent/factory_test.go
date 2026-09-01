@@ -175,10 +175,11 @@ func TestOrganizeSubgraphToolAsksOrganizer(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	var subgraph ctxgraph.Subgraph
-	if err := json.Unmarshal([]byte(out.Content), &subgraph); err != nil {
-		t.Fatalf("decode subgraph %q: %v", out.Content, err)
+	var result organizeSubgraphResult
+	if err := json.Unmarshal([]byte(out.Content), &result); err != nil {
+		t.Fatalf("decode result %q: %v", out.Content, err)
 	}
+	subgraph := result.Subgraph
 	if subgraph.ID == "" || subgraph.Kind != ctxgraph.SubgraphKindTask {
 		t.Fatalf("subgraph = %#v", subgraph)
 	}
@@ -205,7 +206,7 @@ func TestOrganizeSubgraphToolAsksOrganizer(t *testing.T) {
 func TestOrganizeQueryListsTokenMatchedNodes(t *testing.T) {
 	t.Parallel()
 
-	got := organizeQuery("THREADMILL_GRAPH_MEM_7f3a 核验", "sg-q-1", ctxgraph.Graph{
+	got := organizeQuery("THREADMILL_GRAPH_MEM_7f3a 核验", "", "sg-q-1", ctxgraph.Graph{
 		Subgraphs: []ctxgraph.Subgraph{{ID: "sg-seed", Kind: ctxgraph.SubgraphKindGeneral}},
 		Nodes: []ctxgraph.Node{{
 			ID:        "n-seed",
@@ -328,10 +329,11 @@ func TestRoleAgentsUseMemoryHooksAndRolePrompt(t *testing.T) {
 			if err != nil {
 				t.Fatalf("organize_subgraph Execute() error = %v", err)
 			}
-			var subgraph ctxgraph.Subgraph
-			if err := json.Unmarshal([]byte(out.Content), &subgraph); err != nil {
-				t.Fatalf("decode subgraph %q: %v", out.Content, err)
+			var result organizeSubgraphResult
+			if err := json.Unmarshal([]byte(out.Content), &result); err != nil {
+				t.Fatalf("decode result %q: %v", out.Content, err)
 			}
+			subgraph := result.Subgraph
 			if subgraph.ID == "" {
 				t.Fatalf("subgraph = %#v", subgraph)
 			}
@@ -676,12 +678,14 @@ func TestTeamBindUsesYamlPluginsAgainstEnvStore(t *testing.T) {
 	}
 }
 
-func TestFileAgentsRejectsGraphToolOnPlanner(t *testing.T) {
-	err := FileAgents{
-		Planner: FileAgent{Tools: []string{coordReplacePendingToolName}},
-	}.Validate()
-	if err == nil || !strings.Contains(err.Error(), "manager-only") {
-		t.Fatalf("Validate() error = %v, want manager-only", err)
+func TestFileAgentsRejectsManagerGraphToolsOnPlanner(t *testing.T) {
+	for _, toolName := range []string{coordOrchestrateToolName, coordPublishTaskToolName} {
+		err := FileAgents{
+			Planner: FileAgent{Tools: []string{toolName}},
+		}.Validate()
+		if err == nil || !strings.Contains(err.Error(), "manager-only") {
+			t.Fatalf("Validate(%s) error = %v, want manager-only", toolName, err)
+		}
 	}
 }
 
@@ -710,7 +714,7 @@ func TestNewManagerInstallsGraphTools(t *testing.T) {
 	var request Request
 	graphTool := &testTool{
 		definition: agenttool.Definition{
-			Name:        coordReplacePendingToolName,
+			Name:        coordOrchestrateToolName,
 			Description: "replace pending",
 			InputSchema: json.RawMessage(`{"type":"object"}`),
 		},
@@ -727,13 +731,13 @@ func TestNewManagerInstallsGraphTools(t *testing.T) {
 		FileAgents{
 			Manager: FileAgent{
 				SystemPrompt: "yaml manager",
-				Tools:        []string{coordReplacePendingToolName, organizeSubgraphToolName},
+				Tools:        []string{coordOrchestrateToolName, organizeSubgraphToolName},
 			},
 		},
 		nil,
 		FileOverlay{
 			NamedTools: map[string]agenttool.Tool{
-				coordReplacePendingToolName: graphTool,
+				coordOrchestrateToolName: graphTool,
 			},
 		},
 	)
@@ -747,8 +751,8 @@ func TestNewManagerInstallsGraphTools(t *testing.T) {
 	if request.SystemPrompt != "yaml manager" {
 		t.Fatalf("system prompt = %q, want yaml manager", request.SystemPrompt)
 	}
-	if !hasRequestTool(request.Tools, coordReplacePendingToolName) {
-		t.Fatal("manager missing coordination_replacePending")
+	if !hasRequestTool(request.Tools, coordOrchestrateToolName) {
+		t.Fatal("manager missing coordination_orchestrate")
 	}
 	if !hasRequestTool(request.Tools, organizeSubgraphToolName) {
 		t.Fatal("manager missing organize_subgraph")
@@ -771,9 +775,9 @@ func TestNewTeamDoesNotInstallGraphTools(t *testing.T) {
 		nil,
 		FileOverlay{
 			NamedTools: map[string]agenttool.Tool{
-				coordReplacePendingToolName: &testTool{
+				coordOrchestrateToolName: &testTool{
 					definition: agenttool.Definition{
-						Name:        coordReplacePendingToolName,
+						Name:        coordOrchestrateToolName,
 						Description: "replace pending",
 						InputSchema: json.RawMessage(`{"type":"object"}`),
 					},
@@ -787,8 +791,8 @@ func TestNewTeamDoesNotInstallGraphTools(t *testing.T) {
 	if _, err := team.Planner.Ask(context.Background(), "start"); err != nil {
 		t.Fatalf("Ask() error = %v", err)
 	}
-	if hasRequestTool(request.Tools, coordReplacePendingToolName) {
-		t.Fatal("planner gained coordination_replacePending")
+	if hasRequestTool(request.Tools, coordOrchestrateToolName) {
+		t.Fatal("planner gained coordination_orchestrate")
 	}
 }
 
@@ -801,12 +805,12 @@ func TestNewManagerRequiresNamedGraphTools(t *testing.T) {
 		}),
 		0,
 		FileAgents{
-			Manager: FileAgent{Tools: []string{coordReplacePendingToolName}},
+			Manager: FileAgent{Tools: []string{coordOrchestrateToolName}},
 		},
 		nil,
 	)
-	if err == nil || !strings.Contains(err.Error(), `unknown tool "coordination_replacePending"`) {
-		t.Fatalf("NewManager() error = %v, want unknown coordination_replacePending", err)
+	if err == nil || !strings.Contains(err.Error(), `unknown tool "coordination_orchestrate"`) {
+		t.Fatalf("NewManager() error = %v, want unknown coordination_orchestrate", err)
 	}
 }
 
@@ -985,4 +989,19 @@ func hasToolResultMessages(messages []Message) bool {
 		}
 	}
 	return false
+}
+
+func TestCountQueryMatchesCountsTheListedCandidates(t *testing.T) {
+	t.Parallel()
+
+	graph := ctxgraph.Graph{Nodes: []ctxgraph.Node{
+		{ID: "mem-1", Statement: "CPack source archive 仍含 build-aux"},
+		{ID: "mem-2", Statement: "CTest 默认注册 80 个测试"},
+		{ID: "mem-3", Statement: "无关节点"},
+	}}
+	query := "召回 CPack source archive 的历史证据"
+
+	if got := countQueryMatches(graph, query); got != 1 {
+		t.Fatalf("candidates = %d, want only the nodes the query message lists", got)
+	}
 }

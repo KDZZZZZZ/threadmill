@@ -13,6 +13,7 @@ import (
 const defaultKeepRecentTokens = 20000
 const maxOrganizeFormatAttempts = 3
 const maxOrganizePromptBytes = 16 << 10
+const maxCompactionPromptBytes = 1 << 20
 
 type organizeOutput struct {
 	Nodes []organizeNode `json:"nodes"`
@@ -87,7 +88,7 @@ func organizeWithModel(
 	}
 	requestMessages := []Message{{
 		Role:    RoleUser,
-		Content: buildOrganizeUserPrompt(graph, subgraphIDs, history),
+		Content: buildOrganizeUserPrompt(ctx, graph, subgraphIDs, history),
 	}}
 	var lastParse error
 	for range maxOrganizeFormatAttempts {
@@ -116,7 +117,7 @@ func organizeWithModel(
 			Message{Role: RoleUser, Content: compactJSONReminder(ctx) + "\n解析错误：" + err.Error()},
 		)
 	}
-	return nil, fmt.Errorf("organizing memory: %w", lastParse)
+	return nil, fmt.Errorf("organizing memory: %w: %v", ErrMemoryFormat, lastParse)
 }
 
 func compactSystemPrompt(ctx context.Context) string {
@@ -135,7 +136,13 @@ func compactJSONReminder(ctx context.Context) string {
 	return transcript.CompactJSONReminder
 }
 
-func buildOrganizeUserPrompt(graph ctxgraph.Graph, subgraphIDs []string, messages []Message) string {
+func buildOrganizeUserPrompt(
+	ctx context.Context,
+	graph ctxgraph.Graph,
+	subgraphIDs []string,
+	messages []Message,
+) string {
+	limit := compactionPromptBytes(ctx)
 	var b strings.Builder
 	b.WriteString("当前订阅：\n")
 	writeSubgraphCatalog(&b, graph, subgraphIDs)
@@ -149,13 +156,27 @@ func buildOrganizeUserPrompt(graph ctxgraph.Graph, subgraphIDs []string, message
 	for _, node := range existing {
 		fmt.Fprintf(&b, "- %s [%s/%s] %s\n", node.ID, node.Kind, node.Status, node.Statement)
 	}
-	metadata := clipMiddle(b.String(), maxOrganizePromptBytes/4)
+	metadata := clipMiddle(b.String(), limit/4)
 	header := "\n待整理对话：\n"
 	conversation := clipMiddle(
 		serializeConversation(messages),
-		maxOrganizePromptBytes-len(metadata)-len(header),
+		limit-len(metadata)-len(header),
 	)
 	return metadata + header + conversation
+}
+
+func compactionPromptBytes(ctx context.Context) int {
+	transcript, ok := TranscriptFromContext(ctx)
+	if !ok || transcript.ContextWindow <= 0 {
+		return maxOrganizePromptBytes
+	}
+	if transcript.ContextWindow <= maxOrganizePromptBytes/2 {
+		return maxOrganizePromptBytes
+	}
+	if transcript.ContextWindow >= maxCompactionPromptBytes/2 {
+		return maxCompactionPromptBytes
+	}
+	return transcript.ContextWindow * 2
 }
 
 func clipMiddle(text string, limit int) string {
@@ -192,10 +213,26 @@ func writeSubgraphCatalog(b *strings.Builder, graph ctxgraph.Graph, ids []string
 	}
 	for _, id := range ids {
 		if subgraph, ok := byID[id]; ok {
-			fmt.Fprintf(b, "- %s kind=%s name=%s %s\n", id, subgraph.Kind, subgraph.Name, subgraph.Summary)
+			fmt.Fprintf(b, "- %s kind=%s name=%s\n", id, subgraph.Kind, subgraph.Name)
+			writeSubgraphDescription(b, subgraph, "  ")
 			continue
 		}
 		fmt.Fprintf(b, "- %s\n", id)
+	}
+}
+
+// writeSubgraphDescription 打印子图说明：summary 说明这张子图回答什么，admission 是节点的准入
+// 内容，scope 是适用范围。归属与订阅决策都要尊重它们；空字段整行省略。
+func writeSubgraphDescription(b *strings.Builder, subgraph ctxgraph.Subgraph, indent string) {
+	for _, line := range [...]struct{ label, value string }{
+		{"summary", subgraph.Summary},
+		{"admission", subgraph.Admission},
+		{"scope", subgraph.Scope},
+	} {
+		if strings.TrimSpace(line.value) == "" {
+			continue
+		}
+		fmt.Fprintf(b, "%s%s: %s\n", indent, line.label, line.value)
 	}
 }
 
@@ -422,12 +459,21 @@ func isCutPoint(message Message) bool {
 }
 
 func estimateTokens(message Message) int {
-	chars := len(message.Content) + len(message.Thinking) + len(message.ModelData)
-	for _, call := range message.ToolCalls {
-		chars += len(call.Name) + len(call.Arguments)
-	}
-	if message.ToolResult != nil {
-		chars += len(message.ToolResult.Content) + len(message.ToolResult.Details)
+	chars := len(message.Content) + len(message.Thinking)
+	switch {
+	case message.Role == RoleAssistant && len(message.ModelData) > 0:
+		// ModelData is the complete provider replay record. The visible fields
+		// were derived from it and are not sent alongside it.
+		chars = len(message.ModelData)
+	case message.Role == RoleTool && message.ToolResult != nil:
+		// Tool messages replay ToolResult rather than the mirrored Content.
+		chars = len(message.ToolResult.CallID) +
+			len(message.ToolResult.Name) +
+			len(message.ToolResult.Content)
+	default:
+		for _, call := range message.ToolCalls {
+			chars += len(call.Name) + len(call.Arguments)
+		}
 	}
 	if chars == 0 {
 		return 0

@@ -35,6 +35,8 @@ type memoryViewSubgraph struct {
 	Kind      string           `json:"kind,omitempty"`
 	Name      string           `json:"name,omitempty"`
 	Summary   string           `json:"summary,omitempty"`
+	Admission string           `json:"admission,omitempty"`
+	Scope     string           `json:"scope,omitempty"`
 	Revision  int64            `json:"revision"`
 	Level     int              `json:"level"`
 	NodeCount int              `json:"node_count"`
@@ -179,6 +181,8 @@ func buildMemoryView(graph ctxgraph.Graph, def int, levels map[string]int) memor
 			Kind:      subgraph.Kind,
 			Name:      subgraph.Name,
 			Summary:   subgraph.Summary,
+			Admission: subgraph.Admission,
+			Scope:     subgraph.Scope,
 			Revision:  subgraph.Revision,
 			Level:     subgraphLevel(subgraph.ID, def, levels),
 			NodeCount: len(nodes),
@@ -233,7 +237,7 @@ func (t memoryViewTool) Definition() agenttool.Definition {
 	}
 	return agenttool.Definition{
 		Name:        memoryExpandToolName,
-		Description: "把记忆图的一批子图或节点展开到指定级别并返回展开后的视图。级别：1 只展开子图自身的全部字段（id、kind、name、summary、revision）和成员节点条数；2 额外展开每个节点除 statement 外的全部字段（id、kind、status、subgraph_ids、source_refs、creator_agent_id、superseded_by）；3 再加上 statement 全文。先用 1 看清有哪些子图，再对可能相关的子图用 2 看节点头，最后只对真正要审的节点用 3 取全文——不要一上来就对全图用 3。targets 省略或为空表示全部，同时把默认级别设为该级别。只改本 Agent 看到的视图，不改记忆图。",
+		Description: "把记忆图的一批子图或节点展开到指定级别并返回展开后的视图。级别：1 只展开子图自身的全部字段（id、kind、name、summary、admission、scope、revision）和成员节点条数；2 额外展开每个节点除 statement 外的全部字段（id、kind、status、subgraph_ids、source_refs、creator_agent_id、superseded_by）；3 再加上 statement 全文。先用 1 看清有哪些子图，再对可能相关的子图用 2 看节点头，最后只对真正要审的节点用 3 取全文——不要一上来就对全图用 3。targets 省略或为空表示全部，同时把默认级别设为该级别。只改本 Agent 看到的视图，不改记忆图。",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"targets":{"type":"array","items":{"type":"string"},"description":"要展开的子图 ID 或节点 ID；省略或空数组表示全部"},"level":{"type":"integer","enum":[1,2,3],"description":"展开到的级别，默认 3"}},"additionalProperties":false}`),
 	}
 }

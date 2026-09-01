@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -18,6 +19,17 @@ type modelFunc func(context.Context, Request) (AssistantMessage, error)
 
 func (f modelFunc) Generate(ctx context.Context, request Request) (AssistantMessage, error) {
 	return f(ctx, request)
+}
+
+func TestIsRecoverableTurnErrorRejectsMixedFailures(t *testing.T) {
+	t.Parallel()
+
+	if !IsRecoverableTurnError(fmt.Errorf("wrapped: %w", ErrMaxSteps)) {
+		t.Fatal("wrapped max steps should be recoverable")
+	}
+	if IsRecoverableTurnError(errors.Join(ErrMemoryFormat, errors.New("disk failed"))) {
+		t.Fatal("memory format joined with a durable-state failure must not be recoverable")
+	}
 }
 
 func isCompactRequest(request Request) bool {
