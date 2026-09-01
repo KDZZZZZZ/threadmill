@@ -402,7 +402,7 @@ Logs / Monitoring 记录事件、延迟、错误率、队列长度、任务状�
 
 ## 6. 为什么 Verifier 比“测试通过”更严格
 
-新提示词草案把 Verifier 的目标描述为：验证用户真正想要的结果，而不是验证 Executor 是否照计划做了事。
+当前提示词把 Verifier 的目标描述为：验证用户真正想要的结果，而不是验证 Executor 是否照计划做了事。
 
 例如，用户要求：
 
@@ -430,15 +430,15 @@ C7：全量既有回归通过
 
 如果答案是“可能，例如测试只特判了一个输入”，条件还不够。这个“必要性与充分性”检查的目的是防止把局部绿灯错当最终验收。
 
-审计里最严重的问题之一，就是内部 Verifier 在网络或依赖受阻时，把静态阅读或自写测试当作通过依据。更新后要求：
+审计里最严重的问题之一，就是内部 Verifier 在网络或依赖受阻时，把静态阅读或自写测试当作通过依据。当前规则要求证据与契约类型匹配：
 
 ```text
-最终 PASS 必须有：
-构建/编译命令 + 退出码
-新增验收命令 + 退出码
-全量既有回归 + 退出码
-独立公共入口 probe
-逐项 Task Info 映射
+所有任务：逐项 Task Info 映射 + 可复核 evidence recipe
+代码行为变更：契约验收；有稳定自动入口时加持久回归
+文档/配置：parse / render / schema / reference 检查
+产物参加构建时：构建命令 + 退出码
+用户可见语义：独立公共入口 probe
+评测：冻结协议、原始日志与聚合复算
 ```
 
 如果关键验证真的无法执行，应先尝试本地缓存、vendored 依赖、无需外部服务的测试子集或其他 runner；仍无法证明时是 INCONCLUSIVE，不是 PASS。
@@ -449,7 +449,7 @@ C7：全量既有回归通过
 |---|---|---|
 | [agent-prompts-before](agent-prompts-before.md) | 记录修改前的提示词基线。 | “原来系统如何要求各角色工作”。 |
 | [prompt-update-deepswe-audit](prompt-update-deepswe-audit.md) | 用 DeepSWE 评测归因失败，提出并记录一轮修复。 | “为什么旧规则失败，以及怎样用提示词与少量代码改动修复”。 |
-| [agent-prompts-after](agent-prompts-after.md) | 给出更进一步的提示词修改稿，重点是 Planner 驱动的任务内动态并行与更紧凑的职责边界。 | “下一版角色协作设计”。该文自称修改稿、尚未写回运行时配置。 |
+| [agent-prompts-after](agent-prompts-after.md) | 说明当前提示词的分层结构、来源映射、任务类型、抽象/分派方法、角色契约与验收指标。 | “如何理解和验证当前模型提示词”；可配置文案在 `threadmill.yaml`，代码 fallback 也在该文档逐项列出。 |
 | [architecture-governance](architecture-governance.md) | 定义模块边界、允许改什么、评估什么，以及哪些依赖关系不能随意改变。 | “宪法 / 架构护栏”。 |
 
 为什么会有 before / audit / after？

@@ -121,7 +121,7 @@ go test -tags=integration -run '^TestLiveReActWithUserInputAndTool$' -v ./intern
 
 ### L04：子任务、join 与动态求助（P1）
 
-准备两个互不依赖的输入，要求两个子任务分别处理，再由父 verifier 汇总；其中一个角色在运行时调用 `coordination_requestHelp`，manager 用 `coordination_provideHelp` 增加帮助任务。
+准备两个互不依赖的输入，要求两个子任务分别处理，再由父 verifier 汇总；其中一个角色在运行时调用 `coordination_requestHelp` 提交编排建议，manager 用 `coordination_orchestrate(action=provide_help)` 增加帮助任务。
 
 检查并行启动、槽位限制、兄弟隔离、join 顺序、子记忆/文件合并、原任务恢复，以及同一求助不会被重复合并。
 

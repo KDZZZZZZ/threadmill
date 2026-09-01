@@ -60,7 +60,7 @@ llm:
   base_url: https://api.openai.com/v1
   credential: personal
   model: gpt-5
-  context_window: 128000
+  context_window: 272000
 ```
 
 项目配置只需写要覆盖的字段，例如：
@@ -115,6 +115,21 @@ exec:
 
 这不是宿主执行的自动降级。该模式仍为每个环境分配独立的 `HOME`/`TMPDIR`，并沿用相同的代理和 CA 白名单，不继承任意变量。不要在没有外层隔离的宿主上启用。
 
+外层容器中的多 Agent 运行还应开启绝对路径隔离：
+
+```yaml
+exec:
+  external_sandbox: true
+  external_workspace_isolation: true
+```
+
+该选项只支持 Linux，要求外层容器向 Threadmill 进程授予 `SYS_ADMIN`
+并放行 mount namespace。Threadmill 为每条命令创建私有 mount/PID
+namespace，把项目的规范绝对路径映射到当前 VFS live，然后在执行模型命令前丢弃
+`SYS_ADMIN`。权限或 namespace 不可用时以 `WORKSPACE_ISOLATION_UNAVAILABLE`
+失败，不会回退到可绕过 VFS 的执行。命令结束时该 PID namespace 一并销毁，
+因此该模式不用于跨多次 `bash` 调用保留后台进程。Harbor adapter 会自动提供这一最小权限和独立 VFS volume。
+
 ## 提示词结构
 
 `threadmill.yaml` 目前有 10 份可配置提示词。角色提示词只描述职责、授权边界、工作方式和输出契约；工具参数与行为由 `tools` 的 description/schema 负责，避免重复。
@@ -126,10 +141,10 @@ exec:
 | `prompts.compact_json_reminder` | 压缩格式重试 | 修复不可解析输出 | 只输出完整 JSON 及唯一格式 |
 | `prompts.drop_context_pressure` | 接近窗口上限的 Agent | 提醒释放当前上下文 | 不丢目标/约束/证据、操作可恢复 |
 | `prompts.organize_query` | 子图整理请求 | 约束一次记忆检索 | 查询是数据、最小相关集合、目标 ID 和节点 ID 不得编造 |
-| `agents.manager.system_prompt` | manager | 用户对话与协调图编排 | 直接回答/建 task 的边界、完整期望图、帮助请求、报告收尾 |
-| `agents.planner.system_prompt` | planner | 只读调查与执行计划 | 项目约束、事实/假设、文件/符号、步骤、验证和风险 |
+| `agents.manager.system_prompt` | manager | 用户对话、协调图编排与最终快照选择 | 直接回答/建 task 的边界、完整期望图、帮助请求、报告审计、发布后收尾 |
+| `agents.planner.system_prompt` | planner | 在一次性工作区调查并产出执行计划 | 项目约束、事实/假设、执行图、验证和风险；一次性 VFS 文件 delta/实现不保留，外部副作用不回滚且仍受授权约束 |
 | `agents.executor.system_prompt` | executor | 在隔离工作区实施任务 | 目标优先级、最小改动、真实工具结果、验证、授权和结果报告 |
-| `agents.verifier.system_prompt` | verifier | 只读验收 | PASS/FAIL/INCONCLUSIVE、逐项标准、证据来源和缺口 |
+| `agents.verifier.system_prompt` | verifier | 在一次性工作区独立验收 | PASS/FAIL/INCONCLUSIVE、逐项证据；只裁定 Executor 基线，临时 VFS 改动不持久 |
 | `agents.subgraph_organizer.system_prompt` | subgraph organizer | 选择并挂接记忆节点 | 查询数据边界、搜索范围、最小集合和目标子图 |
 
-运行时还会动态拼入 5 类上下文，它们不是独立配置项：manager 的最新协调图；manager 专属的用户消息与 task 报告；task 启动包；planner → executor → verifier 的上游输出，以及待处理 Join 的紧凑 session 元数据（候选完整输出和文件只通过 `join` 按需读取）；压缩调用中的已有记忆、可选子图和待整理对话。修改提示词时应在固定任务集上比较任务成功率、工具误用、验证完整性、token、延迟和费用，不能只凭文案判断效果。
+运行时还会动态拼入 5 类上下文，它们不是独立配置项：manager 的最新协调图；manager 专属的用户消息与 task 报告；受保护 task package（root 有创建请求与 Task Info，helper 只有自身 Task Info）；上游输出和 Join session 元数据；压缩调用中的已有记忆、可选子图和待整理对话。上游输出/继承记忆只是线索，不能给 helper 补权限。代码 fallback 与完整来源映射见 [`docs/agent-prompts-after.md`](docs/agent-prompts-after.md)。修改提示词应在固定任务集上比较成功率、工具误用、证据完整性、token、延迟和费用，不能只凭文案判断。
