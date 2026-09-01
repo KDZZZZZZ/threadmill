@@ -59,3 +59,41 @@ func TestStoresForkCopiesMemoryAndFiles(t *testing.T) {
 		t.Fatal("parent saw child overlay file")
 	}
 }
+
+// 继承是 fork 时刻的全量快照：spawn 后 from task 新增的节点不会自动流进 child，
+// 回流只经 join 的 additive merge。
+func TestStoresForkInheritsSnapshotNotLaterParentWrites(t *testing.T) {
+	t.Parallel()
+
+	memory := ctxgraph.NewStore()
+	memory.Save("parent", ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{
+			{ID: "task-info-task-1", Kind: ctxgraph.NodeKindDirective, Statement: "契约"},
+			{ID: "n1", Kind: ctxgraph.NodeKindFact, Statement: "at-fork"},
+		},
+	})
+
+	stores := Stores{Memory: memory}
+	if err := stores.Fork("parent", "child"); err != nil {
+		t.Fatal(err)
+	}
+
+	child := memory.Load("child")
+	for _, want := range []string{"task-info-task-1", "n1"} {
+		if !hasNodeID(child, want) {
+			t.Fatalf("child missing inherited node %q: %#v", want, child.Nodes)
+		}
+	}
+
+	parent := memory.Load("parent")
+	parent.Nodes = append(parent.Nodes, ctxgraph.Node{
+		ID:        "n2",
+		Kind:      ctxgraph.NodeKindFact,
+		Statement: "after-fork",
+	})
+	memory.Save("parent", parent)
+
+	if got := memory.Load("child"); hasNodeID(got, "n2") {
+		t.Fatalf("parent write after fork leaked into child: %#v", got.Nodes)
+	}
+}

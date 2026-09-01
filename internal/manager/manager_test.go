@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,6 +37,13 @@ func stateBlocksText(request agent.Request) string {
 		b.WriteString(block.Text)
 	}
 	return b.String()
+}
+
+func replacePendingArguments(next coordination.PendingSubgraph) (json.RawMessage, error) {
+	return json.Marshal(struct {
+		Action string `json:"action"`
+		coordination.PendingSubgraph
+	}{Action: "replace_pending", PendingSubgraph: next})
 }
 
 func TestOpenUsesOneUserStateDirectoryForCanonicalPath(t *testing.T) {
@@ -106,6 +114,45 @@ func TestOpenLoadsConfigOutsideProject(t *testing.T) {
 	}
 }
 
+func TestManagerResumesRecoverableTurnFromCheckpoint(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	managerCalls := 0
+	var outputs []string
+	mgr, err := Open(ctx, Options{
+		Root: t.TempDir(),
+		File: loadRepoConfig(t),
+		Provider: stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
+			if strings.Contains(request.SystemPrompt, "你是记忆压缩器") {
+				return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
+			}
+			managerCalls++
+			if managerCalls == 1 {
+				return agent.AssistantMessage{}, agent.ErrMaxSteps
+			}
+			return agent.AssistantMessage{Content: "recovered"}, nil
+		}),
+		Output: func(output string) { outputs = append(outputs, output) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	mgr.Send("continue")
+	if err := mgr.WaitIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if managerCalls != 2 {
+		t.Fatalf("manager calls = %d, want checkpoint retry", managerCalls)
+	}
+	if len(outputs) != 1 || outputs[0] != "recovered" {
+		t.Fatalf("outputs = %#v, want recovered response", outputs)
+	}
+}
+
 func TestOpenUsesBuiltInConfigWithoutProjectFile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	project := t.TempDir()
@@ -166,8 +213,8 @@ func TestOpenRestoresProjectGraph(t *testing.T) {
 				created = true
 				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 					ID:        "restore-graph",
-					Name:      "coordination_replacePending",
-					Arguments: json.RawMessage(`{"roots":[{"info":"persist me"}],"spawns":[]}`),
+					Name:      "coordination_orchestrate",
+					Arguments: json.RawMessage(`{"action":"replace_pending","roots":[{"info":"persist me"}],"spawns":[]}`),
 				}}}, nil
 			}
 			return agent.AssistantMessage{Content: "started"}, nil
@@ -412,8 +459,8 @@ func TestManagerHidesBufferedRequestFromCurrentTurn(t *testing.T) {
 			}
 			return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 				ID:        "continue-first",
-				Name:      "coordination_replacePending",
-				Arguments: json.RawMessage(`{"roots":[],"spawns":[]}`),
+				Name:      "coordination_orchestrate",
+				Arguments: json.RawMessage(`{"action":"replace_pending","roots":[],"spawns":[]}`),
 			}}}, nil
 		}),
 	})
@@ -657,7 +704,7 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 				return agent.AssistantMessage{Content: "任务已完成"}, nil
 			}
 			if userTurns == 1 && !hasToolResult(request.Messages) {
-				args, err := json.Marshal(coordination.PendingSubgraph{
+				args, err := replacePendingArguments(coordination.PendingSubgraph{
 					Roots: []coordination.PendingRoot{{Info: "TASK INFO"}},
 					Spawns: []coordination.PendingSpawn{{
 						From: "task-1:planner",
@@ -670,7 +717,7 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 				}
 				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 					ID:        "r1",
-					Name:      "coordination_replacePending",
+					Name:      "coordination_orchestrate",
 					Arguments: args,
 				}}}, nil
 			}
@@ -790,8 +837,8 @@ func TestManagerBuildsTaskPackageFromTaskInfoWithoutEagerRecall(t *testing.T) {
 				created = true
 				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 					ID:        "create-root",
-					Name:      "coordination_replacePending",
-					Arguments: json.RawMessage(`{"roots":[{"info":"use NEED_TOKEN"}],"spawns":[]}`),
+					Name:      "coordination_orchestrate",
+					Arguments: json.RawMessage(`{"action":"replace_pending","roots":[{"info":"use NEED_TOKEN"}],"spawns":[]}`),
 				}}}, nil
 			}
 			return agent.AssistantMessage{Content: "started"}, nil
@@ -876,6 +923,7 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 					helpProvided = true
 					requestID := strings.TrimSpace(strings.TrimPrefix(strings.SplitN(query, "\n", 2)[0], "[拆分请求]"))
 					args, err := json.Marshal(map[string]any{
+						"action":     "provide_help",
 						"request_id": requestID,
 						"spawns": []map[string]string{
 							{"from": "task-1:planner", "info": "gather evidence A"},
@@ -887,7 +935,7 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 					}
 					return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 						ID:        "help-graph",
-						Name:      "coordination_provideHelp",
+						Name:      "coordination_orchestrate",
 						Arguments: args,
 					}}}, nil
 				}
@@ -895,7 +943,7 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 				return agent.AssistantMessage{Content: "正在拆分"}, nil
 			case !created:
 				created = true
-				args, err := json.Marshal(coordination.PendingSubgraph{
+				args, err := replacePendingArguments(coordination.PendingSubgraph{
 					Roots: []coordination.PendingRoot{{Info: "solve"}},
 				})
 				if err != nil {
@@ -903,7 +951,7 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 				}
 				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 					ID:        "root-graph",
-					Name:      "coordination_replacePending",
+					Name:      "coordination_orchestrate",
 					Arguments: args,
 				}}}, nil
 			default:
@@ -943,7 +991,7 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 			return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 				ID:        "need-help",
 				Name:      "coordination_requestHelp",
-				Arguments: json.RawMessage(`{"reason":"need evidence"}`),
+				Arguments: json.RawMessage(`{"reason":"need evidence","units":[{"id":"evidence","goal":"gather evidence","admission_reason":"context_offload","inputs":[],"writes":[],"depends_on":[],"deliverable":"evidence"}]}`),
 			}}}, nil
 		default:
 			if strings.Contains(query, "helper-did-A") {
@@ -1033,6 +1081,7 @@ func TestManagerDeclinedHelpResumesRequester(t *testing.T) {
 					invalidHelpAttempted = true
 					requestID := strings.TrimSpace(strings.TrimPrefix(strings.SplitN(query, "\n", 2)[0], "[拆分请求]"))
 					args, err := json.Marshal(map[string]any{
+						"action":     "provide_help",
 						"request_id": requestID,
 						"spawns": []map[string]string{{
 							"from": "task-1:executor", "info": "impossible self help",
@@ -1043,7 +1092,7 @@ func TestManagerDeclinedHelpResumesRequester(t *testing.T) {
 					}
 					return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 						ID:        "invalid-help",
-						Name:      "coordination_provideHelp",
+						Name:      "coordination_orchestrate",
 						Arguments: args,
 					}}}, nil
 				}
@@ -1052,7 +1101,7 @@ func TestManagerDeclinedHelpResumesRequester(t *testing.T) {
 				return agent.AssistantMessage{Content: "任务已完成"}, nil
 			case !rootCreated:
 				rootCreated = true
-				args, err := json.Marshal(coordination.PendingSubgraph{
+				args, err := replacePendingArguments(coordination.PendingSubgraph{
 					Roots: []coordination.PendingRoot{{Info: "solve"}},
 				})
 				if err != nil {
@@ -1060,7 +1109,7 @@ func TestManagerDeclinedHelpResumesRequester(t *testing.T) {
 				}
 				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 					ID:        "root-graph",
-					Name:      "coordination_replacePending",
+					Name:      "coordination_orchestrate",
 					Arguments: args,
 				}}}, nil
 			default:
@@ -1076,7 +1125,7 @@ func TestManagerDeclinedHelpResumesRequester(t *testing.T) {
 			return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 				ID:        "need-help",
 				Name:      "coordination_requestHelp",
-				Arguments: json.RawMessage(`{"reason":"need evidence"}`),
+				Arguments: json.RawMessage(`{"reason":"need evidence","units":[{"id":"evidence","goal":"gather evidence","admission_reason":"context_offload","inputs":[],"writes":[],"depends_on":[],"deliverable":"evidence"}]}`),
 			}}}, nil
 		default:
 			return agent.AssistantMessage{Content: "verified"}, nil
@@ -1137,15 +1186,16 @@ func TestManagerUserCanAddFutureBranchWhileTaskRuns(t *testing.T) {
 				rootCreated = true
 				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 					ID:        "create-root",
-					Name:      "coordination_replacePending",
-					Arguments: json.RawMessage(`{"roots":[{"info":"root"}],"spawns":[]}`),
+					Name:      "coordination_orchestrate",
+					Arguments: json.RawMessage(`{"action":"replace_pending","roots":[{"info":"root"}],"spawns":[]}`),
 				}}}, nil
 			case query == "add future" && !dynamicSubmitted:
 				dynamicSubmitted = true
 				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 					ID:   "add-future",
-					Name: "coordination_replacePending",
+					Name: "coordination_orchestrate",
 					Arguments: json.RawMessage(`{
+						"action":"replace_pending",
 						"roots":[{"info":"root"}],
 						"spawns":[{
 							"from":"task-1:executor",
@@ -1378,6 +1428,14 @@ func TestFormatReport(t *testing.T) {
 	if got != want {
 		t.Fatalf("failed report = %q, want %q", got, want)
 	}
+
+	got = formatReport(coordination.Task{
+		ID: "task-2", Info: "continue", Outcome: coordination.OutcomeFailed,
+	}, "", fmt.Errorf("planner: %w", coordination.ErrRoleStalled), time.Second, 0)
+	want = "[任务报告] task-2 · failed · 耗时 1s\n目标: continue\n可恢复僵局:\nplanner: coordination: role stalled"
+	if got != want {
+		t.Fatalf("stalled report = %q, want %q", got, want)
+	}
 }
 
 func TestManagerHoldsQueuedRootUntilReleased(t *testing.T) {
@@ -1403,7 +1461,7 @@ func TestManagerHoldsQueuedRootUntilReleased(t *testing.T) {
 				policy = coordination.RunPolicyEnabled
 				callID = "release"
 			}
-			args, err := json.Marshal(coordination.PendingSubgraph{
+			args, err := replacePendingArguments(coordination.PendingSubgraph{
 				Roots: []coordination.PendingRoot{{Info: "HELD INFO", RunPolicy: policy}},
 			})
 			if err != nil {
@@ -1411,7 +1469,7 @@ func TestManagerHoldsQueuedRootUntilReleased(t *testing.T) {
 			}
 			return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 				ID:        callID,
-				Name:      "coordination_replacePending",
+				Name:      "coordination_orchestrate",
 				Arguments: args,
 			}}}, nil
 		case strings.Contains(sys, "你是 planner"):

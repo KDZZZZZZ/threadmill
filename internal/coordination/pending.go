@@ -42,11 +42,13 @@ func (g *Graph) ReplacePending(ctx context.Context, next PendingSubgraph) (Snaps
 	}
 	g.mu.Lock()
 	nextGraph := &Graph{
-		tasks:     append([]Task(nil), g.tasks...),
-		edges:     append([]Edge(nil), g.edges...),
-		nextID:    g.nextID,
-		helps:     cloneHelpStates(g.helps),
-		statePath: g.statePath,
+		tasks:            append([]Task(nil), g.tasks...),
+		edges:            append([]Edge(nil), g.edges...),
+		nextID:           g.nextID,
+		helps:            cloneHelpStates(g.helps),
+		statePath:        g.statePath,
+		publishingTaskID: g.publishingTaskID,
+		publishedTaskID:  g.publishedTaskID,
 	}
 	if err := nextGraph.applyPendingLocked(next); err != nil {
 		g.mu.Unlock()
@@ -78,6 +80,8 @@ func (g *Graph) ReplacePending(ctx context.Context, next PendingSubgraph) (Snaps
 	g.nextID = nextGraph.nextID
 	g.helps = nextGraph.helps
 	g.revision = nextGraph.revision
+	g.publishingTaskID = nextGraph.publishingTaskID
+	g.publishedTaskID = nextGraph.publishedTaskID
 	g.mu.Unlock()
 	return snap, nil
 }

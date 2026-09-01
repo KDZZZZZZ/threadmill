@@ -17,6 +17,10 @@ type Stores struct {
 	Exec   *tmexec.Scheduler // 可以为空
 }
 
+func taskSnapshotEnvID(task Task) string {
+	return task.Env.ID + ":completed"
+}
+
 // ProjectManagerUserMessage 把用户消息投影到 manager 固定子图。
 func (s Stores) ProjectManagerUserMessage(text string) error {
 	return s.projectManagerNode(ctxgraph.Node{
@@ -103,7 +107,7 @@ func taskInfoNode(task Task) ctxgraph.Node {
 }
 
 // ProjectManagerTaskReport 把 task 报告投影到 manager 固定子图。
-// 无命令证据的 PASS 按 disputed 投影，避免假阳性结论以已成立事实身份进入记忆。
+// 无完整证据记录的 verdict 按 disputed 投影，避免自报结论以已成立事实进入记忆。
 func (s Stores) ProjectManagerTaskReport(task Task, statement string) error {
 	node := taskReportNode(task, "task-report-"+task.ID, statement)
 	node.Status = reportNodeStatus(statement)
@@ -124,10 +128,10 @@ func (s Stores) projectManagerNodeKeepingStatus(node ctxgraph.Node) error {
 	return s.Memory.AppendNode(ManagerEnvID, ManagerMemorySubgraph(), node)
 }
 
-// reportNodeStatus 依据报告正文给出投影状态：FAIL/INCONCLUSIVE 或带命令证据的 PASS 记 accepted；
-// 无命令证据的 PASS 记 disputed。命令证据按 verifier 输出格式约定（命令与退出码）识别。
+// reportNodeStatus 依据报告正文给出投影状态。运行时错误没有 verifier verdict，
+// 可直接记录；模型 verdict 必须携带通用证据记录或兼容旧版命令证据。
 func reportNodeStatus(output string) string {
-	if reportVerdict(output) != "PASS" || hasCommandEvidence(output) {
+	if reportVerdict(output) == "" || hasReportEvidence(output) {
 		return ctxgraph.NodeStatusAccepted
 	}
 	return ctxgraph.NodeStatusDisputed
@@ -151,7 +155,38 @@ func reportVerdict(output string) string {
 	return ""
 }
 
-func hasCommandEvidence(output string) bool {
+func hasReportEvidence(output string) bool {
+	return hasEvidenceRecord(output) || hasLegacyCommandEvidence(output)
+}
+
+func hasEvidenceRecord(output string) bool {
+	output = strings.ReplaceAll(output, "\r\n", "\n")
+	for _, record := range strings.Split(output, "\n\n") {
+		if hasReportField(record, "证据锚:", "证据锚：") &&
+			hasReportField(record, "原始观察:", "原始观察：") &&
+			hasReportField(record, "适用范围:", "适用范围：") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasReportField(output string, prefixes ...string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "- ")
+		line = strings.TrimPrefix(line, "* ")
+		for _, prefix := range prefixes {
+			value, ok := strings.CutPrefix(line, prefix)
+			if ok && strings.TrimSpace(value) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasLegacyCommandEvidence(output string) bool {
 	for _, marker := range []string{"退出码", "exit code", "exit_code", "exitCode", "Exit Code", "exit status"} {
 		if strings.Contains(output, marker) {
 			return true

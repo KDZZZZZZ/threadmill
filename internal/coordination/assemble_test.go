@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -798,8 +799,8 @@ func TestNewManagerLoopReplacePendingMutatesGraph(t *testing.T) {
 			return agent.AssistantMessage{
 				ToolCalls: []agenttool.Call{{
 					ID:        "r1",
-					Name:      coordReplacePendingName,
-					Arguments: json.RawMessage(`{"roots":[{"info":"do it"}]}`),
+					Name:      coordOrchestrateName,
+					Arguments: json.RawMessage(`{"action":"replace_pending","roots":[{"info":"do it"}]}`),
 				}},
 			}, nil
 		}
@@ -814,7 +815,7 @@ func TestNewManagerLoopReplacePendingMutatesGraph(t *testing.T) {
 		agent.FileAgents{
 			Manager: agent.FileAgent{
 				SystemPrompt: "yaml manager",
-				Tools:        []string{coordReplacePendingName},
+				Tools:        []string{coordOrchestrateName},
 			},
 		},
 		nil,
@@ -838,7 +839,7 @@ func TestNewManagerLoopReplacePendingMutatesGraph(t *testing.T) {
 	if !strings.Contains(requestBlock(request, "coordination"), "当前协调图（JSON：") {
 		t.Fatalf("coordination block = %q, want injected graph", requestBlock(request, "coordination"))
 	}
-	if !hasTool(request.Tools, coordReplacePendingName) {
+	if !hasTool(request.Tools, coordOrchestrateName) {
 		t.Fatal("manager missing replacePending")
 	}
 	if graph.taskCount() != 1 {
@@ -846,6 +847,71 @@ func TestNewManagerLoopReplacePendingMutatesGraph(t *testing.T) {
 	}
 	if !strings.Contains(requestBlock(after, "coordination"), `"ID":"task-1"`) {
 		t.Fatalf("block after replacePending = %q, want latest task-1", requestBlock(after, "coordination"))
+	}
+}
+
+func TestNewManagerLoopPublishesSelectedCompletedTask(t *testing.T) {
+	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
+	ctxgraph.Update(ctxgraph.Copy{})
+
+	graph := newGraph()
+	task := graph.AddTask()
+	base := t.TempDir()
+	files := vfs.NewStore(base)
+	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
+	if err := stores.Fork("", task.Env.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.View(task.Env.ID).Write("selected.txt", []byte("published")); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.Archive(task.Env.ID, taskSnapshotEnvID(task)); err != nil {
+		t.Fatal(err)
+	}
+	if err := graph.recordOutcome(task.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
+		calls++
+		if calls == 1 {
+			if !hasTool(request.Tools, coordPublishTaskName) {
+				t.Fatal("manager missing publishTask")
+			}
+			return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+				ID:        "publish-1",
+				Name:      coordPublishTaskName,
+				Arguments: json.RawMessage(`{"task_id":"` + task.ID + `"}`),
+			}}}, nil
+		}
+		return agent.AssistantMessage{Content: "delivered"}, nil
+	})
+	loop, err := NewManagerLoop(
+		graph,
+		stores,
+		provider,
+		agent.FileAgents{Manager: agent.FileAgent{
+			SystemPrompt: "yaml manager",
+			Tools:        []string{coordPublishTaskName},
+		}},
+		nil,
+		0,
+		agent.FileOverlay{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer, err := loop.Ask(context.Background(), "publish the accepted task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "delivered" {
+		t.Fatalf("manager answer = %q", answer)
+	}
+	got, err := os.ReadFile(filepath.Join(base, "selected.txt"))
+	if err != nil || string(got) != "published" {
+		t.Fatalf("published file = %q, %v", got, err)
 	}
 }
 

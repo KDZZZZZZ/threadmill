@@ -164,13 +164,14 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 		Memory: memory,
 		Files:  files,
 		Exec: tmexec.New(tmexec.Config{
-			Slots:           file.Exec.Slots,
-			Timeout:         time.Duration(file.Exec.Timeout) * time.Second,
-			OutputCapKB:     file.Exec.OutputCapKB,
-			ContainerImage:  file.Exec.ContainerImage,
-			ExternalSandbox: file.Exec.ExternalSandbox,
-			Cache:           commandCache,
-			DisableTrace:    file.Exec.Cache.DisableTrace,
+			Slots:                      file.Exec.Slots,
+			Timeout:                    time.Duration(file.Exec.Timeout) * time.Second,
+			OutputCapKB:                file.Exec.OutputCapKB,
+			ContainerImage:             file.Exec.ContainerImage,
+			ExternalSandbox:            file.Exec.ExternalSandbox,
+			ExternalWorkspaceIsolation: file.Exec.ExternalWorkspaceIsolation,
+			Cache:                      commandCache,
+			DisableTrace:               file.Exec.Cache.DisableTrace,
 		}),
 	}
 	s.graph.SetProgressStore(progress)
@@ -191,8 +192,10 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 	fileStats := files.Stats()
 	if fileStats.OverlayAvailable {
 		logger.Info("VFS materialization acceleration available", "backend", fileStats.OverlayBackend)
-	} else if !vfs.ReflinkCloneable(opt.Root, liveRoot) {
-		logger.Warn("materialize cannot use reflink clones (live root not on a reflink filesystem, or base repo and live root on different devices); each environment will full-copy the repo",
+	} else if !vfs.ReflinkSupported(liveRoot) {
+		// The read floor lives under the live root, so only the filesystem
+		// decides this now; the old cross-device case cannot arise.
+		logger.Warn("materialize cannot use reflink clones (live root not on a reflink filesystem); each environment will full-copy the repo",
 			"live_root", liveRoot)
 	}
 	bus := event.NewBus(s.onEvent, s.metrics.Handle, event.Monitor(logger), opt.OnEvent)
@@ -241,9 +244,10 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
 	ready := make(chan struct{})
+	var readyOnce sync.Once
 	if err := loop.AddHooks(agent.Hooks{
 		BeforeRun: []agent.RunHook{func(context.Context) error {
-			close(ready)
+			readyOnce.Do(func() { close(ready) })
 			return nil
 		}},
 	}); err != nil {
@@ -253,8 +257,20 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		err := loop.Run(ctx)
-		s.setErr(err)
+		for {
+			err := loop.Run(ctx)
+			if !agent.IsRecoverableTurnError(err) {
+				s.setErr(err)
+				return
+			}
+			logger.Warn("manager turn paused by recoverable runtime error; resuming checkpoint", "error", err)
+			s.mu.Lock()
+			// BeforeTurn already consumed this turn's queue metadata. The restored
+			// checkpoint must occupy the same FIFO position without projecting the
+			// user message a second time.
+			s.inputs = append([]managerInput{{}}, s.inputs...)
+			s.mu.Unlock()
+		}
 	}()
 	select {
 	case <-ready:
@@ -434,6 +450,9 @@ func (s *Manager) hooks() agent.Hooks {
 		AfterTurn: []agent.AfterTurnHook{
 			func(ctx context.Context, user agent.UserMessage, result agent.TurnResult) error {
 				if result.Err != nil && !errors.Is(result.Err, context.Canceled) {
+					if agent.IsRecoverableTurnError(result.Err) {
+						return nil
+					}
 					s.setErr(result.Err)
 					return nil
 				}
@@ -647,6 +666,7 @@ func (s *Manager) logSnapshot() {
 		"exec_capacity", snapshot.Exec.Capacity,
 		"exec_sandbox_backend", snapshot.Exec.SandboxBackend,
 		"exec_network_isolation", snapshot.Exec.NetworkIsolation,
+		"exec_workspace_isolation", snapshot.Exec.WorkspaceIsolation,
 		"exec_queued", snapshot.Exec.Queued,
 		"exec_active", snapshot.Exec.Active,
 		"exec_peak_queued", snapshot.Exec.PeakQueued,
@@ -669,6 +689,19 @@ func (s *Manager) logSnapshot() {
 		"exec_heavy_peak_queued", snapshot.Exec.HeavyPeakQueued,
 		"exec_heavy_peak_active", snapshot.Exec.HeavyPeakActive,
 		"exec_heavy_wait_duration", snapshot.Exec.HeavyWaitDuration,
+		"exec_dependency_tracing", snapshot.Exec.DependencyTracing,
+		"cmdcache_lookups", snapshot.Exec.Cache.Lookups,
+		"cmdcache_hits", snapshot.Exec.Cache.Hits,
+		"cmdcache_stores", snapshot.Exec.Cache.Stores,
+		"cmdcache_rejected", snapshot.Exec.Cache.Rejected,
+		"cmdcache_replay_errors", snapshot.Exec.Cache.ReplayErrors,
+		"cmdcache_artifact_reflinks", snapshot.Exec.Cache.ArtifactReflinks,
+		"cmdcache_reflink_bytes", snapshot.Exec.Cache.ReflinkBytes,
+		"cmdcache_artifact_copies", snapshot.Exec.Cache.ArtifactCopies,
+		"cmdcache_copied_bytes", snapshot.Exec.Cache.CopiedBytes,
+		"cmdcache_verifications", snapshot.Exec.Cache.Verifications,
+		"cmdcache_verify_mismatches", snapshot.Exec.Cache.VerifyMismatches,
+		"cmdcache_saved_duration", snapshot.Exec.Cache.SavedDuration,
 		"vfs_environments", snapshot.VFS.Environments,
 		"vfs_live_dirs", snapshot.VFS.LiveDirs,
 		"vfs_overlay_files", snapshot.VFS.OverlayFiles,
@@ -678,6 +711,11 @@ func (s *Manager) logSnapshot() {
 		"vfs_materialize_copy_errors", snapshot.VFS.MaterializeCopyErrors,
 		"vfs_materialize_copy_duration", snapshot.VFS.MaterializeCopyDuration,
 		"vfs_handoffs", snapshot.VFS.Handoffs,
+		"vfs_publish_attempts", snapshot.VFS.PublishAttempts,
+		"vfs_publish_commits", snapshot.VFS.PublishCommits,
+		"vfs_publish_errors", snapshot.VFS.PublishErrors,
+		"vfs_publish_cleanup_errors", snapshot.VFS.PublishCleanupErrors,
+		"vfs_publish_duration", snapshot.VFS.PublishDuration,
 		"memory_environments", snapshot.Memory.Environments,
 		"memory_baselines", snapshot.Memory.Baselines,
 		"memory_subgraphs", snapshot.Memory.Subgraphs,
@@ -744,6 +782,9 @@ func formatReport(task coordination.Task, output string, err error, took time.Du
 	if err != nil {
 		body = err.Error()
 		label = "流程错误"
+		if errors.Is(err, coordination.ErrRoleStalled) {
+			label = "可恢复僵局"
+		}
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "[任务报告] %s · %s · 耗时 %s\n", task.ID, task.Outcome, took.Truncate(time.Second))
