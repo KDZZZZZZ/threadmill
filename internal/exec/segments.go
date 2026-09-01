@@ -39,10 +39,25 @@ var statefulShellBuiltins = map[string]struct{}{
 // splitCacheCommand 只拆顶层 shell 列表。任何可能在列表元素间传递 shell
 // 状态的语法都会让整条命令退回原有的单 shell 路径。
 func splitCacheCommand(source string) []commandSegment {
+	segments, _ := planCacheCommand(source)
+	return segments
+}
+
+func planCacheCommand(source string) ([]commandSegment, bool) {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(source), "")
-	if err != nil || !safeToSegment(file) {
-		return nil
+	if err != nil {
+		return nil, true
 	}
+	if hasAsyncStatement(file) {
+		return nil, false
+	}
+	if !safeToSegment(file) {
+		return nil, true
+	}
+	return splitCacheFile(source, file), true
+}
+
+func splitCacheFile(source string, file *syntax.File) []commandSegment {
 	segments := make([]commandSegment, 0, len(file.Stmts))
 	for _, stmt := range file.Stmts {
 		if !appendSegments(source, stmt, segmentAlways, &segments) {
@@ -53,6 +68,23 @@ func splitCacheCommand(source string) []commandSegment {
 		return nil
 	}
 	return segments
+}
+
+func hasAsyncStatement(file *syntax.File) bool {
+	async := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if node == nil || async {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.Stmt:
+			async = node.Background || node.Coprocess
+		case *syntax.CoprocClause:
+			async = true
+		}
+		return !async
+	})
+	return async
 }
 
 func appendSegments(source string, stmt *syntax.Stmt, condition segmentCondition, dst *[]commandSegment) bool {

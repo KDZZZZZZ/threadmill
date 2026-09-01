@@ -599,8 +599,12 @@ func main() { fmt.Println("built by threadmill") }
 	if first.Output != "first" {
 		t.Fatalf("first output = %q, want first", first.Output)
 	}
-	if cache.Stats().Stores != 2 {
-		t.Fatalf("stores = %d, want build and wrapper segments", cache.Stats().Stores)
+	if stats := cache.Stats(); stats.Stores != 2 {
+		t.Fatalf(
+			"cache stats = %+v, scheduler stats = %+v; want build and wrapper segments stored",
+			stats,
+			sched.Stats(),
+		)
 	}
 	goldenLive, err := files.Materialize("agent-a")
 	if err != nil {
