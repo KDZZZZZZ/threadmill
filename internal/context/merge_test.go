@@ -364,3 +364,178 @@ func edgeExists(g Graph, want Edge) bool {
 	}
 	return false
 }
+
+// 以下 5 个测试锁定 join 回流的 additive-only 不变量：合入只允许新增，
+// 唯一触碰已有节点的例外是同 ID 同 statement 的 SubgraphIDs 归属并集。
+
+func TestStoreMergeKeepsParentStatusWhenChildChangesIt(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	store.Save("parent", Graph{
+		Nodes: []Node{{ID: "mem-1", Kind: NodeKindFact, Statement: "shared", Status: "accepted"}},
+	})
+	store.Fork("parent", "child")
+
+	child := store.Load("child")
+	child.Nodes[0].Status = "disputed"
+	store.Save("child", child)
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	got := store.Load("parent")
+	node, ok := got.nodeByID("mem-1")
+	if !ok {
+		t.Fatal("mem-1 missing after Merge")
+	}
+	if node.Status != "accepted" {
+		t.Fatalf("Status = %q, want accepted (child status must not propagate)", node.Status)
+	}
+	if len(got.Nodes) != 1 {
+		t.Fatalf("status change added nodes: %#v", got.Nodes)
+	}
+}
+
+func TestStoreMergeKeepsParentStatementAndAddsChildVersion(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	store.Save("parent", Graph{
+		Nodes: []Node{{ID: "mem-1", Kind: NodeKindFact, Statement: "parent-truth"}},
+	})
+	store.Fork("parent", "child")
+
+	child := store.Load("child")
+	child.Nodes[0].Statement = "child-truth"
+	store.Save("child", child)
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	got := store.Load("parent")
+	node, ok := got.nodeByID("mem-1")
+	if !ok {
+		t.Fatal("mem-1 missing after Merge")
+	}
+	if node.Statement != "parent-truth" {
+		t.Fatalf("Statement = %q, want parent-truth", node.Statement)
+	}
+	if !hasStatement(got, "child-truth") {
+		t.Fatalf("child version was dropped instead of re-IDed: %#v", got.Nodes)
+	}
+	for _, candidate := range got.Nodes {
+		if candidate.Statement == "child-truth" && candidate.ID == "mem-1" {
+			t.Fatalf("child version kept the colliding ID: %#v", candidate)
+		}
+	}
+}
+
+func TestStoreMergeDoesNotPropagateChildDeletion(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	store.Save("parent", Graph{
+		Nodes: []Node{
+			{ID: "mem-1", Kind: NodeKindFact, Statement: "kept"},
+			{ID: "mem-2", Kind: NodeKindFact, Statement: "also-kept"},
+		},
+	})
+	store.Fork("parent", "child")
+
+	child := store.Load("child")
+	child.Nodes = child.Nodes[:1]
+	child.Nodes = append(child.Nodes, Node{ID: "mem-3", Kind: NodeKindFact, Statement: "child-new"})
+	store.Save("child", child)
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	got := store.Load("parent")
+	if _, ok := got.nodeByID("mem-2"); !ok {
+		t.Fatalf("child deletion propagated to parent: %#v", got.Nodes)
+	}
+	if _, ok := got.nodeByID("mem-3"); !ok {
+		t.Fatalf("child addition was dropped: %#v", got.Nodes)
+	}
+}
+
+func TestStoreMergeUnionsMembershipForInheritedNode(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	store.Save("parent", Graph{
+		Subgraphs: []Subgraph{{ID: "sg-p", Name: "parent view"}},
+		Nodes: []Node{{
+			ID:          "mem-1",
+			Kind:        NodeKindFact,
+			Statement:   "shared",
+			SubgraphIDs: []string{"sg-p"},
+		}},
+	})
+	store.Fork("parent", "child")
+
+	child := store.Load("child")
+	child.Subgraphs = append(child.Subgraphs, Subgraph{ID: "sg-c", Name: "child view"})
+	child.Nodes[0].SubgraphIDs = append(child.Nodes[0].SubgraphIDs, "sg-c")
+	store.Save("child", child)
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	got := store.Load("parent")
+	node, ok := got.nodeByID("mem-1")
+	if !ok {
+		t.Fatal("mem-1 missing after Merge")
+	}
+	if !containsID(node.SubgraphIDs, "sg-p") || !containsID(node.SubgraphIDs, "sg-c") {
+		t.Fatalf("SubgraphIDs = %v, want union of sg-p and sg-c", node.SubgraphIDs)
+	}
+	if !hasSubgraphID(got, "sg-c") {
+		t.Fatalf("child subgraph was not added: %#v", got.Subgraphs)
+	}
+}
+
+func TestStoreMergeKeepsParentSubgraphDescription(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	store.Save("parent", Graph{
+		Subgraphs: []Subgraph{{
+			ID:        "sg-p",
+			Name:      "parent name",
+			Summary:   "parent summary",
+			Admission: "parent admission",
+			Scope:     "parent scope",
+		}},
+	})
+	store.Fork("parent", "child")
+
+	child := store.Load("child")
+	child.Subgraphs[0].Name = "child name"
+	child.Subgraphs[0].Summary = "child summary"
+	child.Subgraphs[0].Admission = "child admission"
+	child.Subgraphs[0].Scope = "child scope"
+	store.Save("child", child)
+
+	if err := store.Merge("child", "parent"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	got := store.Load("parent")
+	var found bool
+	for _, subgraph := range got.Subgraphs {
+		if subgraph.ID != "sg-p" {
+			continue
+		}
+		found = true
+		if subgraph.Name != "parent name" ||
+			subgraph.Summary != "parent summary" ||
+			subgraph.Admission != "parent admission" ||
+			subgraph.Scope != "parent scope" {
+			t.Fatalf("child overwrote parent subgraph description: %#v", subgraph)
+		}
+	}
+	if !found {
+		t.Fatal("sg-p missing after Merge")
+	}
+}

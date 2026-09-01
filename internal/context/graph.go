@@ -55,12 +55,16 @@ type Edge struct {
 }
 
 // Subgraph 是一组由节点归属关系组成的上下文视图。
+// Admission 与 Scope 是子图说明的两半：前者约束"什么节点能进来"，后者约束"谁在什么时候该订阅"。
+// 两者都是建议性约束，由整理 Agent 维护、由订阅决策消费，代码不做强制校验。
 type Subgraph struct {
-	ID       string `json:"id"`       // 子图稳定标识
-	Name     string `json:"name"`     // 面向 Agent 的名称
-	Summary  string `json:"summary"`  // 用于列表和检索的简要说明
-	Revision int64  `json:"revision"` // 子图内容版本
-	Kind     string `json:"kind"`     // general、task、package 或 system
+	ID        string `json:"id"`                  // 子图稳定标识
+	Name      string `json:"name"`                // 面向 Agent 的名称
+	Summary   string `json:"summary"`             // 用于列表和检索的简要说明：这张子图回答什么
+	Admission string `json:"admission,omitempty"` // 准入内容：节点进入该子图必须满足的条件
+	Scope     string `json:"scope,omitempty"`     // 适用范围：谁应在何时订阅这张子图，以及失效信号
+	Revision  int64  `json:"revision"`            // 子图内容版本
+	Kind      string `json:"kind"`                // general、task、package 或 system
 }
 
 // Graph 是某一 revision 下的上下文图快照。

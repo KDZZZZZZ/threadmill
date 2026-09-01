@@ -156,6 +156,13 @@ func (current Graph) preservingManaged(next Graph) Graph {
 }
 
 // mergeAdditive 以 g 为底，并入 theirs 相对 base 的节点、子图和边，Revision 加一。
+//
+// additive-only 不变量（join 回流的合同，测试在 merge_test.go 锁定）：合入只允许两件事——
+// ① 新增节点、子图和边；② 同 ID 同 statement 节点的 SubgraphIDs 归属并集（附着不算修改内容）。
+// 除归属并集外，g 中已有节点的 statement、kind、status、source_refs、creator_agent_id 和
+// superseded_by 永不被 theirs 改写：child 改 statement 会保留 g 的原节点、把 child 版本重映射成
+// 新 ID 后新增；child 改 status 直接跳过；child 的删除永不传播。已有子图的元数据（含
+// name/summary/admission/scope）同样不被覆盖，只有 g 中不存在的子图才整条追加。
 func (g Graph) mergeAdditive(fromID string, base, theirs Graph) Graph {
 	result := g.Clone()
 	remap := make(map[string]string)

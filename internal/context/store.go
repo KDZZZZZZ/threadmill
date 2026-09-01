@@ -233,6 +233,10 @@ func (s *Store) Fork(parentID, childID string) error {
 // Merge 把 from 相对其 Fork 基线的增量并入 into。同 ID 同陈述则并集 SubgraphIDs
 // （加入 A 与加入 B 互不影响）；同 ID 不同陈述则保留 into、给 from 换新 ID 并重写边。
 // 缺图当空图。
+//
+// 合入是 additive-only：只新增节点、子图和边，外加同 ID 同陈述节点的归属并集。into 中已有
+// 节点的内容与状态、已有子图的元数据都不会被 from 改写，from 的删除也不传播——child 想推翻
+// parent 的结论只能新增一个节点，由整理 Agent 在 parent 侧裁决。详见 Graph.mergeAdditive。
 func (s *Store) Merge(from, into string) error {
 	if into == "" {
 		return nil
