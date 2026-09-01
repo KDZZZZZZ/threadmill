@@ -97,6 +97,45 @@ func TestCacheReusesResultAndArtifactAcrossAgents(t *testing.T) {
 	}
 }
 
+func TestExternalWorkspaceIsolationCachesAbsoluteProjectPaths(t *testing.T) {
+	if !probeExternalWorkspaceIsolation() {
+		t.Skip("mount namespace isolation unavailable")
+	}
+	base := baseRepo(t)
+	sched, cache := newCachedScheduler(t, Config{
+		Slots:                      2,
+		ExternalSandbox:            true,
+		ExternalWorkspaceIsolation: true,
+	})
+	files := vfs.NewStore(base)
+	command := "cat " + shellSingleQuote(filepath.Join(base, "input.txt")) + " > output.txt"
+
+	if result, err := sched.View("agent-a", files).Run(
+		context.Background(), env.Cmd{Command: command},
+	); err != nil || result.ExitCode != 0 {
+		t.Fatalf("first Run() = %#v, %v", result, err)
+	}
+	started := sched.Stats().Started
+	if result, err := sched.View("agent-b", files).Run(
+		context.Background(), env.Cmd{Command: command},
+	); err != nil || result.ExitCode != 0 {
+		t.Fatalf("second Run() = %#v, %v", result, err)
+	}
+	if cache.Stats().Hits != 1 {
+		t.Fatalf("cache stats = %+v, want one absolute-path hit", cache.Stats())
+	}
+	if sched.Stats().Started != started {
+		t.Fatal("absolute-path cache hit consumed an execution slot")
+	}
+	produced, err := files.View("agent-b").Read("output.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(produced) != "payload\n" {
+		t.Fatalf("output.txt = %q, want payload", produced)
+	}
+}
+
 func TestCacheReusesSegmentAcrossDifferentWrappers(t *testing.T) {
 	sched, cache := newCachedScheduler(t, Config{Slots: 2})
 	files := vfs.NewStore(baseRepo(t))
@@ -494,6 +533,51 @@ func TestCacheRejectsTimedOutCommand(t *testing.T) {
 	}
 	if cache.Stats().Hits != hitsBefore || sched.Stats().Started != startedBefore+1 {
 		t.Fatal("the timed-out segment was reused")
+	}
+}
+
+func TestCacheLeavesBackgroundCommandForEnvironmentReap(t *testing.T) {
+	sched, cache := newCachedScheduler(t, Config{Slots: 1, ExternalSandbox: true})
+	files := vfs.NewStore(baseRepo(t))
+
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{name: "ampersand", command: "sleep 30 & printf started"},
+		{name: "coprocess", command: "coproc sleep 30; printf started"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			envID := "agent-" + tt.name
+			t.Cleanup(func() {
+				if err := sched.Reap(envID); err != nil {
+					t.Error(err)
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			started := time.Now()
+			result, err := sched.View(envID, files).Run(ctx, env.Cmd{Command: tt.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if elapsed := time.Since(started); elapsed > time.Second {
+				t.Fatalf("background command held the execution slot for %v", elapsed)
+			}
+			if result.ExitCode != 0 || result.Output != "started" {
+				t.Fatalf("Run() = %#v, want successful foreground result", result)
+			}
+			if got := sched.Stats().TrackedProcessGroups; got != 1 {
+				t.Fatalf("tracked process groups = %d, want one for Reap", got)
+			}
+			if stats := cache.Stats(); stats.Lookups != 0 || stats.Stores != 0 {
+				t.Fatalf("background command touched cache: %+v", stats)
+			}
+			if err := sched.Reap(envID); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

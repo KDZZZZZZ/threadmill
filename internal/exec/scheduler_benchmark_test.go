@@ -44,6 +44,35 @@ func BenchmarkSchedulerRunExternal(b *testing.B) {
 	}
 }
 
+func BenchmarkSchedulerRunExternalMountNamespace(b *testing.B) {
+	if !probeExternalWorkspaceIsolation() {
+		b.Skip("mount namespace isolation unavailable")
+	}
+	scheduler := New(Config{
+		Slots:                      1,
+		Timeout:                    time.Minute,
+		ExternalSandbox:            true,
+		ExternalWorkspaceIsolation: true,
+	})
+	store := vfs.NewStore(b.TempDir())
+	view := scheduler.View("benchmark", store)
+	if _, err := view.Run(context.Background(), env.Cmd{Command: "true"}); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		result, err := view.Run(context.Background(), env.Cmd{Command: "true"})
+		if err != nil || result.ExitCode != 0 {
+			b.Fatalf("Run() = %#v, %v", result, err)
+		}
+	}
+	b.StopTimer()
+	if err := scheduler.Reap("benchmark"); err != nil {
+		b.Fatal(err)
+	}
+}
+
 func BenchmarkSchedulerRunParallel(b *testing.B) {
 	scheduler := New(Config{Slots: 4})
 	scheduler.run = func(context.Context, string, env.Cmd) (env.ExecResult, error) {

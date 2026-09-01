@@ -20,6 +20,8 @@ import (
 
 var ErrSandboxUnavailable = errors.New("exec: SANDBOX_UNAVAILABLE")
 
+var ErrWorkspaceIsolationUnavailable = errors.New("exec: WORKSPACE_ISOLATION_UNAVAILABLE")
+
 const defaultOutputCapKB = 256
 
 type sandboxKind int
@@ -39,6 +41,10 @@ type Config struct {
 	ContainerImage string
 	// ExternalSandbox trusts the caller's process boundary for isolation.
 	ExternalSandbox bool
+	// ExternalWorkspaceIsolation maps the configured project root to the current
+	// environment's live tree in a private mount and PID namespace. It requires
+	// CAP_SYS_ADMIN in the outer sandbox and fails closed when unavailable.
+	ExternalWorkspaceIsolation bool
 	// HeavySlots 限制重命令（历史均值超过 HeavyThreshold）的并发；0 时取 slots/8（至少 1）。
 	HeavySlots int
 	// HeavyThreshold 判定重命令的历史平均时长阈值；0 时取 10s。
@@ -77,6 +83,9 @@ type Scheduler struct {
 	memMu          sync.Mutex
 	memInUse       int64
 	memBudget      int64
+
+	externalWorkspaceIsolation          bool
+	externalWorkspaceIsolationAvailable bool
 }
 
 type schedulerCounters struct {
@@ -106,6 +115,7 @@ type Stats struct {
 	Capacity                int           `json:"capacity"`
 	SandboxBackend          string        `json:"sandbox_backend"`
 	NetworkIsolation        string        `json:"network_isolation"`
+	WorkspaceIsolation      string        `json:"workspace_isolation"`
 	Queued                  int           `json:"queued"`
 	Active                  int           `json:"active"`
 	PeakQueued              int           `json:"peak_queued"`
@@ -169,6 +179,10 @@ func New(cfg Config) *Scheduler {
 	s.tracing = cfg.Cache != nil && !cfg.DisableTrace && tracerPath() != ""
 	if cfg.ExternalSandbox {
 		s.sandbox = sandboxExternal
+		s.externalWorkspaceIsolation = cfg.ExternalWorkspaceIsolation
+		if cfg.ExternalWorkspaceIsolation {
+			s.externalWorkspaceIsolationAvailable = probeExternalWorkspaceIsolation()
+		}
 	} else {
 		s.sandbox = probeSandbox(cfg.ContainerImage)
 	}
@@ -195,6 +209,7 @@ func (s *Scheduler) Stats() Stats {
 		Capacity:                s.capacity,
 		SandboxBackend:          backend,
 		NetworkIsolation:        network,
+		WorkspaceIsolation:      s.workspaceIsolationMode(),
 		Queued:                  c.queued,
 		Active:                  c.active,
 		PeakQueued:              c.peakQueued,
@@ -220,6 +235,16 @@ func (s *Scheduler) Stats() Stats {
 		Cache:                   s.cache.Stats(),
 		DependencyTracing:       s.tracing,
 	}
+}
+
+func (s *Scheduler) workspaceIsolationMode() string {
+	if !s.externalWorkspaceIsolation {
+		return "cwd"
+	}
+	if !s.externalWorkspaceIsolationAvailable {
+		return "unavailable"
+	}
+	return "mount-namespace"
 }
 
 func (s *Scheduler) isolationBoundary() (backend, network string) {
@@ -276,8 +301,9 @@ func (v execView) Run(ctx context.Context, spec env.Cmd) (result env.ExecResult,
 	}
 
 	var segments []commandSegment
-	if v.sched.cacheEnabled() {
-		segments = splitCacheCommand(spec.Command)
+	cacheable := v.sched.cacheEnabled()
+	if cacheable {
+		segments, cacheable = planCacheCommand(spec.Command)
 	}
 	segmented := len(segments) > 0
 	if !segmented {
@@ -312,7 +338,10 @@ segmentLoop:
 		command := segment.cacheCommand(lastExit)
 		// 缓存查找在拿槽之前；分段命中会先回放产物，后段立即看得到。
 		key := v.sched.cacheKey(command)
-		hit := v.sched.lookupCache(live, key)
+		var hit *cmdcache.Entry
+		if cacheable {
+			hit = v.sched.lookupCache(live, key)
+		}
 		verifying := false
 		if hit != nil {
 			switch {
@@ -355,7 +384,14 @@ segmentLoop:
 		if v.sched.run != nil {
 			out, runErr = v.sched.run(ctx, live, segmentSpec)
 		} else {
-			out, trace, runErr = v.sched.runSandboxed(ctx, live, command, v.envID, v.sched.tracing)
+			out, trace, runErr = v.sched.runSandboxed(
+				ctx,
+				v.files,
+				live,
+				command,
+				v.envID,
+				cacheable,
+			)
 		}
 		took := time.Since(segmentStarted)
 		fresh := v.sched.storeTrace(ctx, live, key, trace, out, runErr, took)
@@ -577,6 +613,7 @@ func (c *schedulerCounters) recordError(err error) {
 // ptrace 被挡住，而放宽隔离换缓存不是可接受的交换。
 func (s *Scheduler) runSandboxed(
 	ctx context.Context,
+	files *vfs.Store,
 	live, command, envID string,
 	tracing bool,
 ) (env.ExecResult, *traceRun, error) {
@@ -600,7 +637,9 @@ func (s *Scheduler) runSandboxed(
 		track := trace.tracker(func(pgid int) {
 			s.track(envID, pgid)
 		})
-		result, err := runBwrap(ctx, live, runtimeDir, command, s.outputCap, track, trace)
+		result, err := runBwrap(
+			ctx, live, runtimeDir, command, s.outputCap, track, trace,
+		)
 		if err == nil && trace != nil && trace.finish() {
 			s.untrack(envID, trace.pgid)
 		}
@@ -611,18 +650,36 @@ func (s *Scheduler) runSandboxed(
 		})
 		return result, nil, err
 	case sandboxExternal:
+		workspace := live
+		if s.externalWorkspaceIsolation {
+			if !s.externalWorkspaceIsolationAvailable {
+				return env.ExecResult{}, nil, ErrWorkspaceIsolationUnavailable
+			}
+			var err error
+			workspace, err = files.WorkspaceRoot()
+			if err != nil {
+				return env.ExecResult{}, nil, err
+			}
+		}
 		runtimeDir, err := s.runtimeDir(envID, live)
 		if err != nil {
 			return env.ExecResult{}, nil, err
 		}
-		trace, err := newTraceRun(tracer, live, runtimeDir, live, runtimeDir)
+		trace, err := newTraceRun(tracer, live, runtimeDir, workspace, runtimeDir)
 		if err != nil {
 			return env.ExecResult{}, nil, err
 		}
-		track := trace.tracker(func(pgid int) {
-			s.track(envID, pgid)
-		})
-		result, err := runExternalSandbox(ctx, live, runtimeDir, command, s.outputCap, track, trace)
+		track := trace.tracker(func(pgid int) { s.track(envID, pgid) })
+		var result env.ExecResult
+		if s.externalWorkspaceIsolation {
+			result, err = runExternalWorkspaceSandbox(
+				ctx, live, workspace, runtimeDir, command, s.outputCap, track, trace,
+			)
+		} else {
+			result, err = runExternalSandbox(
+				ctx, live, runtimeDir, command, s.outputCap, track, trace,
+			)
+		}
 		if err == nil && trace != nil && trace.finish() {
 			s.untrack(envID, trace.pgid)
 		}
@@ -699,6 +756,7 @@ const (
 )
 
 // Reap 杀掉该 env 里仍活着的命令进程组并删除运行时目录。在 task 结束时调用。
+// 运行时目录清理失败只记录到 Stats，避免覆盖已经完成的命令结果。
 func (s *Scheduler) Reap(envID string) error {
 	s.mu.Lock()
 	pgids := append([]int(nil), s.groups[envID]...)

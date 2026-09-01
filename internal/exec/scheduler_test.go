@@ -17,6 +17,10 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
 func TestSchedulerRespectsSlotLimit(t *testing.T) {
 	t.Parallel()
 
@@ -205,9 +209,20 @@ func TestSchedulerUnavailableSandbox(t *testing.T) {
 func TestSchedulerStatsReportIsolationBoundary(t *testing.T) {
 	t.Parallel()
 
-	got := New(Config{Slots: 1, ExternalSandbox: true}).Stats()
+	got := New(Config{
+		Slots:                      1,
+		ExternalSandbox:            true,
+		ExternalWorkspaceIsolation: true,
+	}).Stats()
 	if got.SandboxBackend != "external" || got.NetworkIsolation != "external" {
 		t.Fatalf("Stats() = %#v", got)
+	}
+	wantWorkspace := "unavailable"
+	if probeExternalWorkspaceIsolation() {
+		wantWorkspace = "mount-namespace"
+	}
+	if got.WorkspaceIsolation != wantWorkspace {
+		t.Fatalf("WorkspaceIsolation = %q, want %s", got.WorkspaceIsolation, wantWorkspace)
 	}
 }
 
@@ -285,6 +300,230 @@ func TestSchedulerRunsInsideExternalSandbox(t *testing.T) {
 	}
 	if string(got) != "inside" {
 		t.Fatalf("output.txt = %q, want inside", got)
+	}
+}
+
+func TestExternalSandboxMapsAbsoluteBasePathToEnvironmentLive(t *testing.T) {
+	if !probeExternalWorkspaceIsolation() {
+		t.Skip("mount namespace isolation unavailable")
+	}
+
+	base := t.TempDir()
+	baseMarker := filepath.Join(base, "marker.txt")
+	if err := os.WriteFile(baseMarker, []byte("base"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	files := vfs.NewStore(base)
+	if err := files.View("env-a").Write("marker.txt", []byte("env-a")); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{
+		Slots:                      2,
+		ExternalSandbox:            true,
+		ExternalWorkspaceIsolation: true,
+	})
+	t.Cleanup(func() {
+		if err := s.Reap("env-a"); err != nil {
+			t.Error(err)
+		}
+	})
+
+	result, err := s.View("env-a", files).Run(context.Background(), env.Cmd{
+		Command: `test "$PWD" = ` + shellQuote(base) + ` && ` +
+			`test "$$" = 1 && ` +
+			`test "$(cat ` + shellQuote(baseMarker) + `)" = env-a && ` +
+			`! umount ` + shellQuote(base) + ` 2>/dev/null && ` +
+			`printf isolated > ` + shellQuote(filepath.Join(base, "absolute.txt")),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("Run() = %#v, want absolute base path mapped to env-a", result)
+	}
+
+	gotBase, err := os.ReadFile(baseMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotBase) != "base" {
+		t.Fatalf("base marker = %q, want unchanged base", gotBase)
+	}
+	if _, err := os.Stat(filepath.Join(base, "absolute.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("base absolute.txt error = %v, want not exist", err)
+	}
+	got, err := files.View("env-a").Read("absolute.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "isolated" {
+		t.Fatalf("env absolute.txt = %q, want isolated", got)
+	}
+}
+
+func TestExternalWorkspaceIsolationFailsClosedWhenUnavailable(t *testing.T) {
+	if probeExternalWorkspaceIsolation() {
+		t.Skip("mount namespace isolation available")
+	}
+	s := New(Config{
+		Slots:                      1,
+		ExternalSandbox:            true,
+		ExternalWorkspaceIsolation: true,
+	})
+	_, err := s.View("env-a", vfs.NewStore(t.TempDir())).Run(
+		context.Background(),
+		env.Cmd{Command: "true"},
+	)
+	if !errors.Is(err, ErrWorkspaceIsolationUnavailable) {
+		t.Fatalf("Run() error = %v, want ErrWorkspaceIsolationUnavailable", err)
+	}
+}
+
+func TestExternalWorkspaceIsolationPreservesCommandDeadline(t *testing.T) {
+	if !probeExternalWorkspaceIsolation() {
+		t.Skip("mount namespace isolation unavailable")
+	}
+
+	s := New(Config{
+		Slots:                      1,
+		ExternalSandbox:            true,
+		ExternalWorkspaceIsolation: true,
+	})
+	t.Cleanup(func() {
+		if err := s.Reap("env-a"); err != nil {
+			t.Error(err)
+		}
+	})
+	files := vfs.NewStore(t.TempDir())
+	_, err := s.View("env-a", files).Run(
+		context.Background(),
+		env.Cmd{Command: "sleep 30", Timeout: 100 * time.Millisecond},
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run() error = %v, want DeadlineExceeded", err)
+	}
+	if errors.Is(err, ErrWorkspaceIsolationUnavailable) {
+		t.Fatalf("command deadline was mislabeled as workspace isolation: %v", err)
+	}
+	if got := s.Stats().TimedOut; got != 1 {
+		t.Fatalf("TimedOut = %d, want 1", got)
+	}
+}
+
+func TestExternalSandboxAbsolutePathIsolatedAcrossConcurrentEnvironments(t *testing.T) {
+	if !probeExternalWorkspaceIsolation() {
+		t.Skip("mount namespace isolation unavailable")
+	}
+
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "marker.txt"), []byte("base"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	files := vfs.NewStore(base)
+	for _, id := range []string{"env-a", "env-b"} {
+		if err := files.View(id).Write("marker.txt", []byte(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := New(Config{
+		Slots:                      2,
+		ExternalSandbox:            true,
+		ExternalWorkspaceIsolation: true,
+	})
+	t.Cleanup(func() {
+		if err := errors.Join(s.Reap("env-a"), s.Reap("env-b")); err != nil {
+			t.Error(err)
+		}
+	})
+
+	start := make(chan struct{})
+	type runResult struct {
+		id     string
+		result env.ExecResult
+		err    error
+	}
+	results := make(chan runResult, 2)
+	for _, id := range []string{"env-a", "env-b"} {
+		id := id
+		go func() {
+			<-start
+			result, err := s.View(id, files).Run(context.Background(), env.Cmd{
+				Command: `sleep 0.1; cat ` + shellQuote(filepath.Join(base, "marker.txt")),
+			})
+			results <- runResult{id: id, result: result, err: err}
+		}()
+	}
+	close(start)
+	for range 2 {
+		got := <-results
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if got.result.ExitCode != 0 || strings.TrimSpace(got.result.Output) != got.id {
+			t.Fatalf("%s Run() = %#v, want its own environment", got.id, got.result)
+		}
+	}
+}
+
+func TestExternalSandboxMapsNativeOverlayLiveAtAbsoluteBase(t *testing.T) {
+	overlayRoot := os.Getenv("THREADMILL_TEST_OVERLAY_ROOT")
+	if overlayRoot == "" {
+		t.Skip("THREADMILL_TEST_OVERLAY_ROOT is unset")
+	}
+	if !probeExternalWorkspaceIsolation() {
+		t.Skip("mount namespace isolation unavailable")
+	}
+
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "marker.txt"), []byte("base"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	liveRoot, err := os.MkdirTemp(overlayRoot, "threadmill-exec-overlay-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(liveRoot) })
+	files, err := vfs.NewPersistentStoreWithOptions(
+		base,
+		liveRoot,
+		vfs.Options{Overlay: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats := files.Stats(); !stats.OverlayAvailable || stats.OverlayBackend != "native-overlayfs" {
+		t.Fatalf("VFS stats = %+v, want native overlay", stats)
+	}
+	s := New(Config{
+		Slots:                      1,
+		ExternalSandbox:            true,
+		ExternalWorkspaceIsolation: true,
+	})
+	t.Cleanup(func() {
+		if err := s.Reap("env-a"); err != nil {
+			t.Error(err)
+		}
+	})
+	result, err := s.View("env-a", files).Run(context.Background(), env.Cmd{
+		Command: `test "$(cat ` + shellQuote(filepath.Join(base, "marker.txt")) + `)" = base && ` +
+			`printf overlay > ` + shellQuote(filepath.Join(base, "from-command.txt")),
+	})
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("Run() = %#v, %v", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "from-command.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("base from-command.txt error = %v, want not exist", err)
+	}
+	got, err := files.View("env-a").Read("from-command.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "overlay" {
+		t.Fatalf("from-command.txt = %q, want overlay", got)
+	}
+	stats := files.Stats()
+	if stats.MaterializeOverlays != 1 || stats.MaterializeFullCopies != 0 {
+		t.Fatalf("VFS stats = %+v, want one overlay and no full copy", stats)
 	}
 }
 
@@ -397,54 +636,33 @@ func TestExternalSandboxForwardsOnlyNetworkEnvironment(t *testing.T) {
 	}
 }
 
-func TestSchedulerReapKillsTrackedProcessGroup(t *testing.T) {
-	t.Parallel()
-
-	cmd := osexec.Command("bash", "-c", "sleep 30")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	pgid := cmd.Process.Pid
-	s := New(Config{Slots: 1})
-	s.track("env-a", pgid)
-	if err := s.Reap("env-a"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Wait(); err == nil {
-		t.Fatal("sleep still running after Reap")
-	}
-	if err := syscall.Kill(-pgid, 0); err == nil {
-		t.Fatal("process group still alive after Reap")
-	}
-}
-
 func TestSchedulerReapRemovesReadOnlyRuntimeTree(t *testing.T) {
 	t.Parallel()
 	if os.Geteuid() == 0 {
 		t.Skip("root can remove read-only directories")
 	}
 
-	runtimeDir := filepath.Join(t.TempDir(), "runtime")
-	moduleDir := filepath.Join(runtimeDir, "go", "pkg", "mod", "golang.org", "x", "sys@v0.38.0")
-	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
-		t.Fatal(err)
+	files := vfs.NewStore(t.TempDir())
+	s := New(Config{Slots: 1, ExternalSandbox: true})
+	result, err := s.View("env-a", files).Run(context.Background(), env.Cmd{
+		Command: `mkdir -p "$HOME/go/pkg/mod/golang.org/x/sys@v0.38.0" && ` +
+			`touch "$HOME/go/pkg/mod/golang.org/x/sys@v0.38.0/PATENTS" && ` +
+			`chmod -R a-w "$HOME/go/pkg/mod" && printf '%s\n' "$HOME"`,
+	})
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("Run() = %#v, %v", result, err)
 	}
-	if err := os.WriteFile(filepath.Join(moduleDir, "PATENTS"), nil, 0o444); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(moduleDir, 0o555); err != nil {
-		t.Fatal(err)
-	}
+	runtimeDir := strings.TrimSpace(result.Output)
 	t.Cleanup(func() {
-		_ = os.Chmod(moduleDir, 0o700)
+		_ = filepath.Walk(runtimeDir, func(path string, info os.FileInfo, err error) error {
+			if err == nil && info.IsDir() {
+				_ = os.Chmod(path, 0o700)
+			}
+			return nil
+		})
 		_ = os.RemoveAll(runtimeDir)
 	})
 
-	s := New(Config{Slots: 1})
-	s.mu.Lock()
-	s.runtimes = map[string]string{"env-a": runtimeDir}
-	s.mu.Unlock()
 	if err := s.Reap("env-a"); err != nil {
 		t.Fatalf("Reap() error = %v", err)
 	}
@@ -460,8 +678,9 @@ func TestSchedulerReapReportsRuntimeCleanupFailureWithoutReturningIt(t *testing.
 	}
 
 	parent := t.TempDir()
-	runtimeDir := filepath.Join(parent, "runtime")
-	if err := os.Mkdir(runtimeDir, 0o700); err != nil {
+	s := New(Config{Slots: 1})
+	runtimeDir, err := s.runtimeDir("env-a", filepath.Join(parent, "live"))
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(parent, 0o500); err != nil {
@@ -469,10 +688,6 @@ func TestSchedulerReapReportsRuntimeCleanupFailureWithoutReturningIt(t *testing.
 	}
 	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
 
-	s := New(Config{Slots: 1, ExternalSandbox: true})
-	s.mu.Lock()
-	s.runtimes = map[string]string{"env-a": runtimeDir}
-	s.mu.Unlock()
 	if err := s.Reap("env-a"); err != nil {
 		t.Fatalf("Reap() error = %v, want runtime cleanup failure not returned", err)
 	}
@@ -557,6 +772,28 @@ done
 	}
 	if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
 		t.Fatalf("runtime dir still exists after Reap: %v", err)
+	}
+}
+
+func TestSchedulerReapKillsTrackedProcessGroup(t *testing.T) {
+	t.Parallel()
+
+	cmd := osexec.Command("bash", "-c", "sleep 30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := cmd.Process.Pid
+	s := New(Config{Slots: 1})
+	s.track("env-a", pgid)
+	if err := s.Reap("env-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("sleep still running after Reap")
+	}
+	if err := syscall.Kill(-pgid, 0); err == nil {
+		t.Fatal("process group still alive after Reap")
 	}
 }
 
