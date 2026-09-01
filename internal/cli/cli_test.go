@@ -10,12 +10,50 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/KDZZZZZZ/threadmill/internal/event"
 	"github.com/KDZZZZZZ/threadmill/internal/manager"
 	"github.com/KDZZZZZZ/threadmill/internal/provider"
+	"github.com/KDZZZZZZ/threadmill/internal/tui"
 )
 
 var errSkipOpen = errors.New("open skipped")
+
+type recordingMessageSender struct {
+	messages []tea.Msg
+}
+
+func (s *recordingMessageSender) Send(msg tea.Msg) {
+	s.messages = append(s.messages, msg)
+}
+
+func TestTUIEventBridgePreservesStartupEventsInOrder(t *testing.T) {
+	bridge := newTUIEventBridge()
+	managerOptions := newTUIManagerOptions(options{}, bridge)
+	managerOptions.Output("resumed output")
+	managerOptions.OnEvent(context.Background(), event.TaskStart("task-7"))
+
+	target := &recordingMessageSender{}
+	bridge.bind(target)
+	bridge.send(tui.OutputMsg{Text: "live output"})
+
+	if len(target.messages) != 3 {
+		t.Fatalf("messages = %#v, want 3", target.messages)
+	}
+	first, ok := target.messages[0].(tui.OutputMsg)
+	if !ok || first.Text != "resumed output" {
+		t.Fatalf("first = %#v", target.messages[0])
+	}
+	second, ok := target.messages[1].(event.RuntimeEvent)
+	if !ok || second.AgentID != "task-7" {
+		t.Fatalf("second = %#v", target.messages[1])
+	}
+	last, ok := target.messages[2].(tui.OutputMsg)
+	if !ok || last.Text != "live output" {
+		t.Fatalf("last = %#v", target.messages[2])
+	}
+}
 
 func TestParsePrintAndDir(t *testing.T) {
 	t.Parallel()

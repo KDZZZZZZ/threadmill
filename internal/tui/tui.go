@@ -1,6 +1,8 @@
 // Package tui 是 threadmill 的默认交互界面：聊天、实时 Graph、状态栏与输入框。
 //
-// 布局沿用「滚动 transcript + 底部 dock」，视觉为近黑蓝画布与单一电光蓝强调。
+// 布局沿用「滚动 transcript + 底部 dock」，Tab 在 CHAT / GRAPH 两帧间切换。
+// 视觉语言为「墨织」：纯灰阶无彩色，艺术性来自针脚纹样（┄┆）、
+// 流动连线、节点呼吸与 Tab 的织入转场，唯一的强调是白墨。
 // Lip Gloss：https://pkg.go.dev/github.com/charmbracelet/lipgloss@v1.1.0
 package tui
 
@@ -8,12 +10,14 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/KDZZZZZZ/threadmill/internal/event"
 )
@@ -47,8 +51,9 @@ const (
 )
 
 type item struct {
-	kind itemKind
-	text string
+	kind  itemKind
+	text  string
+	parts []string
 }
 
 type viewMode int
@@ -66,36 +71,43 @@ type taskView struct {
 }
 
 type model struct {
-	chat      Chat
-	info      Info
-	viewport  viewport.Model
-	input     textarea.Model
-	items     []item
-	mode      viewMode
-	tasks     map[string]taskView
-	taskOrder []string
-	streamed  bool
-	tokens    int
-	inflight  map[string]int
-	spin      spinner.Model
-	width     int
-	height    int
+	chat            Chat
+	info            Info
+	viewport        viewport.Model
+	input           textarea.Model
+	items           []item
+	mode            viewMode
+	tasks           map[string]taskView
+	taskOrder       []string
+	streamed        []string
+	tokens          int
+	inflight        map[string]int
+	activity        map[string]runtimeActivity
+	activityN       uint64
+	framePending    bool
+	transcriptDirty bool
+	thinking        bool
+	spin            spinner.Model
+	phase           uint64
+	weave           int
+	width           int
+	height          int
 }
 
 func newModel(chat Chat, info Info) model {
 	input := textarea.New()
 	input.Placeholder = "发给 manager"
 	input.Focus()
-	input.Prompt = "> "
+	input.Prompt = "❯ "
 	input.ShowLineNumbers = false
 	input.SetHeight(1)
 	input.Cursor.Style = lipgloss.NewStyle().
 		Foreground(colorCanvas).
-		Background(colorAccent)
-	input.FocusedStyle.Base = inputBase(colorAccent)
+		Background(colorInk)
+	input.FocusedStyle.Base = inputBase(colorInk)
 	input.FocusedStyle.CursorLine = surfaceStyle()
 	input.FocusedStyle.Placeholder = surfaceStyle().Foreground(colorFaint)
-	input.FocusedStyle.Prompt = surfaceStyle().Foreground(colorAccent).Bold(true)
+	input.FocusedStyle.Prompt = surfaceStyle().Foreground(colorInk).Bold(true)
 	input.FocusedStyle.Text = surfaceStyle().Foreground(colorForeground)
 	input.FocusedStyle.EndOfBuffer = surfaceStyle()
 	input.BlurredStyle.Base = inputBase(colorLine)
@@ -108,7 +120,12 @@ func newModel(chat Chat, info Info) model {
 
 	vp := viewport.New(80, 20)
 
-	spin := spinner.New(spinner.WithSpinner(spinner.Line))
+	// 梭子绕线：四帧旋转角，兼作全局纹样相位的节拍器。
+	spin := spinner.New(spinner.WithSpinner(spinner.Spinner{
+		Frames: []string{"◜", "◝", "◞", "◟"},
+		FPS:    time.Second / 8,
+	}))
+	spin.Style = lipgloss.NewStyle().Foreground(colorInk)
 
 	return model{
 		chat:     chat,
@@ -117,13 +134,14 @@ func newModel(chat Chat, info Info) model {
 		input:    input,
 		tasks:    map[string]taskView{},
 		inflight: map[string]int{},
+		activity: map[string]runtimeActivity{},
 		spin:     spin,
 	}
 }
 
 // NewProgram 构造全屏 TUI。调用方应在 Run 前把 Program.Send 接到 manager 事件上。
 func NewProgram(ctx context.Context, chat Chat, info Info) *tea.Program {
-	opts := []tea.ProgramOption{tea.WithAltScreen()}
+	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseCellMotion()}
 	if ctx != nil {
 		opts = append(opts, tea.WithContext(ctx))
 	}
@@ -139,6 +157,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.weave = 0
 		m.layout()
 		return m, nil
 	case spinner.TickMsg:
@@ -147,8 +166,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.busy() {
 			return m, nil
 		}
-		m.refresh()
+		// spinner 的节拍同时驱动纹样相位:流动连线与呼吸描边。
+		m.phase++
+		if m.mode == viewGraph {
+			m.refresh()
+		}
 		return m, cmd
+	case transcriptFrameMsg:
+		m.framePending = false
+		if m.transcriptDirty && m.mode == viewChat {
+			m.refresh()
+		}
+		m.transcriptDirty = false
+		return m, nil
+	case weaveTickMsg:
+		if m.weave > 0 {
+			m.weave--
+			if m.weave > 0 {
+				return m, nextWeaveFrame()
+			}
+		}
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC:
@@ -160,7 +198,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mode = viewChat
 			}
 			m.layout()
-			return m, nil
+			if m.mode == viewGraph {
+				m.viewport.GotoTop()
+			} else {
+				m.viewport.GotoBottom()
+			}
+			m.weave = weaveFrames
+			return m, nextWeaveFrame()
 		case tea.KeyEsc:
 			if m.chat != nil {
 				m.chat.Cancel()
@@ -168,18 +212,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case tea.KeyEnter:
 			return m.submit()
+		case tea.KeyPgUp, tea.KeyPgDown:
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
+			return m, cmd
 		}
+	case tea.MouseMsg:
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		return m, cmd
 	case event.RuntimeEvent:
-		wasBusy := m.busy()
-		m.applyEvent(msg)
-		m.refresh()
-		if m.busy() && !wasBusy {
-			return m, m.spin.Tick
-		}
-		return m, nil
+		return m, m.handleRuntimeEvent(msg)
 	case OutputMsg:
-		m.applyOutput(msg.Text)
-		m.refresh()
+		if m.applyOutput(msg.Text) || m.transcriptDirty {
+			m.refresh()
+			m.transcriptDirty = false
+		}
 		return m, nil
 	}
 
@@ -202,145 +250,14 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		m.chat.Send(line)
 	}
 	m.refresh()
+	m.transcriptDirty = false
+	m.viewport.GotoBottom()
 	return m, nil
 }
 
-func (m *model) applyEvent(ev event.RuntimeEvent) {
-	m.observeTask(ev)
-	switch {
-	case ev.Kind == event.KindModel && ev.Phase == event.PhaseStart && ev.AgentID == "manager":
-		m.items = append(m.items, item{kind: itemThinking, text: "[manager] 思考中"})
-	case ev.Kind == event.KindModel && ev.Phase == event.PhaseDelta && ev.AgentID == "manager" && ev.Delta != "":
-		m.dropThinking()
-		m.appendAssistant(ev.Delta)
-		m.streamed = true
-	case ev.Kind == event.KindModel && ev.Phase == event.PhaseEnd && ev.Err != "":
-		who := ev.AgentID
-		if who == "" {
-			who = "model"
-		}
-		m.dropThinking()
-		m.items = append(m.items, item{kind: itemError, text: fmt.Sprintf("[%s] %s", who, ev.Err)})
-	case ev.Kind == event.KindModel && ev.Phase == event.PhaseEnd && ev.AgentID == "manager":
-		m.dropThinking()
-	case ev.Kind == event.KindTool:
-		line := ev.Name + " " + string(ev.Phase)
-		if ev.AgentID != "" {
-			line = fmt.Sprintf("[%s] tool %s %s", ev.AgentID, ev.Name, ev.Phase)
-		} else {
-			line = fmt.Sprintf("tool %s", line)
-		}
-		if ev.Err != "" {
-			line += ": " + ev.Err
-			m.items = append(m.items, item{kind: itemError, text: line})
-			break
-		}
-		m.items = append(m.items, item{kind: itemActivity, text: line})
-	}
-	if ev.Kind == event.KindModel && ev.Phase == event.PhaseEnd && ev.Name != "" && m.info.Model == "" {
-		m.info.Model = ev.Name
-	}
-	if ev.Kind == event.KindModel && ev.Phase == event.PhaseEnd && ev.Tokens > 0 {
-		m.tokens += ev.Tokens
-	}
-	switch ev.Phase {
-	case event.PhaseStart:
-		m.inflight[ev.AgentID]++
-	case event.PhaseEnd:
-		m.inflight[ev.AgentID]--
-		if m.inflight[ev.AgentID] <= 0 {
-			delete(m.inflight, ev.AgentID)
-		}
-	}
-}
-
-func (m *model) observeTask(ev event.RuntimeEvent) {
-	taskID, role := splitTaskAgent(ev.AgentID)
-	if taskID == "" {
-		return
-	}
-	task, ok := m.tasks[taskID]
-	if !ok {
-		task = taskView{
-			id:         taskID,
-			outcome:    "active",
-			seenRoles:  map[string]bool{},
-			failedRole: map[string]bool{},
-		}
-		m.taskOrder = append(m.taskOrder, taskID)
-	}
-	if role != "" {
-		task.seenRoles[role] = true
-		if ev.Err != "" {
-			task.failedRole[role] = true
-		}
-	}
-	if ev.Kind == event.KindTask && ev.Phase == event.PhaseEnd {
-		task.outcome = ev.Name
-		if task.outcome == "" {
-			task.outcome = "done"
-		}
-	}
-	m.tasks[taskID] = task
-}
-
-func splitTaskAgent(agentID string) (taskID, role string) {
-	if !strings.HasPrefix(agentID, "task-") {
-		return "", ""
-	}
-	taskID, role, _ = strings.Cut(agentID, ":")
-	switch role {
-	case "", "planner", "executor", "verifier":
-		return taskID, role
-	default:
-		return taskID, ""
-	}
-}
-
-func (m *model) appendAssistant(delta string) {
-	n := len(m.items)
-	if n > 0 && m.items[n-1].kind == itemAssistant {
-		m.items[n-1].text += delta
-		return
-	}
-	m.items = append(m.items, item{kind: itemAssistant, text: delta})
-}
-
-func (m *model) applyOutput(text string) {
-	if strings.HasPrefix(text, "[任务报告]") {
-		m.items = append(m.items, item{kind: itemReport, text: text})
-		return
-	}
-	if m.streamed {
-		m.streamed = false
-		return
-	}
-	if text == "" {
-		return
-	}
-	m.appendAssistant(text)
-}
-
-func (m *model) dropThinking() {
-	keep := make([]item, 0, len(m.items))
-	for _, it := range m.items {
-		if it.kind != itemThinking {
-			keep = append(keep, it)
-		}
-	}
-	m.items = keep
-}
-
-func (m model) busy() bool {
-	for _, n := range m.inflight {
-		if n > 0 {
-			return true
-		}
-	}
-	return false
-}
-
 func (m *model) layout() {
+	follow := m.viewport.AtBottom()
+	offset := m.viewport.YOffset
 	m.input.SetWidth(m.width)
 	headerH := lipgloss.Height(m.headerLine())
 	statusH := lipgloss.Height(m.statusLine())
@@ -358,27 +275,38 @@ func (m *model) layout() {
 			m.viewport.Height = max(1, h-graphHeight-1)
 		}
 	}
-	m.refresh()
+	m.refreshAt(follow, offset)
+	m.transcriptDirty = false
 }
 
 func (m *model) refresh() {
+	m.refreshAt(m.viewport.AtBottom(), m.viewport.YOffset)
+}
+
+func (m *model) refreshAt(follow bool, offset int) {
 	width := m.viewport.Width
 	if width <= 0 {
 		width = 80
 	}
 	if m.mode == viewGraph {
 		m.viewport.SetContent(m.graphView(width))
-		m.viewport.GotoTop()
+		if follow {
+			m.viewport.GotoBottom()
+		} else {
+			m.viewport.SetYOffset(offset)
+		}
 		return
 	}
 	if len(m.items) == 0 {
 		left, contentWidth := transcriptGeometry(width)
-		hint := surfaceStyle().
-			Foreground(colorFaint).
+		block := surfaceStyle().
 			MarginLeft(left).
 			Width(contentWidth).
-			Render("SESSION READY  ·  输入任务后按 Enter")
-		m.viewport.SetContent("\n" + hint)
+			Align(lipgloss.Center)
+		motif := block.Render(weaveMotif())
+		hint := block.Foreground(colorFaint).Render("SESSION READY · 输入任务后按 Enter")
+		m.viewport.SetContent("\n" + motif + "\n" + hint)
+		m.viewport.SetYOffset(offset)
 		return
 	}
 	parts := make([]string, 0, len(m.items))
@@ -386,23 +314,33 @@ func (m *model) refresh() {
 		parts = append(parts, renderItem(it, width))
 	}
 	m.viewport.SetContent("\n" + strings.Join(parts, "\n\n"))
-	m.viewport.GotoBottom()
+	if follow {
+		m.viewport.GotoBottom()
+	} else {
+		m.viewport.SetYOffset(offset)
+	}
 }
 
 func (m model) graphView(width int) string {
 	left, contentWidth := transcriptGeometry(width)
-	header := surfaceStyle().
-		Foreground(colorForeground).
+	title := lipgloss.NewStyle().
+		Foreground(colorInk).
+		Background(colorCanvas).
 		Bold(true).
+		Render("GRAPH")
+	sub := surfaceStyle().
+		Foreground(colorFaint).
+		Render(fmt.Sprintf("  ┄┄  LIVE EXECUTION · %d NODES", len(m.taskOrder)*3))
+	header := surfaceStyle().
 		MarginLeft(left).
 		Width(contentWidth).
-		Render(fmt.Sprintf("GRAPH  ─  LIVE EXECUTION  ·  %d NODES", len(m.taskOrder)*3))
+		Render(title + sub)
 	if len(m.taskOrder) == 0 {
 		empty := surfaceStyle().
 			Foreground(colorFaint).
 			MarginLeft(left).
 			Width(contentWidth).
-			Render("NO TASKS YET  ·  任务启动后会在这里展开")
+			Render("NO TASKS YET · 任务启动后会在这里展开")
 		return "\n" + header + "\n\n" + empty
 	}
 
@@ -420,42 +358,29 @@ func (m model) renderTaskGraph(task taskView, left, width int) string {
 	nodes := make([]string, len(roles))
 	for i, role := range roles {
 		statuses[i] = m.taskRoleStatus(task, role)
-		nodes[i] = renderGraphNode(task.id, role, statuses[i])
+		nodes[i] = renderGraphNode(task.id, role, statuses[i], m.phase)
 	}
 	arrows := []string{
-		graphEdgeStyle(statuses[1], " ──▶ ", " ┄┄▶ ", " ──▶ "),
-		graphEdgeStyle(statuses[2], " ──▶ ", " ┄┄▶ ", " ──▶ "),
+		flowEdge(m.phase, statuses[1], [2]string{" ─╌▶ ", " ╌─▶ "}, " ┄┄▶ ", " ──▶ "),
+		flowEdge(m.phase, statuses[2], [2]string{" ─╌▶ ", " ╌─▶ "}, " ┄┄▶ ", " ──▶ "),
 	}
 	row := lipgloss.JoinHorizontal(
 		lipgloss.Center,
 		nodes[0], arrows[0], nodes[1], arrows[1], nodes[2],
 	)
 	if lipgloss.Width(row) > width {
-		blueDown := surfaceStyle().Foreground(colorAccentDim).Render("↓")
-		brightDown := surfaceStyle().Foreground(colorAccent).Render("↓")
+		dimDown := surfaceStyle().Foreground(colorMuted).Render("↓")
+		inkDown := surfaceStyle().Foreground(colorInk).Render("↓")
 		row = lipgloss.JoinVertical(
 			lipgloss.Center,
 			nodes[0],
-			blueDown,
+			dimDown,
 			nodes[1],
-			brightDown,
+			inkDown,
 			nodes[2],
 		)
 	}
 	return lipgloss.NewStyle().MarginLeft(left).Render(row)
-}
-
-// graphEdgeStyle 按目标节点状态给连线上色：
-// 目标运行中=电光蓝实线（对应设计稿 run 边），目标待命=弱文本点线，其余=常态灰。
-func graphEdgeStyle(target taskNodeStatus, run, pend, done string) string {
-	switch target {
-	case taskActive:
-		return surfaceStyle().Foreground(colorAccent).Render(run)
-	case taskPending:
-		return surfaceStyle().Foreground(colorFaint).Render(pend)
-	default:
-		return surfaceStyle().Foreground(colorMuted).Render(done)
-	}
 }
 
 func (m model) View() string {
@@ -469,7 +394,11 @@ func (m model) View() string {
 	if m.width <= 0 || m.height <= 0 {
 		return view
 	}
-	return surfaceStyle().Width(m.width).Height(m.height).Render(view)
+	rendered := surfaceStyle().Width(m.width).Height(m.height).Render(view)
+	if m.weave > 0 {
+		rendered = weaveMask(rendered, m.weave)
+	}
+	return rendered
 }
 
 func (m model) bodyView() string {
@@ -551,52 +480,46 @@ func renderMiniTaskGraph(m model, task taskView, width int) string {
 	if width < 30 || nodeW < 9 {
 		tokens := make([]string, 0, len(roles))
 		for i, role := range roles {
-			tokens = append(tokens, renderMiniGraphToken(role, statuses[i]))
+			tokens = append(tokens, renderMiniGraphToken(role, statuses[i], m.phase))
 			if i < len(roles)-1 {
-				tokens = append(tokens, graphEdgeStyle(statuses[i+1], "→", "→", "→"))
+				tokens = append(tokens, flowEdge(m.phase, statuses[i+1], [2]string{"→", "⇢"}, "→", "→"))
 			}
 		}
 		chain := lipgloss.JoinHorizontal(lipgloss.Center, tokens...)
-		detail := surfaceStyle().Foreground(colorFaint).Render(task.id)
+		detail := surfaceStyle().Foreground(colorFaint).Render(sanitizeText(task.id))
 		return lipgloss.JoinVertical(lipgloss.Center, chain, detail)
 	}
 
 	nodes := make([]string, 0, len(roles))
 	for i, role := range roles {
-		nodes = append(nodes, renderMiniGraphNode(role, statuses[i], nodeW))
+		nodes = append(nodes, renderMiniGraphNode(role, statuses[i], nodeW, m.phase))
 	}
 	arrow := func(target taskNodeStatus) string {
-		return graphEdgeStyle(target, " → ", " → ", " → ")
+		return flowEdge(m.phase, target, [2]string{" → ", " ⇢ "}, " → ", " → ")
 	}
 	chain := lipgloss.JoinHorizontal(
 		lipgloss.Center,
 		nodes[0], arrow(statuses[1]), nodes[1], arrow(statuses[2]), nodes[2],
 	)
-	caption := surfaceStyle().Foreground(colorFaint).Render(task.id)
+	caption := surfaceStyle().Foreground(colorFaint).Render(sanitizeText(task.id))
 	return lipgloss.JoinVertical(lipgloss.Center, chain, caption)
 }
 
 func (m model) headerLine() string {
-	modelName := m.info.Model
+	modelName := sanitizeText(m.info.Model)
 	if modelName == "" {
 		modelName = "-"
 	}
 	brand := lipgloss.NewStyle().
-		Foreground(colorForeground).
+		Foreground(colorInk).
 		Background(colorCanvas).
 		Bold(true).
 		Render("THREADMILL")
-	stripe := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		lipgloss.NewStyle().Foreground(colorAccent).Background(colorCanvas).Bold(true).Render("▮"),
-		lipgloss.NewStyle().Foreground(colorMBlue).Background(colorCanvas).Bold(true).Render("▮"),
-		lipgloss.NewStyle().Foreground(colorMRed).Background(colorCanvas).Bold(true).Render("▮"),
-	)
-	left := brand + " " + stripe
-	right := lipgloss.NewStyle().
+	left := brand + " " + brandStripe()
+	right := modeTabs(m.mode) + lipgloss.NewStyle().
 		Foreground(colorFaint).
 		Background(colorCanvas).
-		Render(m.modeLabel() + "  ·  " + modelName + "  ·  " + shortenPath(m.info.Root, 40))
+		Render(" · "+modelName+" · "+shortenPath(sanitizeText(m.info.Root), 40))
 	return surfaceStyle().Width(m.width).Render(joinEnds(left, right, m.width, 2))
 }
 
@@ -611,33 +534,28 @@ func (m model) statusLine() string {
 		Background(colorCanvas).
 		Render(metrics)
 	if m.busy() {
+		activeText := m.spin.View() + " ACTIVE · " + m.currentActivity()
+		if candidate := activeText + " · " + metrics; lipgloss.Width(candidate) <= m.width {
+			activeText = candidate
+		}
+		activeText = ansi.Truncate(activeText, max(1, m.width), "…")
 		active := lipgloss.NewStyle().
-			Foreground(colorAccent).
+			Foreground(colorInk).
 			Background(colorCanvas).
 			Bold(true).
-			Render(m.spin.View() + " ACTIVE")
-		left = active + lipgloss.NewStyle().
-			Foreground(colorMuted).
-			Background(colorCanvas).
-			Render(" · "+metrics)
+			Render(activeText)
+		left = active
 	}
 	right := lipgloss.NewStyle().
 		Foreground(colorFaint).
 		Background(colorCanvas).
-		Render("TAB  " + m.otherModeLabel() + " · ENTER  SEND · ESC  CANCEL · ^C  QUIT")
-	return lipgloss.NewStyle().
+		Render("TAB " + m.otherModeLabel() + " · ENTER SEND · ESC CANCEL · ^C QUIT")
+	return surfaceStyle().
 		Width(m.width).
-		BorderStyle(lipgloss.NormalBorder()).
+		BorderStyle(stitchBorder()).
 		BorderTop(true).
 		BorderForeground(colorLine).
 		Render(joinEnds(left, right, m.width, 2))
-}
-
-func (m model) modeLabel() string {
-	if m.mode == viewGraph {
-		return "GRAPH"
-	}
-	return "CHAT"
 }
 
 func (m model) otherModeLabel() string {
@@ -663,9 +581,12 @@ func (m model) runningTasks() int {
 }
 
 func taskKey(agentID string) string {
-	i := strings.IndexByte(agentID, ':')
-	if i <= 0 {
+	if !strings.HasPrefix(agentID, "task-") {
 		return ""
+	}
+	i := strings.IndexByte(agentID, ':')
+	if i < 0 {
+		return agentID
 	}
 	return agentID[:i]
 }
@@ -677,14 +598,15 @@ const (
 	taskActive
 	taskDone
 	taskFailed
+	taskCanceled
 )
 
 func (m model) taskRoleStatus(task taskView, role string) taskNodeStatus {
-	if task.failedRole[role] {
-		return taskFailed
-	}
 	if m.inflight[task.id+":"+role] > 0 {
 		return taskActive
+	}
+	if task.failedRole[role] {
+		return taskFailed
 	}
 	if !task.seenRoles[role] {
 		return taskPending
@@ -696,8 +618,11 @@ func (m model) taskRoleStatus(task taskView, role string) taskNodeStatus {
 			lastSeen = candidate
 		}
 	}
-	if (task.outcome == "failed" || task.outcome == "canceled") && role == lastSeen {
+	if task.outcome == "failed" && role == lastSeen {
 		return taskFailed
+	}
+	if task.outcome == "canceled" && role == lastSeen {
+		return taskCanceled
 	}
 	if task.outcome == "active" && role == lastSeen {
 		return taskActive
@@ -705,76 +630,67 @@ func (m model) taskRoleStatus(task taskView, role string) taskNodeStatus {
 	return taskDone
 }
 
-// 调色板对齐设计稿 token：近黑蓝底 + 单一电光蓝磷光强调。
-var (
-	colorCanvas     = lipgloss.Color("#12141B") // bg
-	colorPanel      = lipgloss.Color("#161A22") // panel
-	colorRaise      = lipgloss.Color("#1C212B") // raise — 节点面
-	colorLine       = lipgloss.Color("#323A4A") // line — 发丝线
-	colorLineHover  = lipgloss.Color("#4A5468") // line-2
-	colorForeground = lipgloss.Color("#E4E9F1") // fg
-	colorDim        = lipgloss.Color("#BDC6D4") // dim
-	colorMuted      = lipgloss.Color("#8B96A8") // mut
-	colorFaint      = lipgloss.Color("#636E80") // faint
-	colorAccent     = lipgloss.Color("#7BD6FF") // acc — 电光蓝磷光
-	colorAccentDim  = lipgloss.Color("#5FA9E8") // acc-2
-	colorMBlue      = lipgloss.Color("#315FA8")
-	colorMRed       = lipgloss.Color("#E32636")
-	colorError      = lipgloss.Color("#F06C75")
-)
-
-func surfaceStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Foreground(colorDim).
-		Background(colorCanvas)
-}
-
-func inputBase(line lipgloss.TerminalColor) lipgloss.Style {
-	return surfaceStyle().
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderBottom(true).
-		BorderForeground(line)
-}
-
 // graphNodeVisual 给出节点状态符号、文字色、描边色。
-// pending=虚线弱节点、run=电光蓝描边、done=常态面+蓝弱档符号、urg=红色。
-func graphNodeVisual(status taskNodeStatus) (marker string, color, border lipgloss.TerminalColor) {
+// pending=弱针脚节点、run=白墨呼吸描边、done=常态面+亮符号、failed=反白、canceled=熄灭。
+func graphNodeVisual(
+	status taskNodeStatus,
+	phase uint64,
+) (marker string, color, border lipgloss.TerminalColor) {
 	switch status {
 	case taskActive:
-		return "◌", colorAccent, colorAccent
+		return "◌", colorInk, breatheColor(phase)
 	case taskDone:
 		return "✓", colorForeground, colorLine
 	case taskFailed:
-		return "▲", colorError, colorError
+		return "▲", colorInk, colorInk
+	case taskCanceled:
+		return "■", colorMuted, colorLine
 	default:
 		return "○", colorMuted, colorLine
 	}
 }
 
-func renderGraphNode(taskID, role string, status taskNodeStatus) string {
-	marker, color, border := graphNodeVisual(status)
-	label := lipgloss.NewStyle().Foreground(color).Background(colorRaise).Bold(true).
-		Render(marker + " " + strings.ToUpper(role))
-	detail := lipgloss.NewStyle().Foreground(colorFaint).Background(colorRaise).Render(taskID)
+// nodeBorder pending 节点用针脚虚线框，其余节点用常态实线框。
+func nodeBorder(status taskNodeStatus) lipgloss.Border {
+	if status == taskPending {
+		return stitchBorder()
+	}
+	return lipgloss.NormalBorder()
+}
+
+func renderGraphNode(taskID, role string, status taskNodeStatus, phase uint64) string {
+	marker, color, border := graphNodeVisual(status, phase)
+	labelStyle := lipgloss.NewStyle().
+		Foreground(color).
+		Background(colorRaise).
+		Bold(true)
+	if status == taskFailed {
+		labelStyle = errorStyle()
+	}
+	label := labelStyle.Render(marker + " " + strings.ToUpper(role))
+	detail := lipgloss.NewStyle().Foreground(colorFaint).Background(colorRaise).Render(sanitizeText(taskID))
 	return lipgloss.NewStyle().
 		Foreground(colorDim).
 		Background(colorRaise).
-		BorderStyle(lipgloss.NormalBorder()).
+		BorderStyle(nodeBorder(status)).
 		BorderForeground(border).
 		Padding(0, 1).
 		Width(14).
 		Render(label + "\n" + detail)
 }
 
-func renderMiniGraphNode(role string, status taskNodeStatus, width int) string {
-	marker, color, border := graphNodeVisual(status)
-	label := lipgloss.NewStyle().
+func renderMiniGraphNode(role string, status taskNodeStatus, width int, phase uint64) string {
+	marker, color, border := graphNodeVisual(status, phase)
+	labelStyle := lipgloss.NewStyle().
 		Foreground(color).
 		Background(colorRaise).
 		Bold(true).
 		Width(width).
-		Align(lipgloss.Center).
-		Render(marker + " " + strings.ToUpper(role))
+		Align(lipgloss.Center)
+	if status == taskFailed {
+		labelStyle = errorStyle().Width(width).Align(lipgloss.Center)
+	}
+	label := labelStyle.Render(marker + " " + strings.ToUpper(role))
 	detail := lipgloss.NewStyle().
 		Foreground(colorFaint).
 		Background(colorRaise).
@@ -783,7 +699,7 @@ func renderMiniGraphNode(role string, status taskNodeStatus, width int) string {
 		Render(miniStatusWord(status))
 	return lipgloss.NewStyle().
 		Background(colorRaise).
-		BorderStyle(lipgloss.NormalBorder()).
+		BorderStyle(nodeBorder(status)).
 		BorderForeground(border).
 		Width(width).
 		Render(label + "\n" + detail)
@@ -798,13 +714,15 @@ func miniStatusWord(status taskNodeStatus) string {
 		return "done"
 	case taskFailed:
 		return "fail"
+	case taskCanceled:
+		return "stop"
 	default:
 		return "wait"
 	}
 }
 
-func renderMiniGraphToken(role string, status taskNodeStatus) string {
-	marker, color, _ := miniGraphVisual(status)
+func renderMiniGraphToken(role string, status taskNodeStatus, phase uint64) string {
+	marker, color, _ := graphNodeVisual(status, phase)
 	label := "PLAN"
 	switch role {
 	case "executor":
@@ -815,15 +733,27 @@ func renderMiniGraphToken(role string, status taskNodeStatus) string {
 	return surfaceStyle().Foreground(color).Bold(true).Render(marker + " " + label)
 }
 
-func miniGraphVisual(status taskNodeStatus) (marker string, color, border lipgloss.TerminalColor) {
-	return graphNodeVisual(status)
-}
-
 func renderItem(it item, width int) string {
+	if len(it.parts) > 0 {
+		it.text += strings.Join(it.parts, "")
+	}
+	it.text = sanitizeText(it.text)
 	left, contentWidth := transcriptGeometry(width)
 	block := surfaceStyle().MarginLeft(left).Width(contentWidth)
 	body := func(style lipgloss.Style, text string) string {
 		return style.Inherit(block).Render(text)
+	}
+	// thread 在消息体左侧垂下一根针脚线，把消息标记与正文缝在一起。
+	thread := func(style lipgloss.Style, text string) string {
+		if contentWidth < 8 {
+			return body(style, text)
+		}
+		return style.Inherit(block).
+			BorderStyle(stitchBorder()).
+			BorderLeft(true).
+			BorderForeground(colorLine).
+			Width(contentWidth - 1).
+			Render(text)
 	}
 	header := func(marker, label string, color lipgloss.TerminalColor) string {
 		return block.
@@ -836,32 +766,46 @@ func renderItem(it item, width int) string {
 	case itemUser:
 		return lipgloss.JoinVertical(
 			lipgloss.Left,
-			header("◆", "YOU", colorAccent),
-			body(surfaceStyle().Foreground(colorDim), it.text),
+			header("◆", "YOU", colorInk),
+			thread(surfaceStyle().Foreground(colorDim), it.text),
 		)
 	case itemAssistant:
 		return lipgloss.JoinVertical(
 			lipgloss.Left,
 			header("◇", "TM", colorDim),
-			body(surfaceStyle().Foreground(colorMuted), it.text),
+			thread(surfaceStyle().Foreground(colorMuted), it.text),
 		)
 	case itemReport:
 		return lipgloss.JoinVertical(
 			lipgloss.Left,
-			header("◆", "TASK REPORT", colorAccentDim),
-			body(surfaceStyle().Foreground(colorDim), it.text),
+			header("◆", "TASK REPORT", colorForeground),
+			thread(surfaceStyle().Foreground(colorDim), it.text),
 		)
 	case itemActivity:
-		marker := surfaceStyle().Foreground(colorAccentDim).Bold(true).Render("› ")
+		marker := surfaceStyle().Foreground(colorMuted).Bold(true).Render("› ")
 		text := surfaceStyle().Foreground(colorMuted).Render(it.text)
 		return block.Render(marker + text)
 	case itemThinking:
 		return body(surfaceStyle().Foreground(colorFaint).Italic(true), "◌ "+it.text)
 	case itemError:
-		return body(surfaceStyle().Foreground(colorError).Bold(true), "▲ "+it.text)
+		return body(errorStyle(), "▲ "+it.text)
 	default:
 		return body(surfaceStyle(), it.text)
 	}
+}
+
+func sanitizeText(text string) string {
+	text = ansi.Strip(text)
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\t':
+			return r
+		case r < ' ' || r == '\x7f' || (r >= '\x80' && r <= '\x9f'):
+			return -1
+		default:
+			return r
+		}
+	}, text)
 }
 
 func transcriptGeometry(width int) (left, contentWidth int) {
