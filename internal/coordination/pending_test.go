@@ -3,35 +3,130 @@ package coordination
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
-
-	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 )
 
-func TestReplacePendingCreatesRoot(t *testing.T) {
+func TestReplacePendingDefinesAndRemovesIndependentTasks(t *testing.T) {
 	t.Parallel()
-
-	graph := newGraph()
-	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "ship the cli"}},
-	})
+	graph := New()
+	next := PendingSubgraph{
+		Tasks: []PendingTask{{ID: "work", Info: "ship the change"}, {ID: "watch", Info: "keep observing", Persistent: true}},
+		Edges: []Edge{{From: "work:1:planner", To: "watch:1:planner"}},
+	}
+	snap, err := graph.ReplacePending(context.Background(), next)
 	if err != nil {
-		t.Fatalf("ReplacePending() error = %v", err)
+		t.Fatal(err)
 	}
-	if snap.Revision != 1 || len(snap.Tasks) != 1 {
-		t.Fatalf("snapshot = %+v, want revision 1 and 1 task", snap)
+	if snap.Revision != 1 || len(snap.Tasks) != 2 {
+		t.Fatalf("snapshot = %#v", snap)
 	}
-	if snap.Tasks[0].Info != "ship the cli" {
-		t.Fatalf("root info = %q, want ship the cli", snap.Tasks[0].Info)
+	watch, _ := graph.Task("watch")
+	if !watch.Persistent {
+		t.Fatal("persistent option lost")
+	}
+	for _, edge := range snap.Edges {
+		if edge.From == watch.Verifier.ID {
+			t.Fatalf("independent observer has an outgoing dependency: %#v", edge)
+		}
+	}
+	before := graph.Snapshot()
+	invalid := next
+	invalid.Edges = []Edge{{From: "watch:1:verifier", To: "work:1:planner"}, {From: "work:1:verifier", To: "watch:1:planner"}}
+	if _, err := graph.ReplacePending(context.Background(), invalid); err == nil {
+		t.Fatal("accepted a cycle")
+	}
+	if !reflect.DeepEqual(before, graph.Snapshot()) {
+		t.Fatal("cycle changed graph")
+	}
+	next.Tasks = next.Tasks[1:]
+	next.Edges = nil
+	snap, err = graph.ReplacePending(context.Background(), next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Tasks) != 1 || snap.Tasks[0].ID != "watch" || len(snap.Nodes) != 3 || len(snap.Edges) != 2 {
+		t.Fatalf("removed pending task remains in graph: %#v", snap)
+	}
+}
+
+func TestReplacePendingRetainsCompletedHistoryAndAddsConsumers(t *testing.T) {
+	t.Parallel()
+	graph := New()
+	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{Tasks: []PendingTask{{ID: "source", Info: "produce a snapshot"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := snap.Tasks[0]
+	output := Output{Node: source.Verifier, FilesRef: "source-files", MemoryRef: "source-memory", Report: "ready"}
+	if err := graph.commitOutput(output); err != nil {
+		t.Fatal(err)
+	}
+	graph.tasks[0].Outcome = OutcomeDone
+	next := PendingSubgraph{Tasks: []PendingTask{{ID: "consumer", Info: "consume immutable history"}}, Edges: []Edge{{From: source.Verifier.ID, To: "consumer:1:planner"}}}
+	if _, err := graph.ReplacePending(context.Background(), next); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := graph.Output(source.Verifier.ID); !ok || got != output {
+		t.Fatalf("historical output lost: %#v", got)
+	}
+	if got, ok := graph.Task(source.ID); !ok || got.Outcome != OutcomeDone || got.Info != source.Info {
+		t.Fatalf("completed task lost: %#v", got)
+	}
+	before := graph.Snapshot()
+	next.Tasks = append(next.Tasks, PendingTask{ID: source.ID, Info: "rewritten past"})
+	if _, err := graph.ReplacePending(context.Background(), next); err == nil {
+		t.Fatal("changed completed task info")
+	}
+	if !reflect.DeepEqual(before, graph.Snapshot()) {
+		t.Fatal("rejected completed edit mutated graph")
+	}
+}
+
+func TestPendingEditsFreezeOnlyStartedInputsAcrossAllRunners(t *testing.T) {
+	t.Parallel()
+	graph := New()
+	next := PendingSubgraph{Tasks: []PendingTask{{ID: "first", Info: "first"}, {ID: "second", Info: "second"}}}
+	snap, err := graph.ReplacePending(context.Background(), next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, second := snap.Tasks[0], snap.Tasks[1]
+	for _, task := range snap.Tasks {
+		graph.runners[task.ID] = &runner{task: task, nodeStarted: map[string]struct{}{task.Planner.ID: {}, task.Executor.ID: {}}}
+	}
+	next.Tasks = append(next.Tasks, PendingTask{ID: "later", Info: "use an existing output"})
+	next.Edges = []Edge{{From: first.Planner.ID, To: "later:1:planner"}}
+	if _, err := graph.ReplacePending(context.Background(), next); err != nil {
+		t.Fatalf("adding outgoing consumer: %v", err)
+	}
+	for _, target := range []Node{first.Executor, second.Executor} {
+		before := graph.Snapshot()
+		invalid := next
+		invalid.Edges = append(append([]Edge(nil), next.Edges...), Edge{From: "later:1:verifier", To: target.ID})
+		if _, err := graph.ReplacePending(context.Background(), invalid); !errors.Is(err, ErrGraphBusy) {
+			t.Fatalf("editing %s started input: %v", target.ID, err)
+		}
+		if !reflect.DeepEqual(before, graph.Snapshot()) {
+			t.Fatal("started input edit changed graph")
+		}
+		if err := graph.Connect("later:1:verifier", target.ID); !errors.Is(err, ErrGraphBusy) {
+			t.Fatalf("Connect editing %s started input: %v", target.ID, err)
+		}
+	}
+	invalid := next
+	invalid.Tasks = append([]PendingTask(nil), next.Tasks...)
+	invalid.Tasks[1].Info = "different request"
+	if _, err := graph.ReplacePending(context.Background(), invalid); !errors.Is(err, ErrGraphBusy) {
+		t.Fatalf("editing running task info: %v", err)
 	}
 }
 
 func TestTaskSinkReceivesExistingAndUpdatedTaskInfo(t *testing.T) {
-	graph := newGraph()
+	graph := New()
 	if _, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "initial"}},
+		Tasks: []PendingTask{{ID: "work", Info: "initial"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +139,7 @@ func TestTaskSinkReceivesExistingAndUpdatedTaskInfo(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "updated"}},
+		Tasks: []PendingTask{{ID: "work", Info: "updated"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +165,7 @@ func TestReplacePendingRetriesFailedTaskSinkWithoutDuplicatingTasks(t *testing.T
 	}); err != nil {
 		t.Fatal(err)
 	}
-	want := PendingSubgraph{Roots: []PendingRoot{{Info: "root"}}}
+	want := PendingSubgraph{Tasks: []PendingTask{{Info: "work"}}}
 	if _, err := graph.ReplacePending(context.Background(), want); !errors.Is(err, sinkErr) {
 		t.Fatalf("first ReplacePending() error = %v, want sink error", err)
 	}
@@ -90,439 +185,94 @@ func TestReplacePendingRetriesFailedTaskSinkWithoutDuplicatingTasks(t *testing.T
 		t.Fatalf("retry ReplacePending() error = %v", err)
 	}
 	if got := graph.taskCount(); got != 1 {
-		t.Fatalf("tasks after retry = %d, want no duplicate root", got)
+		t.Fatalf("tasks after retry = %d, want no duplicate task", got)
 	}
 }
 
-func TestReplacePendingDiffsSpawns(t *testing.T) {
+func TestPendingKeepsStartedTaskInfoAfterRestart(t *testing.T) {
 	t.Parallel()
-
-	graph := newGraph()
-	if _, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "root"}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	root, ok := graph.Task("task-1")
-	if !ok {
-		t.Fatal("root missing")
-	}
-
-	if _, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots:  []PendingRoot{{Info: "root"}},
-		Spawns: []PendingSpawn{{From: root.Planner.ID, Join: root.Verifier.ID, Info: "child"}},
-	}); err != nil {
-		t.Fatalf("spawn via diff: %v", err)
-	}
-	if graph.taskCount() != 2 {
-		t.Fatalf("tasks = %d, want 2", graph.taskCount())
-	}
-
-	if _, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots:  []PendingRoot{{Info: "root"}},
-		Spawns: []PendingSpawn{{From: root.Executor.ID, Join: root.Verifier.ID, Info: "child"}},
-	}); err != nil {
-		t.Fatalf("hot modify via diff: %v", err)
-	}
-	parent, ok := graph.Task(root.ID)
-	if !ok || len(parent.JoinedBy) != 1 {
-		t.Fatalf("JoinedBy = %v, want one child", parent.JoinedBy)
-	}
-	child, ok := graph.Task(parent.JoinedBy[0])
-	if !ok {
-		t.Fatal("child missing")
-	}
-	pair, ok := graph.spawnPairLocked(child)
-	if !ok || pair.From != root.Executor.ID || pair.Join != root.Verifier.ID {
-		t.Fatalf("spawn pair = %+v, want executor->verifier", pair)
-	}
-}
-
-func TestReplacePendingKeepsSiblingSpawnsWithSameEndpoints(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "integrate"}},
-	})
+	path := filepath.Join(t.TempDir(), "graph.json")
+	graph, err := OpenGraph(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := snap.Tasks[0]
-	want := PendingSubgraph{
-		Roots: []PendingRoot{{Info: "integrate"}},
-		Spawns: []PendingSpawn{
-			{From: root.Planner.ID, Join: root.Executor.ID, Info: "pricing"},
-			{From: root.Planner.ID, Join: root.Executor.ID, Info: "inventory"},
-			{From: root.Planner.ID, Join: root.Executor.ID, Info: "shipping"},
-		},
-	}
-	if _, err := graph.ReplacePending(context.Background(), want); err != nil {
-		t.Fatal(err)
-	}
-	if got := graph.taskCount(); got != 4 {
-		t.Fatalf("tasks = %d, want one root and three siblings", got)
-	}
-	if _, err := graph.ReplacePending(context.Background(), want); err != nil {
-		t.Fatal(err)
-	}
-	if got := graph.taskCount(); got != 4 {
-		t.Fatalf("tasks after identical replace = %d, want no duplicates", got)
-	}
-}
-
-func TestReplacePendingRejectsCycleWithoutMutating(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	if _, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "root"}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	root, ok := graph.Task("task-1")
-	if !ok {
-		t.Fatal("root missing")
-	}
-
-	_, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots:  []PendingRoot{{Info: "root"}},
-		Spawns: []PendingSpawn{{From: root.Planner.ID, Join: root.Planner.ID, Info: "cycle"}},
-	})
-	if !errors.Is(err, ErrJoinCycle) {
-		t.Fatalf("error = %v, want %v", err, ErrJoinCycle)
-	}
-	if graph.taskCount() != 1 {
-		t.Fatalf("tasks = %d, want 1 after rejected cycle", graph.taskCount())
-	}
-}
-
-func TestReplacePendingCannotRemoveRoots(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	if _, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "first"}, {Info: "second"}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	_, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "first"}},
-	})
-	if !errors.Is(err, ErrUnspawnRoot) {
-		t.Fatalf("error = %v, want %v", err, ErrUnspawnRoot)
-	}
-	if graph.taskCount() != 2 {
-		t.Fatalf("tasks = %d, want 2 after rejected shrink", graph.taskCount())
-	}
-}
-
-func TestReplacePendingUpdatesExistingInfo(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	if _, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "old goal"}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	root, ok := graph.Task("task-1")
-	if !ok {
-		t.Fatal("root missing")
-	}
-	if _, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "new goal"}},
-		Spawns: []PendingSpawn{{
-			From: root.Planner.ID,
-			Join: root.Verifier.ID,
-			Info: "old child",
-		}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "new goal"}},
-		Spawns: []PendingSpawn{{
-			From: root.Planner.ID,
-			Join: root.Verifier.ID,
-			Info: "new child",
-		}},
-	})
-	if err != nil {
-		t.Fatalf("info-only update: %v", err)
-	}
-	if snap.Revision < 3 {
-		t.Fatalf("revision = %d, want bump after info update", snap.Revision)
-	}
-	if graph.taskCount() != 2 {
-		t.Fatalf("tasks = %d, want 2", graph.taskCount())
-	}
-	root, ok = graph.Task("task-1")
-	if !ok || root.Info != "new goal" {
-		t.Fatalf("root info = %+v, want new goal", root)
-	}
-	child, ok := graph.Task(root.JoinedBy[0])
-	if !ok || child.Info != "new child" {
-		t.Fatalf("child info = %+v, want new child", child)
-	}
-}
-
-func TestReplacePendingRejectsCompletedTaskChanges(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		next func(Task, PendingSpawn) PendingSubgraph
-	}{
-		{
-			name: "child info",
-			next: func(_ Task, spawn PendingSpawn) PendingSubgraph {
-				spawn.Info = "changed child"
-				return PendingSubgraph{
-					Roots:  []PendingRoot{{Info: "root"}},
-					Spawns: []PendingSpawn{spawn},
-				}
-			},
-		},
-		{
-			name: "move child",
-			next: func(root Task, spawn PendingSpawn) PendingSubgraph {
-				spawn.From = root.Executor.ID
-				return PendingSubgraph{
-					Roots:  []PendingRoot{{Info: "root"}},
-					Spawns: []PendingSpawn{spawn},
-				}
-			},
-		},
-		{
-			name: "add child",
-			next: func(root Task, spawn PendingSpawn) PendingSubgraph {
-				return PendingSubgraph{
-					Roots: []PendingRoot{{Info: "root"}},
-					Spawns: []PendingSpawn{
-						spawn,
-						{From: root.Executor.ID, Join: root.Verifier.ID, Info: "new child"},
-					},
-				}
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			graph := newGraph()
-			snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-				Roots: []PendingRoot{{Info: "root"}},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			root := snap.Tasks[0]
-			spawn := PendingSpawn{From: root.Planner.ID, Join: root.Verifier.ID, Info: "child"}
-			if _, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-				Roots: []PendingRoot{{Info: "root"}}, Spawns: []PendingSpawn{spawn},
-			}); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := graph.Run(
-				context.Background(), root.ID, "input", Stores{Memory: ctxgraph.NewStore()}, recordingAssemble(nil),
-			); err != nil {
-				t.Fatal(err)
-			}
-			before := graph.Snapshot()
-
-			_, err = graph.ReplacePending(context.Background(), tt.next(root, spawn))
-			if !errors.Is(err, ErrInvalidPending) {
-				t.Fatalf("ReplacePending() error = %v, want %v", err, ErrInvalidPending)
-			}
-			if !strings.Contains(err.Error(), "append a new root") {
-				t.Fatalf("ReplacePending() error = %v, want recovery guidance", err)
-			}
-			if after := graph.Snapshot(); !reflect.DeepEqual(after, before) {
-				t.Fatalf("completed graph changed:\nafter  = %#v\nbefore = %#v", after, before)
-			}
-		})
-	}
-}
-
-func TestReplacePendingCanAddRootBesideCompletedGraph(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "done"}},
-	})
+	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{Tasks: []PendingTask{{ID: "work", Info: "original goal"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := graph.Run(
-		context.Background(), snap.Tasks[0].ID, "input", Stores{Memory: ctxgraph.NewStore()}, recordingAssemble(nil),
-	); err != nil {
+	if err := graph.commitOutput(Output{Node: snap.Tasks[0].Planner, FilesRef: "plan-files", MemoryRef: "plan-memory"}); err != nil {
 		t.Fatal(err)
 	}
-
-	got, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{}, {Info: "new"}},
-	})
+	reopened, err := OpenGraph(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Tasks) != 2 || got.Tasks[0].Outcome != OutcomeDone || got.Tasks[1].Outcome != OutcomeActive {
-		t.Fatalf("tasks = %#v, want immutable done root plus active root", got.Tasks)
+	before := reopened.Snapshot()
+	if _, err := reopened.ReplacePending(context.Background(), PendingSubgraph{Tasks: []PendingTask{{ID: "work", Info: "replace goal after planner"}}}); !errors.Is(err, ErrGraphBusy) {
+		t.Fatalf("editing started goal after restart: %v", err)
 	}
-	if got.Tasks[0].Info != "done" {
-		t.Fatalf("completed root info = %q, want done", got.Tasks[0].Info)
+	if !reflect.DeepEqual(before, reopened.Snapshot()) {
+		t.Fatal("failed edit changed graph")
 	}
 }
 
-func TestReplacePendingRejectsTasksWithoutInfo(t *testing.T) {
+func TestPendingCannotLeaveDanglingHelpHistory(t *testing.T) {
 	t.Parallel()
-
-	t.Run("root", func(t *testing.T) {
-		graph := newGraph()
-		before := graph.Snapshot()
-		_, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-			Roots: []PendingRoot{{Info: " \t"}},
-		})
-		if !errors.Is(err, ErrInvalidPending) {
-			t.Fatalf("error = %v, want ErrInvalidPending", err)
-		}
-		if after := graph.Snapshot(); !reflect.DeepEqual(after, before) {
-			t.Fatalf("graph changed:\nafter  = %#v\nbefore = %#v", after, before)
-		}
-	})
-
-	t.Run("spawn", func(t *testing.T) {
-		graph := newGraph()
-		snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-			Roots: []PendingRoot{{Info: "root"}},
-		})
-		if err != nil {
+	graph := New()
+	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{Tasks: []PendingTask{{ID: "request", Info: "request"}, {ID: "help", Info: "help"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := snap.Tasks[0]
+	pause := Node{ID: request.Planner.ID + ":pause", TaskID: request.ID, Role: RolePlanner}
+	resume := Node{ID: request.Planner.ID + ":resume", TaskID: request.ID, Role: RolePlanner}
+	for _, node := range []Node{pause, resume} {
+		if err := graph.addCheckpointNode(node); err != nil {
 			t.Fatal(err)
 		}
-		before := graph.Snapshot()
-		root := snap.Tasks[0]
-		_, err = graph.ReplacePending(context.Background(), PendingSubgraph{
-			Roots: []PendingRoot{{Info: "root"}},
-			Spawns: []PendingSpawn{{
-				From: root.Planner.ID,
-				Join: root.Executor.ID,
-				Info: "\n",
-			}},
-		})
-		if !errors.Is(err, ErrInvalidPending) {
-			t.Fatalf("error = %v, want ErrInvalidPending", err)
-		}
-		if after := graph.Snapshot(); !reflect.DeepEqual(after, before) {
-			t.Fatalf("graph changed:\nafter  = %#v\nbefore = %#v", after, before)
-		}
-	})
-}
-
-func TestReplacePendingPreservesCompletedSpawnWhenAddingRoot(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "done"}},
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
-	root := snap.Tasks[0]
-	if _, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "done"}},
-		Spawns: []PendingSpawn{{
-			From: root.Planner.ID,
-			Join: root.Executor.ID,
-			Info: "completed help",
-		}},
-	}); err != nil {
-		t.Fatal(err)
+	graph.helps = []helpState{{ID: "request-1", CallID: "call-1", NodeID: request.Planner.ID, PauseID: pause.ID, ResumeID: resume.ID, TaskIDs: []string{"help"}, Configured: true}}
+	before := graph.Snapshot()
+	if _, err := graph.ReplacePending(context.Background(), PendingSubgraph{Tasks: []PendingTask{{ID: request.ID, Info: request.Info}}}); err == nil {
+		t.Fatal("removed a task still referenced by help history")
 	}
-	if _, err := graph.Run(
-		context.Background(), root.ID, "input", Stores{Memory: ctxgraph.NewStore()}, recordingAssemble(nil),
-	); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "placeholder"}, {Info: "repair"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Tasks) != 3 {
-		t.Fatalf("tasks = %#v, want completed root/help plus repair root", got.Tasks)
-	}
-	child := got.Tasks[1]
-	if child.Outcome != OutcomeDone || child.Info != "completed help" || child.SpawnedFrom == "" {
-		t.Fatalf("completed help = %#v", child)
-	}
-	repair := got.Tasks[2]
-	if repair.Outcome != OutcomeActive || repair.SpawnedFrom != "" || repair.Info != "repair" {
-		t.Fatalf("repair root = %#v", repair)
+	if !reflect.DeepEqual(before, graph.Snapshot()) {
+		t.Fatal("rejected removal changed graph")
 	}
 }
 
-func TestReplacePendingHoldsAndReleasesRoot(t *testing.T) {
+func TestPendingRunPolicyAndInputValidation(t *testing.T) {
 	t.Parallel()
-
-	graph := newGraph()
-	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "ready now"}, {Info: "next wave", RunPolicy: RunPolicyHeld}},
-	})
+	graph := New()
+	want := PendingSubgraph{Tasks: []PendingTask{{ID: "work", Info: "do work", RunPolicy: RunPolicyHeld}}}
+	snap, err := graph.ReplacePending(context.Background(), want)
 	if err != nil {
-		t.Fatalf("ReplacePending() error = %v", err)
+		t.Fatal(err)
+	}
+	if snap.Tasks[0].RunPolicy != RunPolicyHeld {
+		t.Fatal("held policy lost")
+	}
+	want.Tasks[0].RunPolicy = RunPolicyEnabled
+	snap, err = graph.ReplacePending(context.Background(), want)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if snap.Tasks[0].RunPolicy != RunPolicyEnabled {
-		t.Fatalf("first root run policy = %q, want %q", snap.Tasks[0].RunPolicy, RunPolicyEnabled)
+		t.Fatal("release policy lost")
 	}
-	if snap.Tasks[1].RunPolicy != RunPolicyHeld {
-		t.Fatalf("second root run policy = %q, want %q", snap.Tasks[1].RunPolicy, RunPolicyHeld)
-	}
-
-	snap, err = graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "ready now"}, {Info: "next wave"}},
-	})
-	if err != nil {
-		t.Fatalf("ReplacePending() error = %v", err)
-	}
-	if snap.Tasks[1].RunPolicy != RunPolicyHeld {
-		t.Fatalf("omitted run policy = %q, want held to survive", snap.Tasks[1].RunPolicy)
-	}
-
-	snap, err = graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{
-			{Info: "ready now"},
-			{Info: "next wave", RunPolicy: RunPolicyEnabled},
-		},
-	})
-	if err != nil {
-		t.Fatalf("ReplacePending() error = %v", err)
-	}
-	if snap.Tasks[1].RunPolicy != RunPolicyEnabled {
-		t.Fatalf("released run policy = %q, want %q", snap.Tasks[1].RunPolicy, RunPolicyEnabled)
-	}
-}
-
-func TestReplacePendingRejectsUnknownRunPolicy(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	if _, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "root"}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	before := graph.Snapshot()
-
-	_, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "root"}, {Info: "next", RunPolicy: "paused"}},
-	})
-	if !errors.Is(err, ErrInvalidPending) {
-		t.Fatalf("error = %v, want %v", err, ErrInvalidPending)
-	}
-	if after := graph.Snapshot(); !reflect.DeepEqual(after, before) {
-		t.Fatalf("graph changed after rejected run policy:\nafter  = %#v\nbefore = %#v", after, before)
+	for _, invalid := range []PendingSubgraph{
+		{Tasks: []PendingTask{{ID: "bad", Info: ""}}},
+		{Tasks: []PendingTask{{ID: "../bad", Info: "bad"}}},
+		{Tasks: []PendingTask{{ID: "bad", Info: "bad", RunPolicy: "auto"}}},
+		{Tasks: []PendingTask{{ID: "same", Info: "one"}, {ID: "same", Info: "two"}}},
+		{Tasks: want.Tasks, Edges: []Edge{{From: "missing", To: "work:1:planner"}}},
+	} {
+		before := graph.Snapshot()
+		if _, err := graph.ReplacePending(context.Background(), invalid); !errors.Is(err, ErrInvalidPending) {
+			t.Fatalf("invalid input: %v", err)
+		}
+		if !reflect.DeepEqual(before, graph.Snapshot()) {
+			t.Fatal("invalid input changed graph")
+		}
 	}
 }

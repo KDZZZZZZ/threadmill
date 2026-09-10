@@ -35,35 +35,3 @@ func TestStoreViewsStayIsolated(t *testing.T) {
 		t.Fatal("mutating Snapshot changed the store")
 	}
 }
-
-func TestGlobalViewWritesGlobalGraphNotStore(t *testing.T) {
-	t.Cleanup(func() { Update(Copy{}) })
-	Update(Copy{})
-
-	store := NewStore()
-	envView := store.View("env-1")
-	global := GlobalView("agent-a")
-
-	global.Commit(Graph{
-		Nodes: []Node{{ID: "g1", Statement: "global"}},
-	})
-	envView.Commit(Graph{
-		Nodes: []Node{{ID: "e1", Statement: "env"}},
-	})
-
-	gotGlobal := global.Snapshot()
-	if len(gotGlobal.Nodes) != 1 || gotGlobal.Nodes[0].ID != "g1" {
-		t.Fatalf("GlobalView snapshot = %#v, want g1", gotGlobal.Nodes)
-	}
-	gotEnv := envView.Snapshot()
-	if len(gotEnv.Nodes) != 1 || gotEnv.Nodes[0].ID != "e1" {
-		t.Fatalf("Store.View snapshot = %#v, want e1", gotEnv.Nodes)
-	}
-
-	if nodes := Clone("check").Graph.Nodes; len(nodes) != 1 || nodes[0].ID != "g1" {
-		t.Fatalf("global graph = %#v, want g1", nodes)
-	}
-	if nodes := store.Load("env-1").Nodes; len(nodes) != 1 || nodes[0].ID != "e1" {
-		t.Fatalf("store env-1 = %#v, want e1", nodes)
-	}
-}

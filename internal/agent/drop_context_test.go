@@ -11,8 +11,6 @@ import (
 )
 
 func TestDropFromContextToolRemovesNodesFromHistoryNotGraph(t *testing.T) {
-	resetDefaultStore(t)
-
 	loop, err := NewLoop(Config{
 		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
 			return AssistantMessage{Content: "unused"}, nil
@@ -75,8 +73,6 @@ func TestDropFromContextToolRemovesNodesFromHistoryNotGraph(t *testing.T) {
 }
 
 func TestRemindDropContextOnPressure(t *testing.T) {
-	resetDefaultStore(t)
-
 	var suffix string
 	loop, err := NewLoop(Config{
 		Provider: modelFunc(func(_ context.Context, request Request) (AssistantMessage, error) {
@@ -114,8 +110,6 @@ func TestRemindDropContextOnPressure(t *testing.T) {
 }
 
 func TestDropFromContextKeepsOldHistoryBytes(t *testing.T) {
-	resetDefaultStore(t)
-
 	loop, err := NewLoop(Config{
 		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
 			return AssistantMessage{Content: "unused"}, nil
@@ -171,8 +165,6 @@ func TestDropFromContextKeepsOldHistoryBytes(t *testing.T) {
 // TestDropFromContextReportsProtectedPrefix 锁定工具如实报告：请求的节点全部落在
 // 水位线之前的受保护前缀时，不能只回显请求 ID 让模型误以为压力已缓解。
 func TestDropFromContextReportsProtectedPrefix(t *testing.T) {
-	resetDefaultStore(t)
-
 	loop, err := NewLoop(Config{
 		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
 			return AssistantMessage{Content: "unused"}, nil

@@ -6,30 +6,50 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
+
+	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 )
 
-// TaskProgress 是尚未跑完的 task 游标：启动包状态、已完成角色输出和已合入标记。
+const progressVersion = 1
+
+// TaskProgress records one activation. Paired immutable role outputs live in Graph.
 type TaskProgress struct {
-	Outputs  map[string]string
-	Merged   []string       `json:",omitempty"`
-	Prepared bool           `json:",omitempty"`
-	Joins    []JoinProgress `json:",omitempty"`
+	Version int             `json:"version"`
+	Inputs  []InputProgress `json:"inputs,omitempty"`
+	Pending *ExportProgress `json:"pending,omitempty"`
 }
 
-// JoinProgress is the durable decision record for one role-visible join session.
-type JoinProgress struct {
-	ID       string               `json:"id"`
-	NodeID   string               `json:"node_id"`
-	TargetID string               `json:"target_id"`
-	Sources  []JoinSourceProgress `json:"sources"`
-	Finished bool                 `json:"finished,omitempty"`
-	Reason   string               `json:"reason,omitempty"`
+// ExportProgress journals a completed role until its paired output is visible.
+// The graph body is temporary and is removed after the immutable reference commits.
+type ExportProgress struct {
+	Output Output         `json:"output"`
+	Memory ctxgraph.Graph `json:"memory"`
 }
 
-// JoinSourceProgress records how the target role disposed of one candidate.
-type JoinSourceProgress struct {
-	TaskID       string   `json:"task_id"`
-	EnvID        string   `json:"env_id"`
+// InputProgress is the durable state of a fixed incoming batch. Ready is published
+// only when both referenced snapshots have been saved.
+type InputProgress struct {
+	ID        string                `json:"id"`
+	NodeID    string                `json:"node_id"`
+	ResumeFor string                `json:"resume_for,omitempty"`
+	TargetID  string                `json:"target_id"`
+	Sources   []InputSourceProgress `json:"sources"`
+	Paths     []string              `json:"paths,omitempty"`
+	Phase     string                `json:"phase"`
+	FilesRef  string                `json:"files_ref,omitempty"`
+	MemoryRef string                `json:"memory_ref,omitempty"`
+	Reason    string                `json:"reason,omitempty"`
+	Started   bool                  `json:"started,omitempty"`
+}
+
+// InputSourceProgress identifies an immutable source and its disposable file
+// candidate. File decisions never change the source memory graph.
+type InputSourceProgress struct {
+	ID           string   `json:"id"`
+	EnvID        string   `json:"env_id,omitempty"`
+	FilesRef     string   `json:"files_ref,omitempty"`
+	MemoryRef    string   `json:"memory_ref"`
 	Output       string   `json:"output,omitempty"`
 	Applied      bool     `json:"applied,omitempty"`
 	AppliedAll   bool     `json:"applied_all,omitempty"`
@@ -38,11 +58,10 @@ type JoinSourceProgress struct {
 	Reason       string   `json:"reason,omitempty"`
 }
 
-// ProgressStore 保存、读取、删除进行中的 task 进度。
+// ProgressStore 保存、读取 task activation 的输入进度和待提交导出。
 type ProgressStore interface {
 	Save(taskID string, progress TaskProgress) error
 	Load(taskID string) (TaskProgress, bool, error)
-	Delete(taskID string) error
 }
 
 // DirProgressStore 每个 task 一个 JSON 文件。
@@ -74,9 +93,18 @@ func (s *DirProgressStore) Save(taskID string, progress TaskProgress) error {
 		return fmt.Errorf("encode task progress: %w", err)
 	}
 	path := s.path(taskID)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write task progress %q: %w", tmp, err)
+	file, err := os.CreateTemp(s.dir, ".progress-*")
+	if err != nil {
+		return fmt.Errorf("create task progress: %w", err)
+	}
+	tmp := file.Name()
+	defer os.Remove(tmp)
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
@@ -98,14 +126,30 @@ func (s *DirProgressStore) Load(taskID string) (TaskProgress, bool, error) {
 	if err := json.Unmarshal(data, &progress); err != nil {
 		return TaskProgress{}, false, fmt.Errorf("decode task progress: %w", err)
 	}
+	if progress.Version != progressVersion {
+		return TaskProgress{}, false, fmt.Errorf("coordination: incompatible progress version %d; paired input checkpoints required", progress.Version)
+	}
 	return progress, true, nil
 }
 
-// Delete 扔掉已完成的 task 进度。
-func (s *DirProgressStore) Delete(taskID string) error {
-	err := os.Remove(s.path(taskID))
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("delete task progress: %w", err)
+// memoryProgressStore provides the same retry semantics to in-process callers.
+type memoryProgressStore struct {
+	mu    sync.Mutex
+	items map[string]TaskProgress
+}
+
+func (s *memoryProgressStore) Save(id string, progress TaskProgress) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.items == nil {
+		s.items = make(map[string]TaskProgress)
 	}
+	s.items[id] = cloneTaskProgress(progress)
 	return nil
+}
+func (s *memoryProgressStore) Load(id string) (TaskProgress, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	progress, ok := s.items[id]
+	return cloneTaskProgress(progress), ok, nil
 }

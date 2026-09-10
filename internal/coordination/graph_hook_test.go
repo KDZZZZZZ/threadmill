@@ -15,7 +15,7 @@ import (
 func TestInjectCoordinationGraphAppendsLatestSnapshot(t *testing.T) {
 	t.Parallel()
 
-	graph := newGraph()
+	graph := New()
 	graph.AddTask()
 
 	hooks := InjectCoordinationGraph(graph)
@@ -33,6 +33,14 @@ func TestInjectCoordinationGraphAppendsLatestSnapshot(t *testing.T) {
 	}
 	if !strings.Contains(block, `"ID":"task-1"`) {
 		t.Fatalf("coordination block = %q, want latest task-1", block)
+	}
+	for _, obsolete := range []string{"root", "From/To/Kind"} {
+		if strings.Contains(block, obsolete) {
+			t.Errorf("coordination block contains obsolete scheduling rule %q: %s", obsolete, block)
+		}
+	}
+	if !strings.Contains(block, `"from":"task-1:1:planner","to":"task-1:1:executor"`) {
+		t.Errorf("coordination block must expose ordinary from/to edges: %s", block)
 	}
 }
 
@@ -61,19 +69,25 @@ func TestInjectCoordinationGraphNilGraph(t *testing.T) {
 	}
 }
 
-func TestSnapshotAtUnknownRevision(t *testing.T) {
+func TestInjectCoordinationGraphHonorsCancellation(t *testing.T) {
 	t.Parallel()
 
-	_, err := newGraph().SnapshotAt(context.Background(), 9)
-	if !errors.Is(err, ErrUnknownRevision) {
-		t.Fatalf("error = %v, want %v", err, ErrUnknownRevision)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	hooks := InjectCoordinationGraph(New())
+	got, err := hooks.AssembleRequest[0](ctx, agent.Request{SystemPrompt: "yaml manager"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want %v", err, context.Canceled)
+	}
+	if block := requestBlock(got, "coordination"); block != "" {
+		t.Fatalf("canceled request has coordination block: %q", block)
 	}
 }
 
 func TestSnapshotPromptProjectionIgnoresVolatileFields(t *testing.T) {
 	t.Parallel()
 
-	graph := newGraph()
+	graph := New()
 	graph.AddTask()
 	graph.AddTask()
 	first, err := graph.Snapshot().PromptProjection()
@@ -103,7 +117,7 @@ func TestSnapshotPromptProjectionIgnoresVolatileFields(t *testing.T) {
 func TestSnapshotPromptProjectionKeepsCreationOrder(t *testing.T) {
 	t.Parallel()
 
-	graph := newGraph()
+	graph := New()
 	for range 12 {
 		graph.AddTask()
 	}

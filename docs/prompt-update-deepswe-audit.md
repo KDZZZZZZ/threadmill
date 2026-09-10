@@ -1,5 +1,7 @@
 # DeepSWE 全量归因驱动的提示词全面更新方案
 
+> **历史材料（统一边迁移前）**：本页保留当时的设计、提示词或测试记录；root、spawn/join、任务树及旧输入协议不再作为当前规范。现行语义与实现边界见[统一边设计](unified-edge-design.md)，当前配置以 `threadmill.yaml` 为准。历史性能与测试结论仅适用于文中所列版本。
+
 > **落地状态（2026-08-23）**：§2 全部提示词与工具描述已写入 `threadmill.yaml`（含 `memory.curation` 阈值 64/32 与 subgraph_organizer 的 memory_apply 装配）；§3 的代码改动已全部实现——`memory_apply` 工具（internal/tool/memory_apply.go，含保护层与原子提交）、`Graph.WithNodeChanges`（internal/context/graph_changes.go）、T1 审核前置于 PrepareTaskContext、T2 深度整理挂在 compact 钩子（internal/agent/curation.go）、报告投影按证据区分 status（internal/coordination/stores.go）、compact 输入带节点 ID、formatMemory 带 kind/status、协调图注入带字段图例；organizer 提示词含节点字段含义说明。`go test ./...` 全绿。
 
 依据 `/home/oops/evals/threadmill-deepswe/analysis/threadmill-deepswe-attribution.md`（2026-08-23，113 题计划集、78 题可审计）重写所有直接发送给大模型的文本。本文给出每个表面的**完整替换文案**；`threadmill.yaml` 部分可直接粘贴，代码内模板部分标注了对应文件与函数，需要伴随代码修改。

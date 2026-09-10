@@ -53,6 +53,15 @@ func (s *Store) absorbOverlayUpper(envID, live string) (
 	if !ok {
 		return false, false, 0, nil
 	}
+	s.mountMu.Lock()
+	mount := s.mounts[envID]
+	oldFloor := mount != nil && mount.lowerdir != "" && mount.lowerdir != s.floorDir
+	s.mountMu.Unlock()
+	if oldFloor {
+		// A recovered workspace needs a full comparison against the new store
+		// floor; its upper layer describes changes against an older floor.
+		return true, false, 0, nil
+	}
 	ignored := gitIgnoredPaths(live)
 	scan, supported, scanErr := scanUpperLayer(upper, ignored)
 	if scanErr != nil || !supported {
@@ -84,7 +93,7 @@ func (s *Store) absorbOverlayUpper(envID, live string) (
 			}
 			continue
 		}
-		current, changed, size, readErr := readUpperRegular(entry, old, compareA, compareB)
+		current, changed, size, readErr := readUpperEntry(entry, old, compareA, compareB)
 		if readErr != nil {
 			return true, true, scan.visited, readErr
 		}
@@ -132,6 +141,10 @@ func (s *Store) overlayUpper(envID string) (string, bool) {
 }
 
 func (s *Store) upperBeforeLocked(envID, rel string) upperBefore {
+	state := s.lookupContent(envID, rel)
+	if state.exists && !state.tombstone && state.mode.IsDir() {
+		return upperBefore{dir: true, snapshot: fileSnapshot{mode: state.mode}}
+	}
 	if snapshot, ok := s.regularFileSnapshot(envID, rel); ok {
 		return upperBefore{snapshot: snapshot, file: true}
 	}
@@ -165,13 +178,20 @@ func (s *Store) visibleOverlayFilesLocked(envID string) map[string]struct{} {
 	return visible
 }
 
-func readUpperRegular(
+func readUpperEntry(
 	entry upperEntry,
 	old upperBefore,
 	compareA, compareB []byte,
 ) (blob, bool, int64, error) {
-	executable := entry.info.Mode().Perm()&0o111 != 0
-	if old.file && old.snapshot.source != "" && old.snapshot.executable == executable {
+	mode := entry.info.Mode().Perm()
+	if entry.info.IsDir() {
+		mode |= fs.ModeDir
+		if old.dir && old.snapshot.mode == mode {
+			return blob{}, false, 0, nil
+		}
+		return blob{mode: mode}, true, 0, nil
+	}
+	if old.file && old.snapshot.source != "" && old.snapshot.mode == mode {
 		equal, err := equalFileContents(
 			entry.path,
 			entry.info,
@@ -210,10 +230,10 @@ func readUpperRegular(
 			MaxFileSize,
 		)
 	}
-	if old.file && old.snapshot.source == "" && old.snapshot.executable == executable && bytes.Equal(old.snapshot.data, data) {
+	if old.file && old.snapshot.source == "" && old.snapshot.mode == mode && bytes.Equal(old.snapshot.data, data) {
 		return blob{}, false, 0, nil
 	}
-	return blob{data: data, executable: executable}, true, size, nil
+	return blob{data: data, mode: mode}, true, size, nil
 }
 
 func scanUpperLayer(root string, ignored map[string]bool) (upperScan, bool, error) {
@@ -257,6 +277,7 @@ func scanUpperLayer(root string, ignored map[string]bool) (upperScan, bool, erro
 		switch {
 		case info.IsDir():
 			scan.paths[rel] = upperDirectory
+			scan.entries = append(scan.entries, upperEntry{rel: rel, path: path, info: info})
 		case whiteout:
 			scan.paths[rel] = upperWhiteout
 			scan.entries = append(scan.entries, upperEntry{rel: rel, path: path, info: info, whiteout: true})
@@ -340,8 +361,8 @@ func listOverlayXattrs(path string) ([]string, error) {
 }
 
 func upperCovers(paths map[string]upperPathKind, rel string) bool {
-	if kind, ok := paths[rel]; ok {
-		return kind != upperDirectory
+	if _, ok := paths[rel]; ok {
+		return true
 	}
 	for _, ancestor := range ancestorPrefixes(rel) {
 		if kind, ok := paths[ancestor]; ok && kind != upperDirectory {

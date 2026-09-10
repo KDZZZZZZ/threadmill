@@ -28,8 +28,6 @@ func recordRequests(answer string) (modelFunc, func() []Request) {
 }
 
 func TestOrganizerDropsHistoryAndHandsOffTheGraphUnderPressure(t *testing.T) {
-	resetDefaultStore(t)
-
 	model, requests := recordRequests(strings.Repeat("整理结论。", 200))
 	organizer, err := NewSubgraphOrganizer(Config{Provider: model, ContextWindow: 600})
 	if err != nil {

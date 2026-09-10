@@ -19,10 +19,10 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
-func TestGraphRunRetainsRootFilesForManagerPublish(t *testing.T) {
+func TestGraphRunRetainsFilesForManagerPublish(t *testing.T) {
 	t.Parallel()
 
-	graph := newGraph()
+	graph := New()
 	task := graph.AddTask()
 	base := t.TempDir()
 	files := vfs.NewStore(base)
@@ -61,8 +61,8 @@ func TestGraphRunRetainsRootFilesForManagerPublish(t *testing.T) {
 	if _, err := os.Stat(live); !os.IsNotExist(err) {
 		t.Fatalf("live dir still exists after Run: %v", err)
 	}
-	if stats := files.Stats(); stats.Environments != 2 || stats.LiveDirs != 0 {
-		t.Fatalf("completed root snapshot stats = %+v, want task and archive", stats)
+	if stats := files.Stats(); stats.Environments == 0 || stats.LiveDirs != 0 {
+		t.Fatalf("completed root snapshot stats = %+v, want retained immutable snapshots without live directories", stats)
 	}
 	if err := files.Discard(task.Env.ID); err != nil {
 		t.Fatal(err)
@@ -81,94 +81,10 @@ func TestGraphRunRetainsRootFilesForManagerPublish(t *testing.T) {
 	}
 }
 
-func TestGraphRunLaterRootInheritsBeforeManagerPublishes(t *testing.T) {
+func TestGraphRunDoesNotPublishFailedTask(t *testing.T) {
 	t.Parallel()
 
-	graph := newGraph()
-	first := graph.AddTask()
-	_ = mustSpawn(t, graph, first.Planner.ID, first.Verifier.ID)
-	second := graph.AddTask()
-	base := t.TempDir()
-	state := t.TempDir()
-	files, err := vfs.NewPersistentStore(base, state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
-	assemble := func(task Task) (Roles, error) {
-		return Roles{
-			Planner: instantAsker(),
-			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
-				switch task.ID {
-				case first.ID:
-					live, err := files.Materialize(task.Env.ID)
-					if err != nil {
-						return "", err
-					}
-					if err := os.WriteFile(filepath.Join(live, "first.txt"), []byte("kept"), 0o600); err != nil {
-						return "", err
-					}
-				case second.ID:
-					got, err := files.View(task.Env.ID).Read("first.txt")
-					if err != nil || string(got) != "kept" {
-						return "", fmt.Errorf("inherited first.txt = %q: %v", got, err)
-					}
-				}
-				return query + "/executor", nil
-			}),
-			Verifier: instantAsker(),
-		}, nil
-	}
-
-	if _, err := graph.Run(context.Background(), first.ID, "first", stores, assemble); err != nil {
-		t.Fatalf("first Run() error = %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(base, "first.txt")); !os.IsNotExist(err) {
-		t.Fatalf("first root published before manager selection: %v", err)
-	}
-	if _, err := graph.Run(context.Background(), second.ID, "second", stores, assemble); err != nil {
-		t.Fatalf("second Run() error = %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(base, "first.txt")); !os.IsNotExist(err) {
-		t.Fatalf("second root published before manager selection: %v", err)
-	}
-	if _, err := executeGraphTool(
-		t,
-		GraphTools(graph, stores),
-		coordPublishTaskName,
-		`{"task_id":"`+second.ID+`"}`,
-	); err != nil {
-		t.Fatalf("publish second root: %v", err)
-	}
-	got, err := os.ReadFile(filepath.Join(base, "first.txt"))
-	if err != nil {
-		t.Fatalf("second root missed parent files: %v", err)
-	}
-	if string(got) != "kept" {
-		t.Fatalf("second root first.txt = %q, want kept", got)
-	}
-	// Publication renders; it does not reclaim. The checkpoints stay available
-	// so a later one can be shown, or an earlier one shown again.
-	if stats := files.Stats(); stats.Environments == 0 {
-		t.Fatalf("publication consumed the root snapshots: %+v", stats)
-	}
-	restored, err := vfs.NewPersistentStore(base, state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := restored.Fork(first.Env.ID, second.Env.ID); err != nil {
-		t.Fatalf("restore latest root: %v", err)
-	}
-	got, err = restored.View(second.Env.ID).Read("first.txt")
-	if err != nil || string(got) != "kept" {
-		t.Fatalf("restored second root first.txt = %q, %v", got, err)
-	}
-}
-
-func TestGraphRunDoesNotPublishFailedRoot(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
+	graph := New()
 	task := graph.AddTask()
 	base := t.TempDir()
 	files := vfs.NewStore(base)
@@ -203,7 +119,7 @@ func TestGraphRunDoesNotPublishFailedRoot(t *testing.T) {
 func TestGraphRunUnknownTask(t *testing.T) {
 	t.Parallel()
 
-	_, err := newGraph().Run(
+	_, err := New().Run(
 		context.Background(),
 		"task-missing",
 		"in",
@@ -218,7 +134,7 @@ func TestGraphRunUnknownTask(t *testing.T) {
 func TestGraphRunPlannerExecutorVerifierInOrder(t *testing.T) {
 	t.Parallel()
 
-	graph := newGraph()
+	graph := New()
 	task := graph.AddTask()
 	var steps []string
 	got, err := graph.Run(
@@ -254,7 +170,7 @@ func TestGraphRunResumesRecoverableRoleErrors(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			graph := newGraph()
+			graph := New()
 			task := graph.AddTask()
 			calls := 0
 			got, err := graph.Run(
@@ -292,7 +208,7 @@ func TestGraphRunResumesRecoverableRoleErrors(t *testing.T) {
 func TestGraphRunReportsRepeatedRecoverableRoleErrorAsStall(t *testing.T) {
 	t.Parallel()
 
-	graph := newGraph()
+	graph := New()
 	task := graph.AddTask()
 	calls := 0
 	var reported error
@@ -324,60 +240,10 @@ func TestGraphRunReportsRepeatedRecoverableRoleErrorAsStall(t *testing.T) {
 	}
 }
 
-func TestGraphRunJoinMergesChildMemory(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
-	store := ctxgraph.NewStore()
-
-	assemble := func(task Task) (Roles, error) {
-		roleAsker := func(role string) Asker {
-			return askerFunc(func(_ context.Context, query string) (string, error) {
-				if task.ID == child.ID && role == RoleVerifier {
-					view := store.View(task.Env.ID)
-					graph := view.Snapshot()
-					graph.Nodes = append(graph.Nodes, ctxgraph.Node{
-						ID:        "c1",
-						Statement: "from-child",
-					})
-					if err := view.Commit(graph); err != nil {
-						return "", err
-					}
-				}
-				if task.ID == root.ID && role == RoleVerifier {
-					got := store.Load(root.Env.ID)
-					found := false
-					for _, node := range got.Nodes {
-						if node.ID == "c1" && node.Statement == "from-child" {
-							found = true
-							break
-						}
-					}
-					if !found {
-						return "", fmt.Errorf("verifier ask missed child memory: %#v", got.Nodes)
-					}
-				}
-				return query + "/" + role, nil
-			})
-		}
-		return Roles{
-			Planner:  roleAsker(RolePlanner),
-			Executor: roleAsker(RoleExecutor),
-			Verifier: roleAsker(RoleVerifier),
-		}, nil
-	}
-
-	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: store}, assemble); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-}
-
 func TestGraphRunVerifierReadsExecutorLiveWrite(t *testing.T) {
 	t.Parallel()
 
-	graph := newGraph()
+	graph := New()
 	task := graph.AddTask()
 	files := vfs.NewStore(t.TempDir())
 	assemble := func(task Task) (Roles, error) {
@@ -410,340 +276,11 @@ func TestGraphRunVerifierReadsExecutorLiveWrite(t *testing.T) {
 	}
 }
 
-func TestGraphRunJoinToVerifierDoesNotAutomaticallyMergeChildLiveWrites(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
-	files := vfs.NewStore(t.TempDir())
-	assemble := func(task Task) (Roles, error) {
-		return Roles{
-			Planner: instantAsker(),
-			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
-				if task.ID != child.ID {
-					return query + "/executor", nil
-				}
-				dir, err := files.Materialize(task.Env.ID)
-				if err != nil {
-					return "", err
-				}
-				if err := os.WriteFile(filepath.Join(dir, "from-child-live.txt"), []byte("from-live"), 0o640); err != nil {
-					return "", err
-				}
-				return query + "/executor", nil
-			}),
-			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
-				return query + "/verifier", nil
-			}),
-		}, nil
-	}
-	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if _, err := files.View(root.Env.ID).Read("from-child-live.txt"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("child write was automatically merged: %v", err)
-	}
-	if _, err := files.View(child.Env.ID).Read("from-child-live.txt"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("joined child workspace was retained: %v", err)
-	}
-}
-
-func TestGraphRunJoinDoesNotAutomaticallyMergeChildFiles(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
-	files := vfs.NewStore(t.TempDir())
-
-	assemble := func(task Task) (Roles, error) {
-		roleAsker := func(role string) Asker {
-			return askerFunc(func(_ context.Context, query string) (string, error) {
-				if task.ID == child.ID && role == RoleExecutor {
-					if err := files.View(task.Env.ID).Write("from-child.txt", []byte("from-child")); err != nil {
-						return "", err
-					}
-				}
-				return query + "/" + role, nil
-			})
-		}
-		return Roles{
-			Planner:  roleAsker(RolePlanner),
-			Executor: roleAsker(RoleExecutor),
-			Verifier: roleAsker(RoleVerifier),
-		}, nil
-	}
-
-	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if _, err := files.View(root.Env.ID).Read("from-child.txt"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("child file was automatically merged: %v", err)
-	}
-	if _, err := files.View(child.Env.ID).Read("from-child.txt"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("joined child workspace was retained: %v", err)
-	}
-}
-
-func TestGraphRunJoinTargetExplicitlySelectsAConflictingCandidate(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	first := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
-	second := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
-	graph.HelpTools(nil)
-	files := vfs.NewStore(t.TempDir())
-	if err := files.View(root.Env.ID).Write("shared.txt", []byte("base")); err != nil {
-		t.Fatal(err)
-	}
-
-	assemble := func(task Task) (Roles, error) {
-		roleAsker := func(role string) Asker {
-			return askerFunc(func(_ context.Context, query string) (string, error) {
-				if (task.ID == first.ID || task.ID == second.ID) && role == RoleExecutor {
-					if err := files.View(task.Env.ID).Write("shared.txt", []byte(task.ID)); err != nil {
-						return "", err
-					}
-				}
-				if task.ID == root.ID && role == RoleExecutor && strings.Contains(query, "[join pending]") {
-					sessionID := "join:incoming:" + root.Executor.ID
-					if _, err := graph.join.execute(root.Executor.ID, root.Env.ID, joinArgs{
-						Action: "apply", SessionID: sessionID, SourceID: second.ID, All: true, Strategy: "replace", Reason: "selected second",
-					}); err != nil {
-						return "", err
-					}
-					if _, err := graph.join.execute(root.Executor.ID, root.Env.ID, joinArgs{
-						Action: "discard", SessionID: sessionID, SourceIDs: []string{first.ID}, Reason: "selected second",
-					}); err != nil {
-						return "", err
-					}
-					if _, err := graph.join.execute(root.Executor.ID, root.Env.ID, joinArgs{
-						Action: "finish", SessionID: sessionID, Reason: "candidate selected",
-					}); err != nil {
-						return "", err
-					}
-				}
-				return query + "/" + role, nil
-			})
-		}
-		return Roles{Planner: roleAsker(RolePlanner), Executor: roleAsker(RoleExecutor), Verifier: roleAsker(RoleVerifier)}, nil
-	}
-
-	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, assemble); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	got, err := files.View(root.Env.ID).Read("shared.txt")
-	if err != nil || string(got) != second.ID {
-		t.Fatalf("shared.txt = %q, %v; want selected candidate %s", got, err, second.ID)
-	}
-}
-
-func TestGraphRunResumesUnfinishedJoinDecisionAfterTargetFailure(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
-	graph.HelpTools(nil)
-	progress, err := NewDirProgressStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	graph.SetProgressStore(progress)
-	files := vfs.NewStore(t.TempDir())
-	crashed := errors.New("target crashed")
-	rootExecutorCalls := 0
-
-	assemble := func(task Task) (Roles, error) {
-		roleAsker := func(role string) Asker {
-			return askerFunc(func(_ context.Context, query string) (string, error) {
-				if task.ID == child.ID && role == RoleExecutor {
-					if err := files.View(task.Env.ID).Write("joined.txt", []byte("from child")); err != nil {
-						return "", err
-					}
-				}
-				if task.ID == root.ID && role == RoleExecutor {
-					rootExecutorCalls++
-					sessionID := "join:incoming:" + root.Executor.ID
-					switch rootExecutorCalls {
-					case 1:
-						if _, err := graph.join.execute(root.Executor.ID, root.Env.ID, joinArgs{
-							Action: "apply", SessionID: sessionID, SourceID: child.ID, All: true,
-						}); err != nil {
-							return "", err
-						}
-						return "", crashed
-					case 2:
-						if _, err := graph.join.execute(root.Executor.ID, root.Env.ID, joinArgs{
-							Action: "finish", SessionID: sessionID, Reason: "resume completed",
-						}); err != nil {
-							return "", err
-						}
-					}
-				}
-				return query + "/" + role, nil
-			})
-		}
-		return Roles{Planner: roleAsker(RolePlanner), Executor: roleAsker(RoleExecutor), Verifier: roleAsker(RoleVerifier)}, nil
-	}
-	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
-
-	if _, err := graph.Run(context.Background(), root.ID, "in", stores, assemble); !errors.Is(err, crashed) {
-		t.Fatalf("first Run() error = %v, want %v", err, crashed)
-	}
-	if _, err := graph.Run(context.Background(), root.ID, "in", stores, assemble); err != nil {
-		t.Fatalf("resume Run() error = %v", err)
-	}
-	got, err := files.View(root.Env.ID).Read("joined.txt")
-	if err != nil || string(got) != "from child" {
-		t.Fatalf("joined.txt = %q, %v; want recovered applied candidate", got, err)
-	}
-}
-
-func TestGraphRunJoinDoesNotMechanicallyMergeConflictingLiveFiles(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	first := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
-	second := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
-	files := vfs.NewStore(t.TempDir())
-	_, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, func(task Task) (Roles, error) {
-		return Roles{
-			Planner: instantAsker(),
-			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
-				if task.ID == first.ID || task.ID == second.ID {
-					dir, err := files.Materialize(task.Env.ID)
-					if err != nil {
-						return "", err
-					}
-					if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte(task.ID), 0o640); err != nil {
-						return "", err
-					}
-				}
-				return query + "/executor", nil
-			}),
-			Verifier: instantAsker(),
-		}, nil
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-}
-
-func TestGraphRunJoinDoesNotMechanicallyMergeConflictingFiles(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	first := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
-	second := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
-	files := vfs.NewStore(t.TempDir())
-
-	_, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore(), Files: files}, func(task Task) (Roles, error) {
-		return Roles{
-			Planner: instantAsker(),
-			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
-				if task.ID == first.ID || task.ID == second.ID {
-					if err := files.View(task.Env.ID).Write("shared.txt", []byte(task.ID)); err != nil {
-						return "", err
-					}
-				}
-				return query + "/executor", nil
-			}),
-			Verifier: instantAsker(),
-		}, nil
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-}
-
-func TestGraphRunResumeDoesNotReplayCompletedJoinMerge(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
-	progress, err := NewDirProgressStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	graph.SetProgressStore(progress)
-	memory := ctxgraph.NewStore()
-	files := vfs.NewStore(t.TempDir())
-	stores := Stores{Memory: memory, Files: files}
-
-	verifierStarted := make(chan struct{})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		<-verifierStarted
-		cancel()
-	}()
-	_, err = graph.Run(ctx, root.ID, "in", stores, func(task Task) (Roles, error) {
-		return Roles{
-			Planner:  instantAsker(),
-			Executor: instantAsker(),
-			Verifier: askerFunc(func(ctx context.Context, query string) (string, error) {
-				if task.ID == child.ID {
-					if err := files.View(task.Env.ID).Write("shared.txt", []byte("from-child")); err != nil {
-						return "", err
-					}
-					return query + "/child-verifier", nil
-				}
-				if err := files.View(task.Env.ID).Write("shared.txt", []byte("downstream")); err != nil {
-					return "", err
-				}
-				close(verifierStarted)
-				<-ctx.Done()
-				return "", ctx.Err()
-			}),
-		}, nil
-	})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run() error = %v, want context.Canceled", err)
-	}
-
-	got, err := graph.Run(context.Background(), root.ID, "in", stores, func(task Task) (Roles, error) {
-		return Roles{
-			Planner: askerFunc(func(_ context.Context, query string) (string, error) {
-				t.Fatal("planner replayed")
-				return query, nil
-			}),
-			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
-				t.Fatal("executor replayed")
-				return query, nil
-			}),
-			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
-				if task.ID == child.ID {
-					t.Fatal("child verifier replayed")
-				}
-				return query + "/verifier", nil
-			}),
-		}, nil
-	})
-	if err != nil {
-		t.Fatalf("resume Run() error = %v", err)
-	}
-	if !strings.HasSuffix(got, "/verifier") {
-		t.Fatalf("resume output = %q, want verifier suffix", got)
-	}
-	body, err := files.View(root.Env.ID).Read("shared.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(body) != "downstream" {
-		t.Fatalf("shared.txt = %q, want downstream", body)
-	}
-}
-
 func TestGraphRunResumesCanceledTaskWithoutReplayingFinishedRoles(t *testing.T) {
 	t.Parallel()
 
-	graph := newGraph()
+	graph := New()
+	stores := Stores{Memory: ctxgraph.NewStore()}
 	task := graph.AddTask()
 	progress, err := NewDirProgressStore(t.TempDir())
 	if err != nil {
@@ -758,7 +295,7 @@ func TestGraphRunResumesCanceledTaskWithoutReplayingFinishedRoles(t *testing.T) 
 		<-execStarted
 		cancel()
 	}()
-	_, err = graph.Run(ctx, task.ID, "in", Stores{Memory: ctxgraph.NewStore()}, func(Task) (Roles, error) {
+	_, err = graph.Run(ctx, task.ID, "in", stores, func(Task) (Roles, error) {
 		return Roles{
 			Planner: askerFunc(func(_ context.Context, query string) (string, error) {
 				return query + "/planner", nil
@@ -776,7 +313,7 @@ func TestGraphRunResumesCanceledTaskWithoutReplayingFinishedRoles(t *testing.T) 
 	}
 
 	var resumed []string
-	got, err := graph.Run(context.Background(), task.ID, "in", Stores{Memory: ctxgraph.NewStore()}, func(Task) (Roles, error) {
+	got, err := graph.Run(context.Background(), task.ID, "in", stores, func(Task) (Roles, error) {
 		return Roles{
 			Planner: askerFunc(func(_ context.Context, query string) (string, error) {
 				resumed = append(resumed, "planner:"+query)
@@ -801,143 +338,16 @@ func TestGraphRunResumesCanceledTaskWithoutReplayingFinishedRoles(t *testing.T) 
 	if got != "in/planner/executor/verifier" {
 		t.Fatalf("resume Run() = %q, want in/planner/executor/verifier", got)
 	}
-	if _, ok, err := progress.Load(task.ID); err != nil {
+	if _, ok, err := progress.Load(task.Env.ID); err != nil {
 		t.Fatal(err)
-	} else if ok {
-		t.Fatal("progress kept after the task completed")
-	}
-}
-
-func TestGraphRunDoesNotPrepareTaskPackageAgainOnResume(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	task := graph.AddTask()
-	progress, err := NewDirProgressStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	graph.SetProgressStore(progress)
-	stores := Stores{Memory: ctxgraph.NewStore()}
-	prepared := 0
-	executorStarted := make(chan struct{})
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		<-executorStarted
-		cancel()
-	}()
-
-	_, err = graph.Run(ctx, task.ID, "in", stores, func(Task) (Roles, error) {
-		return Roles{
-			Prepare: func(context.Context) error { prepared++; return nil },
-			Planner: instantAsker(),
-			Executor: askerFunc(func(ctx context.Context, _ string) (string, error) {
-				close(executorStarted)
-				<-ctx.Done()
-				return "", ctx.Err()
-			}),
-			Verifier: instantAsker(),
-		}, nil
-	})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("first Run() error = %v, want context.Canceled", err)
-	}
-	_, err = graph.Run(context.Background(), task.ID, "in", stores, func(Task) (Roles, error) {
-		roles := instantRoles()
-		roles.Prepare = func(context.Context) error { prepared++; return nil }
-		return roles, nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if prepared != 1 {
-		t.Fatalf("Prepare calls = %d, want once across resume", prepared)
-	}
-}
-
-func TestGraphRunResumesSpawnedChildWithoutReplayingFinishedRoles(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
-	progress, err := NewDirProgressStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	graph.SetProgressStore(progress)
-
-	execStarted := make(chan struct{})
-	childFinished := make(chan struct{})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		<-execStarted
-		cancel()
-	}()
-	_, err = graph.Run(ctx, root.ID, "in", Stores{Memory: ctxgraph.NewStore()}, func(task Task) (Roles, error) {
-		if task.ID == child.ID {
-			return Roles{
-				Planner:  instantAsker(),
-				Executor: instantAsker(),
-				Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
-					close(childFinished)
-					return query, nil
-				}),
-			}, nil
-		}
-		return Roles{
-			Planner: instantAsker(),
-			Executor: askerFunc(func(ctx context.Context, _ string) (string, error) {
-				<-childFinished
-				close(execStarted)
-				<-ctx.Done()
-				return "", ctx.Err()
-			}),
-			Verifier: instantAsker(),
-		}, nil
-	})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run() error = %v, want context.Canceled", err)
-	}
-
-	var childAsks []string
-	got, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore()}, func(task Task) (Roles, error) {
-		if task.ID != child.ID {
-			return instantRoles(), nil
-		}
-		return Roles{
-			Planner: askerFunc(func(_ context.Context, query string) (string, error) {
-				childAsks = append(childAsks, "planner:"+query)
-				return query, nil
-			}),
-			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
-				childAsks = append(childAsks, "executor:"+query)
-				return query, nil
-			}),
-			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
-				childAsks = append(childAsks, "verifier:"+query)
-				return query, nil
-			}),
-		}, nil
-	})
-	if err != nil {
-		t.Fatalf("resume Run() error = %v", err)
-	}
-	if len(childAsks) != 0 {
-		t.Fatalf("child replayed finished roles: %v", childAsks)
-	}
-	want := "in"
-	if got != want {
-		t.Fatalf("resume Run() = %q, want %q", got, want)
+	} else if !ok {
+		t.Fatal("activation checkpoint missing after completion")
 	}
 }
 
 func TestGraphRunResumesInProgressReact(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
-	graph := newGraph()
+	graph := New()
+	stores := Stores{Memory: ctxgraph.NewStore()}
 	task := graph.AddTask()
 	dir := t.TempDir()
 	progress, err := NewDirProgressStore(dir + "/task")
@@ -973,7 +383,7 @@ func TestGraphRunResumesInProgressReact(t *testing.T) {
 		}}}, nil
 	})
 	assemble := Assemble(
-		Stores{Memory: ctxgraph.NewStore()},
+		stores,
 		provider,
 		rolePromptAgents(),
 		[]agenttool.Tool{&blockingTool{started: started}},
@@ -987,14 +397,14 @@ func TestGraphRunResumesInProgressReact(t *testing.T) {
 		<-started
 		cancel()
 	}()
-	if _, err := graph.Run(ctx, task.ID, "in", Stores{Memory: ctxgraph.NewStore()}, assemble); !errors.Is(err, context.Canceled) {
+	if _, err := graph.Run(ctx, task.ID, "in", stores, assemble); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
 
 	mu.Lock()
 	resuming = true
 	mu.Unlock()
-	got, err := graph.Run(context.Background(), task.ID, "in", Stores{Memory: ctxgraph.NewStore()}, assemble)
+	got, err := graph.Run(context.Background(), task.ID, "in", stores, assemble)
 	if err != nil {
 		t.Fatalf("resume Run() error = %v", err)
 	}
@@ -1003,65 +413,6 @@ func TestGraphRunResumesInProgressReact(t *testing.T) {
 	}
 	if got != "verified" {
 		t.Fatalf("resume Run() = %q, want verified", got)
-	}
-}
-
-func TestGraphRunStartsSpawnAfterRoleAsk(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
-
-	execStarted := make(chan struct{})
-	execRelease := make(chan struct{})
-	childStarted := make(chan struct{})
-
-	assemble := func(task Task) (Roles, error) {
-		if task.ID == root.ID {
-			return Roles{
-				Planner:  instantAsker(),
-				Executor: gatedAsker(execStarted, execRelease),
-				Verifier: instantAsker(),
-			}, nil
-		}
-		if task.ID == child.ID {
-			return Roles{
-				Planner:  gatedAsker(childStarted, nil),
-				Executor: instantAsker(),
-				Verifier: instantAsker(),
-			}, nil
-		}
-		return instantRoles(), nil
-	}
-
-	done := runAsync(t, graph, assemble, root.ID)
-	waitChan(t, execStarted)
-	assertNotClosed(t, childStarted)
-	close(execRelease)
-	waitChan(t, childStarted)
-	if err := waitErr(t, done); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-}
-
-func TestGraphRunRecordsDoneOutcomeOnSuccess(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
-	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore()}, recordingAssemble(nil)); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	for _, id := range []string{root.ID, child.ID} {
-		task, ok := graph.Task(id)
-		if !ok {
-			t.Fatalf("task %s missing", id)
-		}
-		if task.Outcome != OutcomeDone {
-			t.Fatalf("%s outcome = %q, want %s", id, task.Outcome, OutcomeDone)
-		}
 	}
 }
 
@@ -1074,7 +425,7 @@ func TestGraphRunCompletesOnlyAfterReportSucceeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "report"}},
+		Tasks: []PendingTask{{Info: "report"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1113,7 +464,7 @@ func TestGraphRunCompletesOnlyAfterReportSucceeds(t *testing.T) {
 	if current, _ := reopened.Task(task.ID); current.Outcome != OutcomeActive {
 		t.Fatalf("persisted outcome after failed report = %q, want active", current.Outcome)
 	}
-	if _, ok, err := progress.Load(task.ID); err != nil || !ok {
+	if _, ok, err := progress.Load(task.Env.ID); err != nil || !ok {
 		t.Fatalf("progress after failed report = (%v, %v), want retained", ok, err)
 	}
 
@@ -1127,67 +478,17 @@ func TestGraphRunCompletesOnlyAfterReportSucceeds(t *testing.T) {
 	if current, _ := graph.Task(task.ID); current.Outcome != OutcomeDone {
 		t.Fatalf("outcome after report = %q, want done", current.Outcome)
 	}
-	if _, ok, err := progress.Load(task.ID); err != nil || ok {
-		t.Fatalf("progress after completion = (%v, %v), want removed", ok, err)
-	}
-}
-
-func TestGraphRunKeepsActiveWhenCandidateReportFails(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
-	progress, err := NewDirProgressStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	graph.SetProgressStore(progress)
-	store := ctxgraph.NewStore()
-	if err := store.Save(ManagerEnvID, ctxgraph.Graph{
-		Subgraphs: []ctxgraph.Subgraph{{ID: "conflict"}},
-		Nodes: []ctxgraph.Node{{
-			ID:          "task-report-" + child.ID,
-			Statement:   "conflict",
-			SubgraphIDs: []string{"conflict"},
-		}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	reported := false
-
-	_, err = graph.RunWithReport(
-		context.Background(), root.ID, "in", Stores{Memory: store}, recordingAssemble(nil),
-		func(Task, string, error) error {
-			reported = true
-			return nil
-		},
-	)
-	if err == nil {
-		t.Fatal("RunWithReport() error = nil, want joined report failure")
-	}
-	if !errors.Is(err, errTaskReportProjection) {
-		t.Fatalf("RunWithReport() error = %v, want task report projection failure", err)
-	}
-	if !reported {
-		t.Fatal("root report was not submitted")
-	}
-	for _, taskID := range []string{root.ID, child.ID} {
-		if task, _ := graph.Task(taskID); task.Outcome != OutcomeActive {
-			t.Fatalf("%s outcome = %q, want active", taskID, task.Outcome)
-		}
-	}
-	if _, ok, err := progress.Load(root.ID); err != nil || !ok {
-		t.Fatalf("root progress after failed joined report = (%v, %v), want retained", ok, err)
+	if _, ok, err := progress.Load(task.Env.ID); err != nil || !ok {
+		t.Fatalf("activation checkpoint after completion = (%v, %v), want retained", ok, err)
 	}
 }
 
 func TestGraphRunRecordsCanceledOutcome(t *testing.T) {
 	t.Parallel()
 
-	graph := newGraph()
+	graph := New()
 	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
+	child := graph.AddTask()
 	started := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1217,17 +518,17 @@ func TestGraphRunRecordsCanceledOutcome(t *testing.T) {
 		t.Fatalf("root outcome = %+v, want canceled", got)
 	}
 	still, ok := graph.Task(child.ID)
-	if !ok || still.Outcome != OutcomeCanceled {
-		t.Fatalf("child outcome = %+v, want canceled", still)
+	if !ok || still.Outcome != OutcomeActive {
+		t.Fatalf("unrelated task outcome = %+v, want active", still)
 	}
 }
 
 func TestGraphRunRecordsFailedOutcome(t *testing.T) {
 	t.Parallel()
 
-	graph := newGraph()
+	graph := New()
 	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
+	child := graph.AddTask()
 	boom := errors.New("planner boom")
 	_, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore()}, func(Task) (Roles, error) {
 		return Roles{
@@ -1246,379 +547,17 @@ func TestGraphRunRecordsFailedOutcome(t *testing.T) {
 		t.Fatalf("root outcome = %+v, want failed", got)
 	}
 	got, ok = graph.Task(child.ID)
-	if !ok || got.Outcome != OutcomeFailed {
-		t.Fatalf("child outcome = %+v, want failed", got)
-	}
-}
-
-func TestGraphRunSpawnPassesAskOutputToChild(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
-
-	assemble := func(task Task) (Roles, error) {
-		if task.ID == root.ID {
-			return Roles{
-				Planner: askerFunc(func(_ context.Context, query string) (string, error) {
-					return "plan-out", nil
-				}),
-				Executor: instantAsker(),
-				Verifier: instantAsker(),
-			}, nil
-		}
-		if task.ID == child.ID {
-			return Roles{
-				Planner: askerFunc(func(_ context.Context, query string) (string, error) {
-					if query != "plan-out" {
-						return "", fmt.Errorf("child planner query = %q, want plan-out", query)
-					}
-					return query, nil
-				}),
-				Executor: instantAsker(),
-				Verifier: instantAsker(),
-			}, nil
-		}
-		return instantRoles(), nil
-	}
-
-	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore()}, assemble); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-}
-
-func TestGraphRunSpawnPassesInfoAndAskOutputToChild(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
-	setTaskInfo(t, graph, child.ID, "write the report")
-
-	assemble := func(task Task) (Roles, error) {
-		if task.ID == root.ID {
-			return Roles{
-				Planner: askerFunc(func(_ context.Context, query string) (string, error) {
-					return "plan-out", nil
-				}),
-				Executor: instantAsker(),
-				Verifier: instantAsker(),
-			}, nil
-		}
-		if task.ID == child.ID {
-			return Roles{
-				Planner: askerFunc(func(_ context.Context, query string) (string, error) {
-					want := "write the report\n\nplan-out"
-					if query != want {
-						return "", fmt.Errorf("child planner query = %q, want %q", query, want)
-					}
-					return query, nil
-				}),
-				Executor: instantAsker(),
-				Verifier: instantAsker(),
-			}, nil
-		}
-		return instantRoles(), nil
-	}
-
-	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore()}, assemble); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-}
-
-func TestGraphRunJoinDoesNotInjectFullChildOutputIntoPrompt(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
-
-	assemble := func(task Task) (Roles, error) {
-		if task.ID == child.ID {
-			return Roles{
-				Planner:  instantAsker(),
-				Executor: instantAsker(),
-				Verifier: askerFunc(func(_ context.Context, _ string) (string, error) {
-					return "from-child", nil
-				}),
-			}, nil
-		}
-		return Roles{
-			Planner:  instantAsker(),
-			Executor: instantAsker(),
-			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
-				want := "in"
-				if query != want {
-					return "", fmt.Errorf("verifier query = %q, want %q", query, want)
-				}
-				return "verified", nil
-			}),
-		}, nil
-	}
-
-	got, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore()}, assemble)
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if got != "verified" {
-		t.Fatalf("Run() = %q, want verified", got)
-	}
-}
-
-func TestGraphRunProjectsFailedCandidateReportsOnlyToManager(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	failed := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
-	canceled := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
-	store := ctxgraph.NewStore()
-	boom := errors.New("child planner boom")
-
-	_, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: store}, func(task Task) (Roles, error) {
-		if task.ID != failed.ID {
-			return instantRoles(), nil
-		}
-		roles := instantRoles()
-		roles.Planner = askerFunc(func(context.Context, string) (string, error) {
-			return "", boom
-		})
-		return roles, nil
-	})
-	if !errors.Is(err, boom) {
-		t.Fatalf("Run() error = %v, want %v", err, boom)
-	}
-	nodes := store.Load(ManagerEnvID).NodesInSubgraphs([]string{ManagerMemorySubgraphID})
-	for _, child := range []Task{failed, canceled} {
-		found := false
-		for _, node := range nodes {
-			if strings.Contains(node.Statement, child.ID) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("manager nodes = %#v, want report for child %s", nodes, child.ID)
-		}
-	}
-	if nodes := store.Load(root.Env.ID).NodesInSubgraphs([]string{TaskPackageSubgraph(root.ID).ID}); len(nodes) != 0 {
-		t.Fatalf("candidate reports leaked into target startup package: %#v", nodes)
-	}
-}
-
-func TestGraphRunReturnsAllJoinedTaskErrors(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	first := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
-	second := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
-	firstErr := errors.New("first child failed")
-	secondErr := errors.New("second child failed")
-	errs := map[string]error{first.ID: firstErr, second.ID: secondErr}
-	started := make(chan struct{}, 2)
-	release := make(chan struct{})
-	done := make(chan error, 1)
-
-	go func() {
-		_, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: ctxgraph.NewStore()}, func(task Task) (Roles, error) {
-			childErr, ok := errs[task.ID]
-			if !ok {
-				return instantRoles(), nil
-			}
-			roles := instantRoles()
-			roles.Planner = askerFunc(func(context.Context, string) (string, error) {
-				started <- struct{}{}
-				<-release
-				return "", childErr
-			})
-			return roles, nil
-		})
-		done <- err
-	}()
-	for range 2 {
-		select {
-		case <-started:
-		case <-time.After(time.Second):
-			t.Fatal("children did not start")
-		}
-	}
-	close(release)
-	err := <-done
-	for _, want := range []error{firstErr, secondErr} {
-		if !errors.Is(err, want) {
-			t.Fatalf("Run() error = %v, want %v", err, want)
-		}
-	}
-}
-
-func TestGraphRunChildFailureCancelsUnreachableSpawn(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
-	_ = mustSpawn(t, graph, child.Verifier.ID, root.Executor.ID)
-	boom := errors.New("child planner boom")
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-	defer cancel()
-
-	_, err := graph.Run(ctx, root.ID, "in", Stores{Memory: ctxgraph.NewStore()}, func(task Task) (Roles, error) {
-		if task.ID != child.ID {
-			return instantRoles(), nil
-		}
-		roles := instantRoles()
-		roles.Planner = askerFunc(func(context.Context, string) (string, error) {
-			return "", boom
-		})
-		return roles, nil
-	})
-	if !errors.Is(err, boom) {
-		t.Fatalf("Run() error = %v, want %v", err, boom)
-	}
-}
-
-func TestGraphRunSpawnedChildRunsBesideLaterRole(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
-
-	execStarted := make(chan struct{})
-	execRelease := make(chan struct{})
-	childStarted := make(chan struct{})
-
-	assemble := func(task Task) (Roles, error) {
-		if task.ID == root.ID {
-			return Roles{
-				Planner:  instantAsker(),
-				Executor: gatedAsker(execStarted, execRelease),
-				Verifier: instantAsker(),
-			}, nil
-		}
-		if task.ID == child.ID {
-			return Roles{
-				Planner:  gatedAsker(childStarted, nil),
-				Executor: instantAsker(),
-				Verifier: instantAsker(),
-			}, nil
-		}
-		return instantRoles(), nil
-	}
-
-	done := runAsync(t, graph, assemble, root.ID)
-	waitChan(t, execStarted)
-	waitChan(t, childStarted)
-	close(execRelease)
-	if err := waitErr(t, done); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-}
-
-func TestGraphSpawnRejectedWhileExecuting(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	started := make(chan struct{})
-	release := make(chan struct{})
-	assemble := func(Task) (Roles, error) {
-		return Roles{
-			Planner:  gatedAsker(started, release),
-			Executor: instantAsker(),
-			Verifier: instantAsker(),
-		}, nil
-	}
-
-	done := runAsync(t, graph, assemble, root.ID)
-	waitChan(t, started)
-	_, err := graph.Spawn(root.Executor.ID, root.Verifier.ID)
-	if !errors.Is(err, ErrGraphBusy) {
-		close(release)
-		t.Fatalf("Spawn() while running error = %v, want %v", err, ErrGraphBusy)
-	}
-	close(release)
-	if err := waitErr(t, done); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-}
-
-func TestReplacePendingAddsFutureSpawnWhileExecuting(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "root"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	root := snap.Tasks[0]
-	plannerStarted := make(chan struct{})
-	plannerRelease := make(chan struct{})
-	childStarted := make(chan struct{})
-	var rootVerifierInput string
-	var inputMu sync.Mutex
-
-	done := runAsync(t, graph, func(task Task) (Roles, error) {
-		if task.ID != root.ID {
-			return Roles{
-				Planner:  gatedAsker(childStarted, nil),
-				Executor: instantAsker(),
-				Verifier: instantAsker(),
-			}, nil
-		}
-		return Roles{
-			Planner:  gatedAsker(plannerStarted, plannerRelease),
-			Executor: instantAsker(),
-			Verifier: askerFunc(func(_ context.Context, input string) (string, error) {
-				inputMu.Lock()
-				rootVerifierInput = input
-				inputMu.Unlock()
-				return input, nil
-			}),
-		}, nil
-	}, root.ID)
-	waitChan(t, plannerStarted)
-
-	changed, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "root"}},
-		Spawns: []PendingSpawn{{
-			From: root.Executor.ID,
-			Join: root.Verifier.ID,
-			Info: "late child",
-		}},
-	})
-	if err != nil {
-		close(plannerRelease)
-		t.Fatalf("ReplacePending() while planner runs: %v", err)
-	}
-	if len(changed.Tasks) != 2 {
-		close(plannerRelease)
-		t.Fatalf("tasks = %d, want root and future child", len(changed.Tasks))
-	}
-
-	close(plannerRelease)
-	waitChan(t, childStarted)
-	if err := waitErr(t, done); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	inputMu.Lock()
-	gotInput := rootVerifierInput
-	inputMu.Unlock()
-	if strings.Contains(gotInput, "from-child") || strings.Contains(gotInput, "[join] 子任务") {
-		t.Fatalf("root verifier input leaked dynamically joined child output: %q", gotInput)
+	if !ok || got.Outcome != OutcomeActive {
+		t.Fatalf("unrelated task outcome = %+v, want active", got)
 	}
 }
 
 func TestReplacePendingRejectsStartedNodeChangeWhileExecuting(t *testing.T) {
 	t.Parallel()
 
-	graph := newGraph()
+	graph := New()
 	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "root"}},
+		Tasks: []PendingTask{{Info: "root"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1637,12 +576,8 @@ func TestReplacePendingRejectsStartedNodeChangeWhileExecuting(t *testing.T) {
 	before := graph.Snapshot()
 
 	_, err = graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "root"}},
-		Spawns: []PendingSpawn{{
-			From: root.Planner.ID,
-			Join: root.Executor.ID,
-			Info: "too late",
-		}},
+		Tasks: []PendingTask{{ID: root.ID, Info: "root"}, {ID: "late", Info: "late source"}},
+		Edges: []Edge{{From: "late:1:verifier", To: root.Planner.ID}},
 	})
 	if !errors.Is(err, ErrGraphBusy) {
 		close(plannerRelease)
@@ -1654,7 +589,7 @@ func TestReplacePendingRejectsStartedNodeChangeWhileExecuting(t *testing.T) {
 	}
 
 	_, err = graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "changed after start"}},
+		Tasks: []PendingTask{{ID: root.ID, Info: "changed after start"}},
 	})
 	if !errors.Is(err, ErrGraphBusy) {
 		close(plannerRelease)
@@ -1671,174 +606,11 @@ func TestReplacePendingRejectsStartedNodeChangeWhileExecuting(t *testing.T) {
 	}
 }
 
-func TestReplacePendingRemovesFutureSpawnWhileExecuting(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "root"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	root := snap.Tasks[0]
-	snap, err = graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "root"}},
-		Spawns: []PendingSpawn{{
-			From: root.Executor.ID,
-			Join: root.Verifier.ID,
-			Info: "remove me",
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	childID := snap.Tasks[1].ID
-	plannerStarted := make(chan struct{})
-	plannerRelease := make(chan struct{})
-	childStarted := make(chan struct{})
-	done := runAsync(t, graph, func(task Task) (Roles, error) {
-		if task.ID == childID {
-			return Roles{
-				Planner:  gatedAsker(childStarted, nil),
-				Executor: instantAsker(),
-				Verifier: instantAsker(),
-			}, nil
-		}
-		return Roles{
-			Planner:  gatedAsker(plannerStarted, plannerRelease),
-			Executor: instantAsker(),
-			Verifier: instantAsker(),
-		}, nil
-	}, root.ID)
-	waitChan(t, plannerStarted)
-
-	changed, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "root"}},
-	})
-	if err != nil {
-		close(plannerRelease)
-		t.Fatalf("ReplacePending() remove future child: %v", err)
-	}
-	if len(changed.Tasks) != 1 {
-		close(plannerRelease)
-		t.Fatalf("tasks = %d, want only root", len(changed.Tasks))
-	}
-
-	close(plannerRelease)
-	if err := waitErr(t, done); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	assertNotClosed(t, childStarted)
-}
-
-func TestReplacePendingQueuesNewRootWhileExecuting(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "running"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	root := snap.Tasks[0]
-	plannerStarted := make(chan struct{})
-	plannerRelease := make(chan struct{})
-	done := runAsync(t, graph, func(Task) (Roles, error) {
-		return Roles{
-			Planner:  gatedAsker(plannerStarted, plannerRelease),
-			Executor: instantAsker(),
-			Verifier: instantAsker(),
-		}, nil
-	}, root.ID)
-	waitChan(t, plannerStarted)
-
-	changed, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "running"}, {Info: "queued"}},
-	})
-	if err != nil {
-		close(plannerRelease)
-		t.Fatalf("ReplacePending() queue root: %v", err)
-	}
-	if len(changed.Tasks) != 2 || changed.Tasks[1].Info != "queued" {
-		close(plannerRelease)
-		t.Fatalf("tasks = %#v, want queued second root", changed.Tasks)
-	}
-
-	close(plannerRelease)
-	if err := waitErr(t, done); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	queued, ok := graph.Task(changed.Tasks[1].ID)
-	if !ok || queued.Outcome != OutcomeActive {
-		t.Fatalf("queued task = %#v, %v; want active", queued, ok)
-	}
-}
-
-func TestGraphUnspawnRejectedWhileExecuting(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
-	started := make(chan struct{})
-	release := make(chan struct{})
-	assemble := func(Task) (Roles, error) {
-		return Roles{
-			Planner:  gatedAsker(started, release),
-			Executor: instantAsker(),
-			Verifier: instantAsker(),
-		}, nil
-	}
-
-	done := runAsync(t, graph, assemble, root.ID)
-	waitChan(t, started)
-	_, err := graph.Unspawn(child.ID)
-	if !errors.Is(err, ErrGraphBusy) {
-		close(release)
-		t.Fatalf("Unspawn() while running error = %v, want %v", err, ErrGraphBusy)
-	}
-	close(release)
-	if err := waitErr(t, done); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-}
-
-func TestGraphRunRejectedWhileExecuting(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	started := make(chan struct{})
-	release := make(chan struct{})
-	assemble := func(Task) (Roles, error) {
-		return Roles{
-			Planner:  gatedAsker(started, release),
-			Executor: instantAsker(),
-			Verifier: instantAsker(),
-		}, nil
-	}
-
-	done := runAsync(t, graph, assemble, root.ID)
-	waitChan(t, started)
-	_, err := graph.Run(context.Background(), root.ID, "again", Stores{Memory: ctxgraph.NewStore()}, assemble)
-	if !errors.Is(err, ErrGraphBusy) {
-		close(release)
-		t.Fatalf("Run() while running error = %v, want %v", err, ErrGraphBusy)
-	}
-	close(release)
-	if err := waitErr(t, done); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-}
-
 func TestGraphRunSameTaskStageWaitsForPreviousComplete(t *testing.T) {
 	t.Parallel()
 
-	graph := newGraph()
+	graph := New()
 	root := graph.AddTask()
-	mustSpawn(t, graph, root.Planner.ID, root.Executor.ID)
 
 	plannerStarted := make(chan struct{})
 	plannerRelease := make(chan struct{})
@@ -1865,221 +637,8 @@ func TestGraphRunSameTaskStageWaitsForPreviousComplete(t *testing.T) {
 	}
 }
 
-func TestGraphRunCompleteWaitsForIncomingJoin(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	_ = mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
-
-	childVStarted := make(chan struct{})
-	childVRelease := make(chan struct{})
-	rootVStarted := make(chan struct{})
-
-	assemble := func(task Task) (Roles, error) {
-		if task.ID == root.ID {
-			return Roles{
-				Planner:  instantAsker(),
-				Executor: instantAsker(),
-				Verifier: gatedAsker(rootVStarted, nil),
-			}, nil
-		}
-		return Roles{
-			Planner:  instantAsker(),
-			Executor: instantAsker(),
-			Verifier: gatedAsker(childVStarted, childVRelease),
-		}, nil
-	}
-
-	done := runAsync(t, graph, assemble, root.ID)
-	waitChan(t, childVStarted)
-	assertNotClosed(t, rootVStarted)
-	assertNotDone(t, done)
-	close(childVRelease)
-	waitChan(t, rootVStarted)
-	if err := waitErr(t, done); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-}
-
-func TestGraphRunNestedSpawnStartsWithParentRole(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
-	_ = mustSpawn(t, graph, child.Executor.ID, root.Verifier.ID)
-
-	childEStarted := make(chan struct{})
-	childERelease := make(chan struct{})
-	grandStarted := make(chan struct{})
-
-	assemble := func(task Task) (Roles, error) {
-		switch task.ID {
-		case child.ID:
-			return Roles{
-				Planner:  instantAsker(),
-				Executor: gatedAsker(childEStarted, childERelease),
-				Verifier: instantAsker(),
-			}, nil
-		default:
-			if task.SpawnedFrom == child.ID {
-				return Roles{
-					Planner:  gatedAsker(grandStarted, nil),
-					Executor: instantAsker(),
-					Verifier: instantAsker(),
-				}, nil
-			}
-			return instantRoles(), nil
-		}
-	}
-
-	done := runAsync(t, graph, assemble, root.ID)
-	waitChan(t, childEStarted)
-	assertNotClosed(t, grandStarted)
-	close(childERelease)
-	waitChan(t, grandStarted)
-	if err := waitErr(t, done); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-}
-
-func TestGraphRunIsolatesToolsByTaskEnv(t *testing.T) {
-	t.Parallel()
-
-	graph := newGraph()
-	store := ctxgraph.NewStore()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
-	store.Save(root.Env.ID, ctxgraph.Graph{
-		Nodes: []ctxgraph.Node{{
-			ID:          "n1",
-			Kind:        ctxgraph.NodeKindFact,
-			Statement:   "shared",
-			Status:      ctxgraph.NodeStatusAccepted,
-			SubgraphIDs: []string{"sg"},
-		}},
-	})
-
-	assemble := func(task Task) (Roles, error) {
-		tools := agenttool.Bind(store, task.Env.ID, agenttool.MemoryTools(nil, nil))
-		add := mustTool(t, tools, "memory_add_to_subgraph")
-		return Roles{
-			Planner: askerFunc(func(ctx context.Context, query string) (string, error) {
-				args, err := json.Marshal(map[string]any{
-					"subgraph_id": "from-" + task.ID,
-					"node_ids":    []string{"n1"},
-				})
-				if err != nil {
-					return "", err
-				}
-				_, err = add.Execute(ctx, agenttool.Call{
-					ID:        "call-1",
-					Name:      "memory_add_to_subgraph",
-					Arguments: args,
-				})
-				return query, err
-			}),
-			Executor: askerFunc(func(_ context.Context, query string) (string, error) {
-				return query, nil
-			}),
-			Verifier: askerFunc(func(_ context.Context, query string) (string, error) {
-				return query, nil
-			}),
-		}, nil
-	}
-
-	if _, err := graph.Run(context.Background(), root.ID, "in", Stores{Memory: store}, assemble); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if nodes := store.Load(root.Env.ID).NodesInSubgraphs([]string{"from-" + child.ID}); len(nodes) != 1 || nodes[0].ID != "n1" {
-		t.Fatalf("join dropped child subgraph: %#v", nodes)
-	}
-	if nodes := store.Load(child.Env.ID).NodesInSubgraphs([]string{"from-" + child.ID}); len(nodes) != 1 || nodes[0].ID != "n1" {
-		t.Fatal("child env missing its own write")
-	}
-	if nodes := store.Load(root.Env.ID).NodesInSubgraphs([]string{"from-" + root.ID}); len(nodes) != 1 || nodes[0].ID != "n1" {
-		t.Fatal("parent env missing its own write")
-	}
-}
-
-func TestGraphRunAssembledReActIsolatesMemoryByEnv(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
-	graph := newGraph()
-	store := ctxgraph.NewStore()
-	root := graph.AddTask()
-	child := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
-	coordTools := graph.HelpTools(nil)
-	store.Save(root.Env.ID, seededMemoryGraph())
-	provider := stubProvider(func(ctx context.Context, request agent.Request) (agent.AssistantMessage, error) {
-		input := firstUserContent(request.Messages)
-		if strings.Contains(request.SystemPrompt, "核验 Agent") && strings.Contains(input, "[join pending]") {
-			if !hasToolResult(request.Messages) {
-				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-					ID: "discard-child", Name: "join",
-					Arguments: json.RawMessage(`{"action":"discard","session_id":"join:incoming:task-1:verifier","source_ids":["task-2"],"reason":"memory isolation test does not adopt files"}`),
-				}}}, nil
-			}
-			if strings.Contains(lastToolContent(request.Messages), `"discarded"`) {
-				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-					ID: "finish-child-join", Name: "join",
-					Arguments: json.RawMessage(`{"action":"finish","session_id":"join:incoming:task-1:verifier","reason":"candidate disposition recorded"}`),
-				}}}, nil
-			}
-			return agent.AssistantMessage{Content: "verified"}, nil
-		}
-		return reactMemoryProvider()(ctx, request)
-	})
-	agents := envMemoryAgents()
-	agents.Verifier.Tools = append(agents.Verifier.Tools, "join")
-
-	got, err := graph.Run(
-		context.Background(),
-		root.ID,
-		"in",
-		Stores{Memory: store},
-		Assemble(
-			Stores{Memory: store},
-			provider,
-			agents,
-			nil,
-			0,
-			nil,
-			agent.FileOverlay{NamedTools: coordTools},
-		),
-	)
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if got != "verified" {
-		t.Fatalf("Run() = %q, want verified", got)
-	}
-
-	if nodes := ctxgraph.Clone("check").Graph.NodesInSubgraphs([]string{"mark-in", "mark-executed"}); len(nodes) != 0 {
-		t.Fatalf("react write leaked to global graph: %#v", nodes)
-	}
-	if nodes := store.Load(root.Env.ID).NodesInSubgraphs([]string{"mark-in"}); len(nodes) != 1 || nodes[0].ID != "n1" {
-		t.Fatal("parent env missing planner write")
-	}
-	if nodes := store.Load(root.Env.ID).NodesInSubgraphs([]string{"mark-executed"}); len(nodes) != 1 || nodes[0].ID != "n1" {
-		t.Fatalf("join dropped child subgraph: %#v", nodes)
-	}
-	if nodes := store.Load(child.Env.ID).NodesInSubgraphs([]string{"mark-executed"}); len(nodes) != 1 || nodes[0].ID != "n1" {
-		t.Fatal("child env missing planner write")
-	}
-	if nodes := store.Load(child.Env.ID).NodesInSubgraphs([]string{"mark-in"}); len(nodes) != 1 || nodes[0].ID != "n1" {
-		t.Fatal("child env did not fork parent planner write")
-	}
-}
-
 func TestGraphRunAssembledReActSharesMemoryWithinTask(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
-	graph := newGraph()
+	graph := New()
 	store := ctxgraph.NewStore()
 	task := graph.AddTask()
 	store.Save(task.Env.ID, seededMemoryGraph())
@@ -2150,9 +709,6 @@ func TestGraphRunAssembledReActSharesMemoryWithinTask(t *testing.T) {
 }
 
 func TestAssembleBindsLeakingMemoryToolsToTaskEnv(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
 	store := ctxgraph.NewStore()
 	store.Save("env-1", ctxgraph.Graph{
 		Subgraphs: []ctxgraph.Subgraph{{ID: "bound"}},
@@ -2180,10 +736,11 @@ func TestAssembleBindsLeakingMemoryToolsToTaskEnv(t *testing.T) {
 		return agent.AssistantMessage{Content: "done"}, nil
 	})
 
+	var original ctxgraph.Copy
 	extra := agenttool.MemoryTools(func() ctxgraph.Copy {
-		return ctxgraph.Clone("leak")
+		return original
 	}, func(copy ctxgraph.Copy) error {
-		ctxgraph.Update(copy)
+		original = copy
 		return nil
 	})
 	roles, err := Assemble(
@@ -2205,8 +762,8 @@ func TestAssembleBindsLeakingMemoryToolsToTaskEnv(t *testing.T) {
 	if got != "done" {
 		t.Fatalf("Ask() = %q, want done", got)
 	}
-	if nodes := ctxgraph.Clone("check").Graph.NodesInSubgraphs([]string{"bound"}); len(nodes) != 0 {
-		t.Fatalf("assemble write leaked to global graph: %#v", nodes)
+	if nodes := original.Graph.NodesInSubgraphs([]string{"bound"}); len(nodes) != 0 {
+		t.Fatalf("assemble write leaked to the original memory callbacks: %#v", nodes)
 	}
 	if nodes := store.Load("env-1").NodesInSubgraphs([]string{"bound"}); len(nodes) != 1 || nodes[0].ID != "n1" {
 		t.Fatal("assemble write did not stay in task env")
@@ -2455,6 +1012,7 @@ func envMemoryAgents() agent.FileAgents {
 
 func seededMemoryGraph() ctxgraph.Graph {
 	return ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{{ID: "sg"}},
 		Nodes: []ctxgraph.Node{{
 			ID:          "n1",
 			Kind:        ctxgraph.NodeKindFact,
@@ -2510,12 +1068,12 @@ func mustTool(t *testing.T, tools []agenttool.Tool, name string) agenttool.Tool 
 	return nil
 }
 
-func TestReplacePendingRejectsRunPolicyChangeOnStartedRoot(t *testing.T) {
+func TestReplacePendingRejectsRunPolicyChangeOnStartedTask(t *testing.T) {
 	t.Parallel()
 
-	graph := newGraph()
+	graph := New()
 	snap, err := graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "root"}},
+		Tasks: []PendingTask{{Info: "root"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2534,7 +1092,7 @@ func TestReplacePendingRejectsRunPolicyChangeOnStartedRoot(t *testing.T) {
 	before := graph.Snapshot()
 
 	_, err = graph.ReplacePending(context.Background(), PendingSubgraph{
-		Roots: []PendingRoot{{Info: "root", RunPolicy: RunPolicyHeld}},
+		Tasks: []PendingTask{{Info: "root", RunPolicy: RunPolicyHeld}},
 	})
 	if !errors.Is(err, ErrGraphBusy) {
 		close(plannerRelease)

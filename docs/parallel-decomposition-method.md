@@ -2,19 +2,22 @@
 
 > 目标：把一个高层结果递归精化为可执行图，同时在“独立可验收”处停止。并行度由交付边界、依赖与写入面推导，不由文件数、步骤数或机器槽位推导。
 
+> 当前调度与输入协议见 [统一边与文件优先合入设计](unified-edge-design.md)。IPD 约束每项交付的契约、写入隔离和验收责任；它不定义 root、父子任务树或全局串行队列。为另一任务提供帮助只是一项用途，不形成特殊 task 类型。
+
 ## 1. 运行时事实
 
-| 事实 | 含义 |
+| 事实 | 含义与证据 |
 | --- | --- |
-| root 按出现顺序串行 | 把并行工作拆成多个 root 只会增加关键路径 |
-| 后 root 从前 root 的持久环境 fork | root 是继承链，不是并行兄弟；同一交付必须只有一个 owner |
-| helper 在 task 内并行并 join 回请求者 | task 内 helper 是唯一并行面；请求者是唯一 integration owner |
-| Planner 与 Verifier 的工作区一次性，Executor 的工作区形成 task 快照 | Planner 只保留计划，Verifier 只保留报告；每个结束 task 的文件状态独立归档，Manager 验收后只发布所选的一个快照 |
-| Planner、Executor、Verifier 都可请求 help，Manager 响应真实请求 | 三者只通过 `coordination_requestHelp` 提交建议；Planner 并行取得规划证据/候选，Executor 并行实现，Verifier 并行取证；Manager 校验无环来源后决定是否物化 |
-| join 候选默认只读，不自动应用 | 每个来源必须显式 apply 或 discard；finish 不等于验收通过 |
-| task 结束不自动改真实项目 | `done`、Verifier verdict 与发布是三件事；Manager 用协调工具选择一个终态快照，协调图持久记录发布意图与最终引用，失败按原 task 重试 |
+| 普通 task 按显式依赖运行 | 创建顺序不产生继承或等待；一个 task 的 held/运行状态不占住其他 task 的调度资格。[graph.go](../internal/coordination/graph.go)、[manager.go](../internal/manager/manager.go) |
+| 每个激活有独立环境和固定角色节点 | 多个消费者可读取同一不可变出口，后续写入不改变该出口。[run.go](../internal/coordination/run.go) |
+| task 可无合出边，也可持久保留 | 只等待实际消费的来源；持久 task 完成一轮后 idle，明确继续才创建下一激活。关闭或失败不按创建树传播。[graph_model_test.go](../internal/coordination/graph_model_test.go) |
+| 入口共同部分直接使用，差异才处理 | 收齐全部入边；先处理文件差异，再整理记忆差异；单入边不整理。[input.go](../internal/coordination/input.go) |
+| 文件差异候选只读，采纳显式进行 | `input` 支持 inspect/apply/discard/finish；finish 只结束文件阶段，运行时在记忆成功后提交 ready。[input_tool.go](../internal/coordination/input_tool.go) |
+| 三个角色都可请求 Help | Manager 用普通 tasks/edges 物化；暂停快照始终连到 resume，只有显式返回边才要求等待帮助结果。[help.go](../internal/coordination/help.go) |
+| Planner/Verifier 的临时实验不成为持久实现 | 入口文件选择与角色临时实验是不同阶段；不要把“丢弃实验”解释成丢弃全部依赖输入。[run.go](../internal/coordination/run.go) |
+| task 完成不自动发布 | Manager 选择已提交的 task 文件出口；发布不合并候选、不消费其他出口，也不要求全图空闲。[graph_tools.go](../internal/coordination/graph_tools.go) |
 
-代码事实分别位于 `internal/manager`、`internal/coordination`、`internal/vfs` 和 `internal/agent`。若运行机制改变，先更新本节，再改提示词。
+代码和测试链接用于定位行为，不表示所有平台与故障边界都已完成验收。
 
 ## 2. 语义精化与认知闭包
 
@@ -88,7 +91,7 @@
 
 对每个单元列文件区域、符号、状态、配置和生成物写入面。同 wave 的互补单元有交集时，只能选择：合并、排序，或先建立稳定契约/fixture/schema 作为前置接缝。不能用伪依赖掩盖写入冲突。
 
-Join 的采纳粒度是路径，不是符号。同一路径的互补候选先 `inspect/compare`，再由 integration owner 用正常 read/edit/write 人工合成；不得用 `replace` 覆盖已合入结果。人工吸收后带理由 discard 来源，再 finish 并运行组合门禁。
+`input apply` 的文件采纳粒度是路径。同一路径的互补候选先 `inspect/compare`，再由 integration owner 用正常 read/edit/write 人工合成；不得用 `replace` 覆盖已合入结果。人工吸收后带理由 discard 来源，再 `input finish`，等待运行时完成记忆阶段后运行组合门禁。
 
 ### P4 Frontier 与合流
 
@@ -97,7 +100,7 @@ Join 的采纳粒度是路径，不是符号。同一路径的互补候选先 `i
 - 同一 frontier 的互补单元须写入不冲突；合规 race 候选在隔离工作区可共享写入边界，并进入同一 concurrency group。
 - 共享前置只做一次，完成后立即 fan-out。
 - 只展开当前 frontier；未知后代由子任务自己的 Planner 继续精化。
-- 所有结果只在一个 integration owner 合流；合流后运行组合门禁。
+- 属于同一交付的结果汇入该交付唯一的 integration owner；合流后运行组合门禁。独立 task 有自己的交付，不要求汇回创建者。
 
 自然 helper 数就是当前 frontier 中通过分派门槛的单元数。没有自然并行面时写 `split: none`，并指出“一个交付物 / 一个共享状态 / 一个验收边界”中的实际原因；不需要逐轴证明，也不能用“任务小”代替边界。
 
@@ -114,7 +117,9 @@ Join 的采纳粒度是路径，不是符号。同一路径的互补候选先 `i
 
 ## 4. 角色 help 与 Planner / Executor 交接
 
-请求者始终是唯一综合与裁决 owner。Planner helper 只回答会改变 owner、跨边界契约或门禁的独立未知；Executor helper 交付可独立验收的实现；Verifier helper 只交付可重取的验收观察，不能修复基线或把 FAIL 变成 PASS。Manager 只从同一 task tree 中已有输出且不会形成 join cycle 的节点物化 helper；因此首个 root Planner 通常没有合法来源，而嵌套 Planner 可复用祖先输出，Verifier 可复用本 task 的 Planner/Executor 输出。没有合法来源时继续本角色工作，不新增边或伪造依赖。
+请求者负责自己交付的综合与裁决。Planner 的帮助任务回答会改变交付 owner、跨边界契约或门禁的独立未知；Executor 的帮助任务交付可独立验收的实现；Verifier 的帮助任务交付可重取的验收观察，不能通过临时修复把失败基线说成 PASS。Manager 从图中已提交的出口，或能够产生出口的当前激活节点，建立普通无环依赖，不检查“同一 task tree”。Help 的暂停输出也可成为来源。
+
+请求者需要帮助结果时，明确把所需出口连到本次 resume。独立工作只声明其输入，不自动补返回边。首次 Planner 也可以从自己的暂停快照发起 Help；不得引用已经过去却没有固定输出的执行点。
 
 Planner 只交付四段：
 
@@ -123,7 +128,7 @@ Planner 只交付四段：
 3. `集成与最终门禁`：合流动作及每个 evidence recipe 可证伪的契约。
 4. `未知项`：仍需 Executor 验证的假设、替代路径和未覆盖面。
 
-Executor 对当前 ready frontier 只提交一次 help 请求，不按 child 分批，不改写依赖。该请求只是编排建议，不直接修改协调图。Manager 可以拒绝未通过 I1/I2/I3 的单元，但不静默替 Planner 重新设计；所有 root/helper 改图都经 `coordination_orchestrate`。未物化部分由 Executor 按同一图完成。
+Executor 对当前 ready frontier 只提交一次 help 请求，不按帮助 task 分批，不改写依赖。该请求只是编排建议，不直接修改协调图。Manager 可以拒绝未通过 I1/I2/I3 的单元，但不静默替 Planner 重新设计；所有 task/edge 改图都经 `coordination_orchestrate`。未物化部分由 Executor 按同一图完成。
 
 ## 5. 按任务类型选门禁
 
@@ -138,9 +143,9 @@ Executor 对当前 ready frontier 只提交一次 help 请求，不按 child 分
 
 ## 6. 修复图
 
-每份 Verifier 报告至多触发一个 repair root，且只处理“可由工作区改动消除并已有复现证据”的缺陷，不预排后续修复。新报告给出新证据并改变修复目标时，才可追加下一 root。repair root 继承累计契约与已保留实现，不回退实现。
+每份 Verifier 报告至多触发一个 repair task，且只处理“可由工作区改动消除并已有复现证据”的缺陷，不预排后续修复。新报告给出新证据并改变修复目标时，才可追加下一 task。repair task 明确携带累计契约，并通过普通边消费所需的已保留出口；创建它本身不会继承其他 task。
 
-第一轮直接定位并修根因。只有同型缺陷再次出现且存在多个互斥解释时，repair Executor 才请求一个 hypothesis frontier；所有诊断结果 join 回该 Executor，由它裁决、实现并跑组合门禁。环境、权限、上游服务或 benchmark oracle 问题只记录复验条件，不创建工作区修复 root。
+第一轮直接定位并修根因。只有同型缺陷再次出现且存在多个互斥解释时，repair Executor 才请求一个 hypothesis frontier；所需诊断出口通过普通边进入该 Executor 的 resume 输入，由它裁决、实现并跑组合门禁。环境、权限、上游服务或 benchmark oracle 问题只记录复验条件，不创建工作区修复 task。
 
 ## 7. 短例
 
@@ -148,7 +153,7 @@ Executor 对当前 ready frontier 只提交一次 help 请求，不按 child 分
 - 还无法说明下层怎样算“正确”时，由当前 owner 继续精化；使用、失败和验收都已闭合后，复杂域才成为 helper 候选。
 - 多个方案只有在回答同一问题、使用同一 gate 且由一个 owner 最多采纳一个时才是 race。
 
-这些例子只说明判断方式；具体字段、race 和 join 行为仍以工具协议为准。
+这些例子只说明判断方式；具体字段、race 与 Input 行为仍以工具协议为准。
 
 ## 8. 验收指标
 
@@ -157,7 +162,7 @@ Executor 对当前 ready frontier 只提交一次 help 请求，不按 child 分
 - same-wave 互补写入交集 = 0。
 - DAG 环 = 0；ready frontier 误入/漏入 = 0。
 - helper 独立验收覆盖率 = 100%。
-- join 冲突率、重复劳动率、repair root 数、端到端时间和 token 与基线比较。
+- Input 文件冲突率、重复劳动率、repair task 数、端到端时间和 token 与基线比较。
 
 使用相同任务与环境做 A/B；一次只改一组提示规则。没有轨迹证据时，不把“计划更复杂”或“agent 更多”记为改进。
 

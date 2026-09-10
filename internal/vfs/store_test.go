@@ -121,7 +121,7 @@ func TestViewDeleteTombsBaseFile(t *testing.T) {
 	}
 }
 
-func TestStoreForkIsolatesChildWritesAndInheritsReads(t *testing.T) {
+func TestStoreEnvironmentIsolatesChildWritesAndInheritsReads(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -130,7 +130,7 @@ func TestStoreForkIsolatesChildWritesAndInheritsReads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	child := store.View("child")
 
 	gotBase, err := child.Read("hello.txt")
@@ -175,7 +175,7 @@ func TestStoreForkIsolatesChildWritesAndInheritsReads(t *testing.T) {
 	}
 }
 
-func TestStoreForkDoesNotOverwriteExistingChild(t *testing.T) {
+func TestStoreEnvironmentDoesNotOverwriteExistingChild(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -184,7 +184,7 @@ func TestStoreForkDoesNotOverwriteExistingChild(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	got, err := store.View("child").Read("kept.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +194,7 @@ func TestStoreForkDoesNotOverwriteExistingChild(t *testing.T) {
 	}
 }
 
-func TestStoreForkIsFrozenSnapshot(t *testing.T) {
+func TestStoreEnvironmentIsFrozenSnapshot(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -206,10 +206,10 @@ func TestStoreForkIsFrozenSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	child := store.View("child")
 
-	// Parent modifies state after fork.
+	// Parent modifies state after environment creation.
 	if err := parent.Write("parent-after.txt", []byte("after")); err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestStoreForkIsFrozenSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Child must see the snapshot at fork time.
+	// Child must see the snapshot at environment creation time.
 	gotInit, err := child.Read("initial.txt")
 	if err != nil {
 		t.Fatalf("child failed to read initial.txt: %v", err)
@@ -234,14 +234,14 @@ func TestStoreForkIsFrozenSnapshot(t *testing.T) {
 		t.Fatalf("child failed to read mod.txt: %v", err)
 	}
 	if string(gotMod) != "v1" {
-		t.Fatalf("child mod.txt = %q, want v1 (saw parent's post-fork modification)", gotMod)
+		t.Fatalf("child mod.txt = %q, want v1 (saw parent's post-environment creation modification)", gotMod)
 	}
 
 	if _, err := child.Read("parent-after.txt"); err == nil {
-		t.Fatal("child saw parent's post-fork file parent-after.txt")
+		t.Fatal("child saw parent's post-environment creation file parent-after.txt")
 	}
 	if _, err := child.Stat("parent-after.txt"); err == nil {
-		t.Fatal("child stat saw parent's post-fork file parent-after.txt")
+		t.Fatal("child stat saw parent's post-environment creation file parent-after.txt")
 	}
 
 	ents, err := child.List(".")
@@ -263,7 +263,7 @@ func TestStoreForkIsFrozenSnapshot(t *testing.T) {
 	}
 }
 
-func TestStoreForkNestedIsFrozenSnapshot(t *testing.T) {
+func TestStoreEnvironmentNestedIsFrozenSnapshot(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -272,16 +272,16 @@ func TestStoreForkNestedIsFrozenSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mustFork(t, store, "gp", "parent")
+	mustCreateEnvironment(t, store, "gp", "parent")
 	parent := store.View("parent")
 	if err := parent.Write("parent.txt", []byte("p1")); err != nil {
 		t.Fatal(err)
 	}
 
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	child := store.View("child")
 
-	// Post-fork mutations to gp and parent.
+	// Post-environment creation mutations to gp and parent.
 	if err := gp.Write("gp.txt", []byte("g2")); err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestStoreForkNestedIsFrozenSnapshot(t *testing.T) {
 	}
 }
 
-func TestApplyJoinSafeAppliesChildWriteAndKeepsParentWrite(t *testing.T) {
+func TestApplyInputSafeAppliesChildWriteAndKeepsParentWrite(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -329,14 +329,14 @@ func TestApplyJoinSafeAppliesChildWriteAndKeepsParentWrite(t *testing.T) {
 	if err := parent.Write("only-parent.txt", []byte("parent-only")); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	child := store.View("child")
 	if err := child.Write("only-child.txt", []byte("child-only")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := applySafeJoin(store, "child", "parent"); err != nil {
-		t.Fatalf("Merge: %v", err)
+	if err := applySafeInput(store, "child", "parent"); err != nil {
+		t.Fatalf("ApplyInput: %v", err)
 	}
 
 	gotChild, err := parent.Read("only-child.txt")
@@ -358,7 +358,7 @@ func TestApplyJoinSafeAppliesChildWriteAndKeepsParentWrite(t *testing.T) {
 	}
 }
 
-func TestApplyJoinSafeAppliesChildTombstone(t *testing.T) {
+func TestApplyInputSafeAppliesChildTombstone(t *testing.T) {
 	t.Parallel()
 
 	store, base := newTestStore(t)
@@ -366,7 +366,7 @@ func TestApplyJoinSafeAppliesChildTombstone(t *testing.T) {
 	if err := parent.Write("from-parent.txt", []byte("parent-blob")); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	child := store.View("child")
 	if err := child.Delete("hello.txt"); err != nil {
 		t.Fatal(err)
@@ -375,15 +375,15 @@ func TestApplyJoinSafeAppliesChildTombstone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := applySafeJoin(store, "child", "parent"); err != nil {
-		t.Fatalf("Merge: %v", err)
+	if err := applySafeInput(store, "child", "parent"); err != nil {
+		t.Fatalf("ApplyInput: %v", err)
 	}
 
 	if _, err := parent.Read("hello.txt"); err == nil {
-		t.Fatal("merged tombstone still exposed the base file")
+		t.Fatal("input tombstone still exposed the base file")
 	}
 	if _, err := parent.Read("from-parent.txt"); err == nil {
-		t.Fatal("merged tombstone still exposed the parent overlay file")
+		t.Fatal("input tombstone still exposed the parent overlay file")
 	}
 	host, err := os.ReadFile(filepath.Join(base, "hello.txt"))
 	if err != nil {
@@ -394,12 +394,12 @@ func TestApplyJoinSafeAppliesChildTombstone(t *testing.T) {
 	}
 }
 
-func TestApplyJoinSafeConflictsWhenBothSidesWrote(t *testing.T) {
+func TestApplyInputSafeConflictsWhenBothSidesWrote(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
 	parent := store.View("parent")
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := parent.Write("conflict.txt", []byte("ours")); err != nil {
 		t.Fatal(err)
 	}
@@ -414,9 +414,9 @@ func TestApplyJoinSafeConflictsWhenBothSidesWrote(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := applySafeJoin(store, "child", "parent")
+	err := applySafeInput(store, "child", "parent")
 	if err == nil {
-		t.Fatal("Merge succeeded, want conflict")
+		t.Fatal("ApplyInput succeeded, want conflict")
 	}
 	if !strings.Contains(err.Error(), "conflict.txt") {
 		t.Fatalf("conflict error = %v, want path conflict.txt", err)
@@ -430,7 +430,7 @@ func TestApplyJoinSafeConflictsWhenBothSidesWrote(t *testing.T) {
 		t.Fatalf("parent conflict.txt = %q, want ours", got)
 	}
 	if _, err := parent.Read("extra.txt"); err == nil {
-		t.Fatal("conflict Merge applied remaining child paths")
+		t.Fatal("conflicting ApplyInput applied remaining candidate paths")
 	}
 	keep, err := parent.Read("keep.txt")
 	if err != nil {
@@ -441,20 +441,20 @@ func TestApplyJoinSafeConflictsWhenBothSidesWrote(t *testing.T) {
 	}
 }
 
-func TestApplyJoinSafeReplayDoesNotError(t *testing.T) {
+func TestApplyInputSafeReplayDoesNotError(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := store.View("child").Write("from-child.txt", []byte("only-child")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := applySafeJoin(store, "child", "parent"); err != nil {
-		t.Fatalf("first Merge: %v", err)
+	if err := applySafeInput(store, "child", "parent"); err != nil {
+		t.Fatalf("first ApplyInput: %v", err)
 	}
-	if err := applySafeJoin(store, "child", "parent"); err != nil {
-		t.Fatalf("second Merge: %v", err)
+	if err := applySafeInput(store, "child", "parent"); err != nil {
+		t.Fatalf("second ApplyInput: %v", err)
 	}
 
 	got, err := store.View("parent").Read("from-child.txt")
@@ -466,7 +466,7 @@ func TestApplyJoinSafeReplayDoesNotError(t *testing.T) {
 	}
 }
 
-func TestApplyJoinSafeConflictsWhenGrandparentChangedAfterNestedFork(t *testing.T) {
+func TestApplyInputSafeConflictsWhenGrandparentChangedAfterNestedEnvironmentCreation(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -474,8 +474,8 @@ func TestApplyJoinSafeConflictsWhenGrandparentChangedAfterNestedFork(t *testing.
 	if err := gp.Write("shared.txt", []byte("A")); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "gp", "parent")
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "gp", "parent")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := gp.Write("shared.txt", []byte("B")); err != nil {
 		t.Fatal(err)
 	}
@@ -483,9 +483,9 @@ func TestApplyJoinSafeConflictsWhenGrandparentChangedAfterNestedFork(t *testing.
 		t.Fatal(err)
 	}
 
-	err := applySafeJoin(store, "child", "gp")
+	err := applySafeInput(store, "child", "gp")
 	if err == nil {
-		t.Fatal("Merge succeeded, want conflict")
+		t.Fatal("ApplyInput succeeded, want conflict")
 	}
 	if !strings.Contains(err.Error(), "shared.txt") {
 		t.Fatalf("conflict error = %v, want path shared.txt", err)
@@ -499,7 +499,7 @@ func TestApplyJoinSafeConflictsWhenGrandparentChangedAfterNestedFork(t *testing.
 	}
 }
 
-func TestApplyJoinSafeAppliesChildWriteUnderParentDirTombstone(t *testing.T) {
+func TestApplyInputSafeAppliesChildWriteUnderParentDirTombstone(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -507,13 +507,13 @@ func TestApplyJoinSafeAppliesChildWriteUnderParentDirTombstone(t *testing.T) {
 	if err := parent.Delete("dir"); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := store.View("child").Write("dir/new.txt", []byte("recreated")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := applySafeJoin(store, "child", "parent"); err != nil {
-		t.Fatalf("Merge: %v", err)
+	if err := applySafeInput(store, "child", "parent"); err != nil {
+		t.Fatalf("ApplyInput: %v", err)
 	}
 	got, err := parent.Read("dir/new.txt")
 	if err != nil {
@@ -538,7 +538,7 @@ func TestApplyJoinSafeAppliesChildWriteUnderParentDirTombstone(t *testing.T) {
 	}
 }
 
-func TestApplyJoinSafeRecreateDirKeepsMaskedHostDescendantsHidden(t *testing.T) {
+func TestApplyInputSafeRecreateDirKeepsMaskedHostDescendantsHidden(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -546,13 +546,13 @@ func TestApplyJoinSafeRecreateDirKeepsMaskedHostDescendantsHidden(t *testing.T) 
 	if err := parent.Delete("sub"); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := store.View("child").Write("sub/new.txt", []byte("recreated")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := applySafeJoin(store, "child", "parent"); err != nil {
-		t.Fatalf("Merge: %v", err)
+	if err := applySafeInput(store, "child", "parent"); err != nil {
+		t.Fatalf("ApplyInput: %v", err)
 	}
 	got, err := parent.Read("sub/new.txt")
 	if err != nil {
@@ -562,7 +562,7 @@ func TestApplyJoinSafeRecreateDirKeepsMaskedHostDescendantsHidden(t *testing.T) 
 		t.Fatalf("parent sub/new.txt = %q, want recreated", got)
 	}
 	if _, err := parent.Read("sub/nested.txt"); err == nil {
-		t.Fatal("merge resurrected host sub/nested.txt")
+		t.Fatal("input resurrected host sub/nested.txt")
 	}
 	ents, err := parent.List("sub")
 	if err != nil {
@@ -573,7 +573,7 @@ func TestApplyJoinSafeRecreateDirKeepsMaskedHostDescendantsHidden(t *testing.T) 
 	}
 }
 
-func TestApplyJoinSafeOverlappingDirTombstoneAndChildWriteIsDeterministic(t *testing.T) {
+func TestApplyInputSafeOverlappingDirTombstoneAndChildWriteIsDeterministic(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -581,7 +581,7 @@ func TestApplyJoinSafeOverlappingDirTombstoneAndChildWriteIsDeterministic(t *tes
 	if err := parent.Delete("sub"); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	child := store.View("child")
 	if err := child.Write("sub/x.txt", []byte("kept")); err != nil {
 		t.Fatal(err)
@@ -590,22 +590,22 @@ func TestApplyJoinSafeOverlappingDirTombstoneAndChildWriteIsDeterministic(t *tes
 		t.Fatal(err)
 	}
 
-	if err := applySafeJoin(store, "child", "parent"); err != nil {
-		t.Fatalf("Merge: %v", err)
+	if err := applySafeInput(store, "child", "parent"); err != nil {
+		t.Fatalf("ApplyInput: %v", err)
 	}
 	got, err := parent.Read("sub/x.txt")
 	if err != nil {
-		t.Fatalf("overlapping child write missing after Merge: %v", err)
+		t.Fatalf("overlapping candidate write missing after ApplyInput: %v", err)
 	}
 	if string(got) != "kept" {
 		t.Fatalf("parent sub/x.txt = %q, want kept", got)
 	}
 	if _, err := parent.Read("sub/nested.txt"); err == nil {
-		t.Fatal("merge resurrected host sub/nested.txt")
+		t.Fatal("input resurrected host sub/nested.txt")
 	}
 }
 
-func TestApplyJoinSafeConflictsWhenChildDeletesDirOverChangedDescendant(t *testing.T) {
+func TestApplyInputSafeConflictsWhenChildDeletesDirOverChangedDescendant(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -613,7 +613,7 @@ func TestApplyJoinSafeConflictsWhenChildDeletesDirOverChangedDescendant(t *testi
 	if err := parent.Write("dir/file.txt", []byte("A")); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := parent.Write("dir/file.txt", []byte("B")); err != nil {
 		t.Fatal(err)
 	}
@@ -621,9 +621,9 @@ func TestApplyJoinSafeConflictsWhenChildDeletesDirOverChangedDescendant(t *testi
 		t.Fatal(err)
 	}
 
-	err := applySafeJoin(store, "child", "parent")
+	err := applySafeInput(store, "child", "parent")
 	if err == nil {
-		t.Fatal("Merge succeeded, want conflict")
+		t.Fatal("ApplyInput succeeded, want conflict")
 	}
 	if !strings.Contains(err.Error(), "dir/file.txt") && !strings.Contains(err.Error(), "dir") {
 		t.Fatalf("conflict error = %v, want dir or dir/file.txt", err)
@@ -637,7 +637,7 @@ func TestApplyJoinSafeConflictsWhenChildDeletesDirOverChangedDescendant(t *testi
 	}
 }
 
-func TestApplyJoinSafeChildDirTombstoneHidesUnchangedDescendant(t *testing.T) {
+func TestApplyInputSafeChildDirTombstoneHidesUnchangedDescendant(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -645,13 +645,13 @@ func TestApplyJoinSafeChildDirTombstoneHidesUnchangedDescendant(t *testing.T) {
 	if err := parent.Write("dir/file.txt", []byte("A")); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := store.View("child").Delete("dir"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := applySafeJoin(store, "child", "parent"); err != nil {
-		t.Fatalf("Merge: %v", err)
+	if err := applySafeInput(store, "child", "parent"); err != nil {
+		t.Fatalf("ApplyInput: %v", err)
 	}
 	if _, err := parent.Read("dir/file.txt"); err == nil {
 		t.Fatal("child dir tombstone left parent dir/file.txt visible")
@@ -661,12 +661,12 @@ func TestApplyJoinSafeChildDirTombstoneHidesUnchangedDescendant(t *testing.T) {
 	}
 }
 
-func TestApplyJoinSafeConflictsWhenMatchingDirTombstoneHidesTargetDescendant(t *testing.T) {
+func TestApplyInputSafeConflictsWhenMatchingDirTombstoneHidesTargetDescendant(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
 	parent := store.View("parent")
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := parent.Delete("dir"); err != nil {
 		t.Fatal(err)
 	}
@@ -677,9 +677,9 @@ func TestApplyJoinSafeConflictsWhenMatchingDirTombstoneHidesTargetDescendant(t *
 		t.Fatal(err)
 	}
 
-	err := applySafeJoin(store, "child", "parent")
+	err := applySafeInput(store, "child", "parent")
 	if err == nil {
-		t.Fatal("Merge succeeded, want conflict")
+		t.Fatal("ApplyInput succeeded, want conflict")
 	}
 	got, readErr := parent.Read("dir/new.txt")
 	if readErr != nil {
@@ -690,7 +690,7 @@ func TestApplyJoinSafeConflictsWhenMatchingDirTombstoneHidesTargetDescendant(t *
 	}
 }
 
-func TestApplyJoinSafeConflictsWhenTargetReplacesTombstonedDirWithFile(t *testing.T) {
+func TestApplyInputSafeConflictsWhenTargetReplacesTombstonedDirWithFile(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -698,7 +698,7 @@ func TestApplyJoinSafeConflictsWhenTargetReplacesTombstonedDirWithFile(t *testin
 	if err := parent.Delete("dir"); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := parent.Write("dir", []byte("now-a-file")); err != nil {
 		t.Fatal(err)
 	}
@@ -706,9 +706,9 @@ func TestApplyJoinSafeConflictsWhenTargetReplacesTombstonedDirWithFile(t *testin
 		t.Fatal(err)
 	}
 
-	err := applySafeJoin(store, "child", "parent")
+	err := applySafeInput(store, "child", "parent")
 	if err == nil {
-		t.Fatal("Merge succeeded, want conflict")
+		t.Fatal("ApplyInput succeeded, want conflict")
 	}
 	got, readErr := parent.Read("dir")
 	if readErr != nil {
@@ -719,7 +719,7 @@ func TestApplyJoinSafeConflictsWhenTargetReplacesTombstonedDirWithFile(t *testin
 	}
 }
 
-func TestApplyJoinSafeConflictsWhenMaskingFileChangedUnderChildWrite(t *testing.T) {
+func TestApplyInputSafeConflictsWhenMaskingFileChangedUnderChildWrite(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -727,7 +727,7 @@ func TestApplyJoinSafeConflictsWhenMaskingFileChangedUnderChildWrite(t *testing.
 	if err := parent.Write("dir", []byte("A")); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := parent.Write("dir", []byte("B")); err != nil {
 		t.Fatal(err)
 	}
@@ -735,9 +735,9 @@ func TestApplyJoinSafeConflictsWhenMaskingFileChangedUnderChildWrite(t *testing.
 		t.Fatal(err)
 	}
 
-	err := applySafeJoin(store, "child", "parent")
+	err := applySafeInput(store, "child", "parent")
 	if err == nil {
-		t.Fatal("Merge succeeded, want conflict")
+		t.Fatal("ApplyInput succeeded, want conflict")
 	}
 	got, readErr := parent.Read("dir")
 	if readErr != nil {
@@ -748,7 +748,7 @@ func TestApplyJoinSafeConflictsWhenMaskingFileChangedUnderChildWrite(t *testing.
 	}
 }
 
-func TestApplyJoinSafeConflictsWhenChildWritesUnderLiveFile(t *testing.T) {
+func TestApplyInputSafeConflictsWhenChildWritesUnderLiveFile(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -756,14 +756,14 @@ func TestApplyJoinSafeConflictsWhenChildWritesUnderLiveFile(t *testing.T) {
 	if err := parent.Write("dir", []byte("A")); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := store.View("child").Write("dir/x.txt", []byte("from-child")); err != nil {
 		t.Fatal(err)
 	}
 
-	err := applySafeJoin(store, "child", "parent")
+	err := applySafeInput(store, "child", "parent")
 	if err == nil {
-		t.Fatal("Merge succeeded, want conflict")
+		t.Fatal("ApplyInput succeeded, want conflict")
 	}
 	got, readErr := parent.Read("dir")
 	if readErr != nil {
@@ -774,7 +774,7 @@ func TestApplyJoinSafeConflictsWhenChildWritesUnderLiveFile(t *testing.T) {
 	}
 }
 
-func TestApplyJoinSafeChildFileAtDirHidesTargetDescendant(t *testing.T) {
+func TestApplyInputSafeChildFileAtDirHidesTargetDescendant(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -782,13 +782,13 @@ func TestApplyJoinSafeChildFileAtDirHidesTargetDescendant(t *testing.T) {
 	if err := parent.Write("dir/x.txt", []byte("from-parent")); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := store.View("child").Write("dir", []byte("now-a-file")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := applySafeJoin(store, "child", "parent"); err != nil {
-		t.Fatalf("Merge: %v", err)
+	if err := applySafeInput(store, "child", "parent"); err != nil {
+		t.Fatalf("ApplyInput: %v", err)
 	}
 	got, err := parent.Read("dir")
 	if err != nil {
@@ -802,7 +802,7 @@ func TestApplyJoinSafeChildFileAtDirHidesTargetDescendant(t *testing.T) {
 	}
 }
 
-func TestApplyJoinSafeRepeatedDirTombstoneHidesBaselineDescendant(t *testing.T) {
+func TestApplyInputSafeRepeatedDirTombstoneHidesBaselineDescendant(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -813,24 +813,24 @@ func TestApplyJoinSafeRepeatedDirTombstoneHidesBaselineDescendant(t *testing.T) 
 	if err := parent.Write("dir/x.txt", []byte("recreated")); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := store.View("child").Delete("dir"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := applySafeJoin(store, "child", "parent"); err != nil {
-		t.Fatalf("Merge: %v", err)
+	if err := applySafeInput(store, "child", "parent"); err != nil {
+		t.Fatalf("ApplyInput: %v", err)
 	}
 	if _, err := parent.Read("dir/x.txt"); err == nil {
 		t.Fatal("repeated dir tombstone left baseline dir/x.txt visible")
 	}
 }
 
-func TestApplyJoinSafeConflictsWhenChildHasFileAndDescendant(t *testing.T) {
+func TestApplyInputSafeConflictsWhenChildHasFileAndDescendant(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	child := store.View("child")
 	if err := child.Write("dir", []byte("file")); err != nil {
 		t.Fatal(err)
@@ -839,33 +839,33 @@ func TestApplyJoinSafeConflictsWhenChildHasFileAndDescendant(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := applySafeJoin(store, "child", "parent"); err == nil {
-		t.Fatal("Merge succeeded, want conflict")
+	if err := applySafeInput(store, "child", "parent"); err == nil {
+		t.Fatal("ApplyInput succeeded, want conflict")
 	}
 }
 
-func TestApplyJoinSafeChildDeleteIntoGrandparentWithoutFileIsOK(t *testing.T) {
+func TestApplyInputSafeChildDeleteIntoGrandparentWithoutFileIsOK(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	mustFork(t, store, "gp", "parent")
+	mustCreateEnvironment(t, store, "gp", "parent")
 	if err := store.View("parent").Write("temporary.txt", []byte("A")); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := store.View("child").Delete("temporary.txt"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := applySafeJoin(store, "child", "gp"); err != nil {
-		t.Fatalf("Merge: %v", err)
+	if err := applySafeInput(store, "child", "gp"); err != nil {
+		t.Fatalf("ApplyInput: %v", err)
 	}
 	if _, err := store.View("gp").Read("temporary.txt"); err == nil {
 		t.Fatal("grandparent gained temporary.txt")
 	}
 }
 
-func TestApplyJoinSafeConflictsWhenGrandparentChangedDirDescendantAfterNestedFork(t *testing.T) {
+func TestApplyInputSafeConflictsWhenGrandparentChangedDirDescendantAfterNestedEnvironmentCreation(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -873,8 +873,8 @@ func TestApplyJoinSafeConflictsWhenGrandparentChangedDirDescendantAfterNestedFor
 	if err := gp.Write("dir/file.txt", []byte("A")); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "gp", "parent")
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "gp", "parent")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := gp.Write("dir/file.txt", []byte("B")); err != nil {
 		t.Fatal(err)
 	}
@@ -882,9 +882,9 @@ func TestApplyJoinSafeConflictsWhenGrandparentChangedDirDescendantAfterNestedFor
 		t.Fatal(err)
 	}
 
-	err := applySafeJoin(store, "child", "gp")
+	err := applySafeInput(store, "child", "gp")
 	if err == nil {
-		t.Fatal("Merge succeeded, want conflict")
+		t.Fatal("ApplyInput succeeded, want conflict")
 	}
 	got, readErr := gp.Read("dir/file.txt")
 	if readErr != nil {
@@ -899,7 +899,7 @@ func TestStoreStatsExposeBoundedResourceInventory(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := store.View("child").Write("created.txt", []byte("abc")); err != nil {
 		t.Fatal(err)
 	}
@@ -982,7 +982,7 @@ func TestViewChildDirTombstoneHidesParentOverlayChildren(t *testing.T) {
 	if err := store.View("parent").Write("dir/old.txt", []byte("from-parent")); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	child := store.View("child")
 	if err := child.Delete("dir"); err != nil {
 		t.Fatal(err)
@@ -1125,9 +1125,9 @@ func newTestStore(t *testing.T) (*Store, string) {
 	return NewStore(dir), dir
 }
 
-func mustFork(t *testing.T, s *Store, parentID, childID string) {
+func mustCreateEnvironment(t *testing.T, s *Store, baseID, envID string) {
 	t.Helper()
-	if err := s.Fork(parentID, childID); err != nil {
+	if err := s.CreateEnvironment(baseID, envID); err != nil {
 		t.Fatal(err)
 	}
 }

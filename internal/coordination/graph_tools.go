@@ -1,10 +1,12 @@
 package coordination
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
@@ -19,10 +21,12 @@ type orchestrateTool struct {
 }
 
 type orchestrateArgs struct {
-	Action    string         `json:"action"`
-	RequestID string         `json:"request_id,omitempty"`
-	Roots     []PendingRoot  `json:"roots,omitempty"`
-	Spawns    []PendingSpawn `json:"spawns,omitempty"`
+	Action    string        `json:"action"`
+	RequestID string        `json:"request_id,omitempty"`
+	TaskID    string        `json:"task_id,omitempty"`
+	Input     string        `json:"input,omitempty"`
+	Tasks     []PendingTask `json:"tasks,omitempty"`
+	Edges     []Edge        `json:"edges,omitempty"`
 }
 
 type publishTaskTool struct {
@@ -54,7 +58,7 @@ func GraphToolMap(graph *Graph, stores ...Stores) map[string]agenttool.Tool {
 func (t publishTaskTool) Definition() agenttool.Definition {
 	return agenttool.Definition{
 		Name:        coordPublishTaskName,
-		Description: "把 manager 选定的已结束 task 文件快照渲染到真实项目路径，让用户看见当前进度。发布是阶段性检查点，不改变 verifier verdict 或 task outcome，也不消耗快照；随时可发，重新发布更早的检查点即可退回。结果里 changed 是用户实际看到的变化量。",
+		Description: "把 manager 选定任务的已提交文件快照渲染到真实项目路径，让用户看见当前进度。任务可已完成、失败或持久任务已空闲/关闭；新发布选择本轮最后已提交的角色输出，同一 task 的待重试发布复用原选定输出。发布不改变 task outcome，也不消耗快照。结果用 activation 和 node_id 标明实际选定出口，changed 是用户实际看到的变化量。",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"task_id":{"type":"string","minLength":1}},"required":["task_id"],"additionalProperties":false}`),
 	}
 }
@@ -88,15 +92,17 @@ func (t publishTaskTool) Execute(ctx context.Context, call agenttool.Call) (agen
 const publishedPathLimit = 60
 
 type publishTaskResult struct {
-	TaskID    string   `json:"task_id"`
-	Outcome   string   `json:"outcome"`
-	Published bool     `json:"published"`
-	Changed   int      `json:"changed"`
-	Added     []string `json:"added,omitempty"`
-	Updated   []string `json:"updated,omitempty"`
-	Deleted   []string `json:"deleted,omitempty"`
-	Truncated bool     `json:"paths_truncated,omitempty"`
-	Retained  string   `json:"retained_replaced,omitempty"`
+	TaskID     string   `json:"task_id"`
+	Activation uint64   `json:"activation"`
+	NodeID     string   `json:"node_id"`
+	Outcome    string   `json:"outcome"`
+	Published  bool     `json:"published"`
+	Changed    int      `json:"changed"`
+	Added      []string `json:"added,omitempty"`
+	Updated    []string `json:"updated,omitempty"`
+	Deleted    []string `json:"deleted,omitempty"`
+	Truncated  bool     `json:"paths_truncated,omitempty"`
+	Retained   string   `json:"retained_replaced,omitempty"`
 }
 
 type provideHelpResult struct {
@@ -129,36 +135,13 @@ func (g *Graph) publishTask(
 	defer g.publishMu.Unlock()
 
 	g.mu.Lock()
-	task, ok := g.taskByIDLocked(taskID)
-	if !ok {
-		g.mu.Unlock()
-		return publishTaskResult{}, fmt.Errorf("%w: %q", ErrUnknownTask, taskID)
-	}
-	if task.Outcome != OutcomeDone && task.Outcome != OutcomeFailed {
-		g.mu.Unlock()
-		return publishTaskResult{}, fmt.Errorf(
-			"%s: task %q is not completed (outcome %q)",
-			coordPublishTaskName,
-			taskID,
-			task.Outcome,
-		)
-	}
+	selected, err := g.selectPublicationLocked(taskID)
 	g.mu.Unlock()
-
-	selectedEnv := taskSnapshotEnvID(task)
-	if err := stores.Files.Restore(selectedEnv); err != nil {
-		if !errors.Is(err, vfs.ErrUnknownEnvironment) {
-			return publishTaskResult{}, err
-		}
-		selectedEnv = task.Env.ID
-		if err := stores.Files.Restore(selectedEnv); err != nil {
-			return publishTaskResult{}, fmt.Errorf(
-				"%s: restore task %q snapshot: %w",
-				coordPublishTaskName,
-				taskID,
-				err,
-			)
-		}
+	if err != nil {
+		return publishTaskResult{}, err
+	}
+	if err := stores.Files.Restore(selected.FilesRef); err != nil {
+		return publishTaskResult{}, fmt.Errorf("%s: restore task %q snapshot: %w", coordPublishTaskName, taskID, err)
 	}
 	if err := ctx.Err(); err != nil {
 		return publishTaskResult{}, err
@@ -168,7 +151,7 @@ func (g *Graph) publishTask(
 	// selection leaves no publication half-recorded in the graph.
 	g.mu.Lock()
 	before := g.stateLocked()
-	g.publishingTaskID = taskID
+	g.publishing = selected
 	g.revision++
 	intentErr := g.saveOrRestoreLocked(before)
 	g.mu.Unlock()
@@ -180,7 +163,7 @@ func (g *Graph) publishTask(
 		)
 	}
 
-	receipt, err := stores.Files.Publish(selectedEnv)
+	receipt, err := stores.Files.Publish(selected.FilesRef)
 	if err != nil {
 		return publishTaskResult{}, fmt.Errorf(
 			"%s: publish task %q: %w",
@@ -192,8 +175,8 @@ func (g *Graph) publishTask(
 
 	g.mu.Lock()
 	before = g.stateLocked()
-	g.publishedTaskID = taskID
-	g.publishingTaskID = ""
+	g.published = selected
+	g.publishing = publicationState{}
 	g.revision++
 	stateErr := g.saveOrRestoreLocked(before)
 	g.mu.Unlock()
@@ -204,19 +187,48 @@ func (g *Graph) publishTask(
 			stateErr,
 		)
 	}
-	return publishReceiptResult(taskID, task.Outcome, receipt), nil
+	return publishReceiptResult(selected, receipt), nil
+}
+
+func (g *Graph) selectPublicationLocked(taskID string) (publicationState, error) {
+	// A pending publication belongs to its selected output, even if the task
+	// has continued to a later activation since that intent was recorded.
+	if g.publishing.TaskID == taskID {
+		return g.publishing, nil
+	}
+	task, ok := g.taskByIDLocked(taskID)
+	if !ok {
+		return publicationState{}, fmt.Errorf("%w: %q", ErrUnknownTask, taskID)
+	}
+	if task.Outcome != OutcomeDone && task.Outcome != OutcomeFailed && task.Outcome != OutcomeIdle && task.Outcome != OutcomeClosed {
+		return publicationState{}, fmt.Errorf(
+			"%s: task %q is not completed (outcome %q)", coordPublishTaskName, taskID, task.Outcome,
+		)
+	}
+	sequence := task.Sequence()
+	for i := len(sequence) - 1; i >= 0; i-- {
+		if output, committed := g.outputs[sequence[i].ID]; committed && output.FilesRef != "" {
+			return publicationState{
+				TaskID: task.ID, Activation: task.Activation, NodeID: output.Node.ID,
+				FilesRef: output.FilesRef, Outcome: task.Outcome,
+			}, nil
+		}
+	}
+	return publicationState{}, fmt.Errorf("%s: task %q has no committed file output", coordPublishTaskName, taskID)
 }
 
 func publishReceiptResult(
-	taskID, outcome string,
+	selected publicationState,
 	receipt vfs.PublishReceipt,
 ) publishTaskResult {
 	result := publishTaskResult{
-		TaskID:    taskID,
-		Outcome:   outcome,
-		Published: true,
-		Changed:   receipt.Changed(),
-		Retained:  receipt.Replaced,
+		TaskID:     selected.TaskID,
+		Activation: selected.Activation,
+		NodeID:     selected.NodeID,
+		Outcome:    selected.Outcome,
+		Published:  true,
+		Changed:    receipt.Changed(),
+		Retained:   receipt.Replaced,
 	}
 	budget := publishedPathLimit
 	result.Added, budget = takePublishedPaths(receipt.Added, budget)
@@ -239,8 +251,8 @@ func takePublishedPaths(paths []string, budget int) ([]string, int) {
 func (t orchestrateTool) Definition() agenttool.Definition {
 	return agenttool.Definition{
 		Name:        coordOrchestrateName,
-		Description: "Manager 的唯一协调图编排入口。action=replace_pending 时提交尚未开始部分的完整 roots/spawns 期望态；action=provide_help 时用真实 request_id 接纳请求者给出的编排建议并物化 helper。已经开始的 task info 和节点关联边会被拒绝，失败时图不变。",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["replace_pending","provide_help"]},"request_id":{"type":"string"},"roots":{"type":"array","minItems":1,"items":{"type":"object","properties":{"info":{"type":"string"},"run_policy":{"type":"string","enum":["enabled","held"]}},"required":["info"],"additionalProperties":false}},"spawns":{"type":"array","items":{"type":"object","properties":{"from":{"type":"string"},"join":{"type":"string"},"info":{"type":"string","minLength":1}},"required":["from","info"],"additionalProperties":false}}},"required":["action"],"additionalProperties":false}`),
+		Description: "Manager 的协调图入口。replace_pending 提交尚未开始部分的完整 tasks/edges 期望态；provide_help 用 request_id 添加普通任务和边，只有显式指向 Resume 的边会阻塞请求者。continue_task 用 task_id 和 input 激活空闲的持久任务；close_task 结束指定持久任务。已经冻结的节点输入不能修改，校验失败时图不变。",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["replace_pending","provide_help","continue_task","close_task"]},"request_id":{"type":"string"},"task_id":{"type":"string"},"input":{"type":"string"},"tasks":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string","minLength":1},"info":{"type":"string"},"persistent":{"type":"boolean"},"run_policy":{"type":"string","enum":["enabled","held"]}},"required":["info"],"additionalProperties":false}},"edges":{"type":"array","items":{"type":"object","properties":{"from":{"type":"string","minLength":1},"to":{"type":"string","minLength":1}},"required":["from","to"],"additionalProperties":false}}},"required":["action"],"additionalProperties":false}`),
 	}
 }
 
@@ -260,23 +272,21 @@ func (t orchestrateTool) Execute(ctx context.Context, call agenttool.Call) (agen
 		if strings.TrimSpace(args.RequestID) != "" {
 			return agenttool.Output{}, fmt.Errorf("%s: request_id is not valid for replace_pending", coordOrchestrateName)
 		}
-		snap, err := t.graph.ReplacePending(ctx, PendingSubgraph{Roots: args.Roots, Spawns: args.Spawns})
+		if args.TaskID != "" || args.Input != "" {
+			return agenttool.Output{}, fmt.Errorf("%s: task_id and input are not valid for replace_pending", coordOrchestrateName)
+		}
+		snap, err := t.graph.ReplacePending(ctx, PendingSubgraph{Tasks: args.Tasks, Edges: args.Edges})
 		if err != nil {
 			return agenttool.Output{}, err
 		}
 		return encodeGraphJSON(snap)
 	case "provide_help":
-		if len(args.Roots) != 0 {
-			return agenttool.Output{}, fmt.Errorf("%s: roots are not valid for provide_help", coordOrchestrateName)
+		if args.TaskID != "" || args.Input != "" {
+			return agenttool.Output{}, fmt.Errorf("%s: task_id and input are not valid for provide_help", coordOrchestrateName)
 		}
 		requestID := strings.TrimSpace(args.RequestID)
 		if requestID == "" {
 			return agenttool.Output{}, fmt.Errorf("%s: request_id is required for provide_help", coordOrchestrateName)
-		}
-		for _, spawn := range args.Spawns {
-			if strings.TrimSpace(spawn.Join) != "" {
-				return agenttool.Output{}, fmt.Errorf("%s: join is assigned automatically for provide_help", coordOrchestrateName)
-			}
 		}
 		t.graph.mu.Lock()
 		help := t.graph.help
@@ -284,11 +294,34 @@ func (t orchestrateTool) Execute(ctx context.Context, call agenttool.Call) (agen
 		if help == nil {
 			return agenttool.Output{}, fmt.Errorf("%s: help coordinator is unavailable", coordOrchestrateName)
 		}
-		result, err := help.provide(requestID, args.Spawns)
+		result, err := help.provide(requestID, PendingSubgraph{Tasks: args.Tasks, Edges: args.Edges})
 		if err != nil {
 			return agenttool.Output{}, err
 		}
 		return encodeGraphJSON(result)
+	case "continue_task", "close_task":
+		if args.RequestID != "" || args.Tasks != nil || args.Edges != nil {
+			return agenttool.Output{}, fmt.Errorf("%s: request_id, tasks and edges are not valid for %s", coordOrchestrateName, args.Action)
+		}
+		taskID := strings.TrimSpace(args.TaskID)
+		if taskID == "" {
+			return agenttool.Output{}, fmt.Errorf("%s: task_id is required for %s", coordOrchestrateName, args.Action)
+		}
+		if args.Action == "continue_task" {
+			task, err := t.graph.Continue(taskID, args.Input)
+			if err != nil {
+				return agenttool.Output{}, err
+			}
+			return encodeGraphJSON(task)
+		}
+		if args.Input != "" {
+			return agenttool.Output{}, fmt.Errorf("%s: input is not valid for close_task", coordOrchestrateName)
+		}
+		if err := t.graph.CloseTask(taskID); err != nil {
+			return agenttool.Output{}, err
+		}
+		task, _ := t.graph.Task(taskID)
+		return encodeGraphJSON(task)
 	default:
 		return agenttool.Output{}, fmt.Errorf("%s: unsupported action %q", coordOrchestrateName, args.Action)
 	}
@@ -298,8 +331,13 @@ func decodeGraphArgs(raw json.RawMessage, dst any) error {
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
 	}
-	if err := json.Unmarshal(raw, dst); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
 		return fmt.Errorf("decode arguments: %w", err)
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("decode arguments: expected one JSON value")
 	}
 	return nil
 }

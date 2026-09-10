@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestOverlayMaterializeRecoversAndHandoffs(t *testing.T) {
+func TestOverlayMaterializeRecovers(t *testing.T) {
 	if detectOverlayDriver() == nil {
 		t.Skip("no usable OverlayFS backend")
 	}
@@ -47,7 +47,7 @@ func TestOverlayMaterializeRecoversAndHandoffs(t *testing.T) {
 	}
 	if err := writeOverlaySeed(first.overlayStatePath("parent"), []overlayFile{{
 		path: "recovered-seed.txt",
-		b:    blob{data: []byte("seed")},
+		b:    blob{data: []byte("seed"), mode: 0o640},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -56,24 +56,24 @@ func TestOverlayMaterializeRecoversAndHandoffs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := restarted.Handoff("parent", "child"); err != nil {
+	if err := restarted.Restore("parent"); err != nil {
 		t.Fatal(err)
 	}
-	got, err := restarted.View("child").Read("hello.txt")
+	got, err := restarted.View("parent").Read("hello.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(got) != "changed" {
-		t.Fatalf("recovered child hello.txt = %q, want changed", got)
+		t.Fatalf("recovered parent hello.txt = %q, want changed", got)
 	}
-	if _, err := restarted.View("child").Read("deleted.txt"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := restarted.View("parent").Read("deleted.txt"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("recovered deleted.txt error = %v, want not found", err)
 	}
-	got, err = restarted.View("child").Read("recovered-seed.txt")
+	got, err = restarted.View("parent").Read("recovered-seed.txt")
 	if err != nil || string(got) != "seed" {
 		t.Fatalf("recovered seed = %q, %v, want seed", got, err)
 	}
-	if err := restarted.Discard("child"); err != nil {
+	if err := restarted.Discard("parent"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -114,7 +114,7 @@ func TestPublishHandlesOverlayMountedProject(t *testing.T) {
 	})
 
 	store := NewStore(project)
-	mustFork(t, store, "", "root")
+	mustCreateEnvironment(t, store, "", "root")
 	if err := store.View("root").Write("component/existing.txt", []byte("after")); err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestFuseOverlayAbsorbUsesUpperdirDelta(t *testing.T) {
 		t.Fatalf("absorb stats = %+v, want one FUSE upperdir fast path", stats)
 	}
 	assertDirectoryTombstones(t, store, "parent")
-	if err := store.Fork("parent", "child"); err != nil {
+	if err := store.CreateEnvironment("parent", "child"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Discard("parent"); err != nil {
@@ -361,7 +361,7 @@ func TestNativeOverlayAbsorbUsesUpperdirDelta(t *testing.T) {
 	if err := store.Absorb("parent"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Fork("parent", "child"); err != nil {
+	if err := store.CreateEnvironment("parent", "child"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Discard("parent"); err != nil {
@@ -440,7 +440,7 @@ func TestOverlayAbsorbFallsBackForOpaqueDirectory(t *testing.T) {
 	if err := store.Absorb("parent"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Fork("parent", "child"); err != nil {
+	if err := store.CreateEnvironment("parent", "child"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Discard("parent"); err != nil {

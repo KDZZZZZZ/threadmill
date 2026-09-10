@@ -179,14 +179,14 @@ func (t injectSubscribedMemoryTool) Execute(ctx context.Context, call agenttool.
 		return agenttool.Output{}, fmt.Errorf("%s: missing transcript", injectSubscribedMemoryToolName)
 	}
 	graph := t.memory.Snapshot()
-	stableNodes := graph.NodesInSubgraphs(transcript.StableSubscribed)
+	stableNodes := graph.CurrentNodesInSubgraphs(transcript.StableSubscribed)
 	stableIDs := make(map[string]struct{}, len(stableNodes))
 	for _, node := range stableNodes {
 		if node.ID != "" {
 			stableIDs[node.ID] = struct{}{}
 		}
 	}
-	mutableNodes := graph.NodesInSubgraphs(transcript.MutableSubscribed)
+	mutableNodes := graph.CurrentNodesInSubgraphs(transcript.MutableSubscribed)
 	filtered := mutableNodes[:0]
 	for _, node := range mutableNodes {
 		if _, duplicate := stableIDs[node.ID]; duplicate && node.ID != "" {

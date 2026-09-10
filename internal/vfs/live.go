@@ -228,6 +228,18 @@ func (s *Store) Absorb(envID string) error {
 		return nil
 	}
 	dst := s.ensure(envID)
+	for path := range liveDirectories {
+		info, err := os.Stat(filepath.Join(live, filepath.FromSlash(path)))
+		if err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("vfs: absorb directory %q: %w", path, err)
+		}
+		mode := fs.ModeDir | info.Mode().Perm()
+		old := s.lookupContent(envID, path)
+		if !old.exists || old.tombstone || old.mode != mode {
+			applyBlob(dst, path, blob{mode: mode})
+		}
+	}
 	deletedDirectories := shallowMissingDirectories(beforeDirectories, liveDirectories)
 	deletedDirectorySet := make(map[string]struct{}, len(deletedDirectories))
 	for _, path := range deletedDirectories {
@@ -248,8 +260,8 @@ func (s *Store) Absorb(envID string) error {
 			continue
 		}
 		applyBlob(dst, path, blob{
-			data:       current.data,
-			executable: current.executable,
+			data: current.data,
+			mode: current.mode,
 		})
 	}
 	s.liveBaselines[envID] = current
@@ -374,8 +386,8 @@ func (s *Store) Archive(sourceID, archiveID string) error {
 	if err := s.Discard(archiveID); err != nil {
 		return fmt.Errorf("vfs: replace archive: %w", err)
 	}
-	if err := s.Fork(sourceID, archiveID); err != nil {
-		return fmt.Errorf("vfs: fork archive: %w", err)
+	if err := s.CreateEnvironment(sourceID, archiveID); err != nil {
+		return fmt.Errorf("vfs: create archive environment: %w", err)
 	}
 	if s.liveRoot == "" {
 		return nil
@@ -442,6 +454,9 @@ func (s *Store) Discard(envID string) error {
 		if err := os.RemoveAll(s.overlayStatePath(envID)); err != nil {
 			return fmt.Errorf("vfs: discard overlay state: %w", err)
 		}
+		if err := os.Remove(s.inputPath(envID)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("vfs: discard input: %w", err)
+		}
 	}
 	s.mu.Lock()
 	delete(s.lives, envID)
@@ -469,6 +484,7 @@ func (s *Store) overlayBlobs(envID string) []overlayFile {
 			}
 			writes = append(writes, item)
 		}
+		slices.SortFunc(writes, func(a, b overlayFile) int { return strings.Compare(a.path, b.path) })
 		out = append(out, tombs...)
 		out = append(out, writes...)
 	}
@@ -479,7 +495,7 @@ type fileSnapshot struct {
 	data       []byte
 	source     string
 	sourceInfo fs.FileInfo
-	executable bool
+	mode       fs.FileMode
 }
 
 // walkRegularFiles 扫 live 树并读出每个变更候选的内容。
@@ -541,7 +557,7 @@ func walkRegularFiles(
 		if err != nil {
 			return err
 		}
-		executable := info.Mode().Perm()&0o111 != 0
+		mode = info.Mode().Perm()
 		old, existed := before[rel]
 		if existed && unchangedBuckets[liveFingerprintBucket(rel)] {
 			out[rel] = old
@@ -556,8 +572,8 @@ func walkRegularFiles(
 					return err
 				}
 			}
-			old.executable = sourceInfo.Mode().Perm()&0o111 != 0
-			if old.executable == executable {
+			old.mode = sourceInfo.Mode().Perm()
+			if old.mode == mode {
 				contentComparisons++
 				equal, err := equalFileContents(
 					path,
@@ -584,7 +600,7 @@ func walkRegularFiles(
 		if err != nil {
 			return err
 		}
-		current := fileSnapshot{data: data, executable: executable}
+		current := fileSnapshot{data: data, mode: mode}
 		out[rel] = current
 		if existed && snapshotsEqual(old, current) {
 			return nil
@@ -746,7 +762,7 @@ func (s *Store) cachedBaseRegularFiles() (map[string]fileSnapshot, error) {
 			files[rel] = fileSnapshot{
 				source:     path,
 				sourceInfo: info,
-				executable: info.Mode().Perm()&0o111 != 0,
+				mode:       info.Mode().Perm(),
 			}
 			return nil
 		})
@@ -834,12 +850,12 @@ func hasPathAncestor(paths map[string]struct{}, rel string) bool {
 func (s *Store) regularFileSnapshot(envID, rel string) (fileSnapshot, bool) {
 	b, found := s.lookupBlobValue(envID, rel)
 	if found {
-		if b.tombstone {
+		if b.tombstone || b.mode.IsDir() {
 			return fileSnapshot{}, false
 		}
 		return fileSnapshot{
-			data:       cloneBytes(b.data),
-			executable: b.executable,
+			data: cloneBytes(b.data),
+			mode: b.mode,
 		}, true
 	}
 	if s.hasOverlayChildren(envID, rel) {
@@ -856,12 +872,12 @@ func (s *Store) regularFileSnapshot(envID, rel string) (fileSnapshot, bool) {
 	return fileSnapshot{
 		source:     host,
 		sourceInfo: fi,
-		executable: fi.Mode().Perm()&0o111 != 0,
+		mode:       fi.Mode().Perm(),
 	}, true
 }
 
 func snapshotsEqual(a, b fileSnapshot) bool {
-	if a.executable != b.executable {
+	if a.mode != b.mode {
 		return false
 	}
 	if a.source != "" || b.source != "" {
@@ -915,7 +931,22 @@ func applyLive(live, rel string, b blob) error {
 	if b.tombstone {
 		return deleteLive(live, rel)
 	}
-	return writeLiveMode(live, rel, b.data, b.executable)
+	if b.mode.IsDir() {
+		dest, err := createLivePath(live, rel)
+		if err != nil {
+			return err
+		}
+		if info, err := os.Lstat(dest); err == nil && !info.IsDir() {
+			if err := os.RemoveAll(dest); err != nil {
+				return err
+			}
+		}
+		if err := os.MkdirAll(dest, b.mode.Perm()); err != nil {
+			return err
+		}
+		return os.Chmod(dest, b.mode.Perm())
+	}
+	return writeLiveMode(live, rel, b.data, b.mode)
 }
 
 func readLive(live, rel string) ([]byte, error) {
@@ -945,38 +976,36 @@ func writeLive(live, rel string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	executable := false
+	mode := fs.FileMode(0o640)
 	if info, statErr := os.Lstat(dest); statErr == nil {
-		executable = info.Mode().Type() == 0 && info.Mode().Perm()&0o111 != 0
+		if info.Mode().IsRegular() {
+			mode = info.Mode().Perm()
+		}
 	} else if !os.IsNotExist(statErr) {
 		return statErr
 	}
-	return writeLiveModeAt(dest, data, executable)
+	return writeLiveModeAt(dest, data, mode)
 }
 
-func writeLiveMode(live, rel string, data []byte, executable bool) error {
+func writeLiveMode(live, rel string, data []byte, mode fs.FileMode) error {
 	dest, err := createLivePath(live, rel)
 	if err != nil {
 		return err
 	}
-	return writeLiveModeAt(dest, data, executable)
+	return writeLiveModeAt(dest, data, mode)
 }
 
-func writeLiveModeAt(dest string, data []byte, executable bool) error {
+func writeLiveModeAt(dest string, data []byte, mode fs.FileMode) error {
 	if err := os.RemoveAll(dest); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
 		return err
 	}
-	return os.WriteFile(dest, data, regularMode(executable))
-}
-
-func regularMode(executable bool) fs.FileMode {
-	if executable {
-		return 0o750
+	if err := os.WriteFile(dest, data, mode); err != nil {
+		return err
 	}
-	return 0o640
+	return os.Chmod(dest, mode)
 }
 
 func deleteLive(live, rel string) error {
@@ -1197,7 +1226,14 @@ func copyWalk(src, dst string) error {
 			return os.Symlink(link, target)
 		}
 		if d.IsDir() {
-			return os.MkdirAll(target, 0o750)
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(target, info.Mode().Perm()); err != nil {
+				return err
+			}
+			return os.Chmod(target, info.Mode().Perm())
 		}
 		info, err := d.Info()
 		if err != nil {
@@ -1210,11 +1246,14 @@ func copyWalk(src, dst string) error {
 		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 			return err
 		}
-		return os.WriteFile(
+		if err := os.WriteFile(
 			target,
 			data,
-			regularMode(info.Mode().Perm()&0o111 != 0),
-		)
+			info.Mode().Perm(),
+		); err != nil {
+			return err
+		}
+		return os.Chmod(target, info.Mode().Perm())
 	})
 }
 

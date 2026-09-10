@@ -1,9 +1,4 @@
-// Package coordination 定义 Threadmill 的协调图。
-//
-// 一个 task 按顺序有且仅有 planner、executor、verifier。
-// 任意角色都可作为新 task 的起始点（spawn）和合入点（join）。
-// 图是进程内全局单例，由 Default 返回。
-// 调度也由图负责：先 fork 环境、再组装 agent，然后对该角色执行 ReAct（Ask）。
+// Package coordination manages tasks and their ordinary directed dependencies.
 package coordination
 
 import (
@@ -11,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -21,124 +18,103 @@ const (
 )
 
 const (
-	OutcomeActive   = "active"
-	OutcomeDone     = "done"
-	OutcomeCanceled = "canceled"
-	OutcomeFailed   = "failed"
-
+	OutcomeActive    = "active"
+	OutcomeDone      = "done"
+	OutcomeCanceled  = "canceled"
+	OutcomeFailed    = "failed"
+	OutcomeIdle      = "idle"
+	OutcomeClosed    = "closed"
 	RunPolicyEnabled = "enabled"
 	RunPolicyHeld    = "held"
 )
 
-const (
-	EdgeKindSequence = "sequence"
-	EdgeKindSpawn    = "spawn"
-	EdgeKindJoin     = "join"
+var (
+	ErrUnknownNode = errors.New("coordination: unknown node")
+	ErrCycle       = errors.New("coordination: dependency cycle")
+	ErrGraphBusy   = errors.New("coordination: task input already started")
 )
 
-// ErrUnknownNode 表示 spawn 的起始点或合入点不在图中。
-var ErrUnknownNode = errors.New("coordination: unknown node")
-
-// ErrJoinCycle 表示 spawn/join 会在 Ask 前形成开始依赖环，或 join 跨了任务树。
-var ErrJoinCycle = errors.New("coordination: join cycle")
-
-// ErrGraphBusy 表示并发 Run，或改图触及已经开始执行的切片。
-var ErrGraphBusy = errors.New("coordination: graph is executing")
-
-// ErrUnspawnRoot 表示不能拆掉独立根 task。
-var ErrUnspawnRoot = errors.New("coordination: cannot unspawn root task")
-
-// ErrUnknownRevision 表示请求的图 revision 不是当前 revision。
-var ErrUnknownRevision = errors.New("coordination: unknown revision")
-
-var defaultGraph = New()
-
-// Default 返回全局协调图单例。
-func Default() *Graph {
-	return defaultGraph
-}
-
-// New 返回一张空的协调图。
+// New returns an empty coordination graph.
 func New() *Graph {
 	return &Graph{
-		tasks: []Task{},
-		edges: []Edge{},
+		tasks:   []Task{},
+		nodes:   []Node{},
+		edges:   []Edge{},
+		outputs: make(map[string]Output),
+		runners: make(map[string]*runner),
+		changed: make(chan struct{}),
 	}
 }
 
-// Node 是某个 task 里的一个角色。
+// Node identifies a role in one activation, or a checkpoint of that role.
 type Node struct {
 	ID     string
 	TaskID string
 	Role   string
 }
 
-// Env 是 task 的版本句柄。Spawn 从父环境 fork；Join 只声明合入范围，不合内容。
-type Env struct {
-	ID       string
-	ParentID string // fork 来源；根为空
-}
+// Env identifies the independent mutable state of one task activation.
+type Env struct{ ID string }
 
-// Task 是 planner → executor → verifier 的固定三角色序列。
-// SpawnedFrom / Joins / JoinedBy 由图上的 spawn、join 边解析，不单独存一份。
+// Task keeps its identity across activations; its three role nodes describe the current activation.
 type Task struct {
-	ID          string
-	Info        string // 任务目标与验收标准
-	Env         Env
-	Planner     Node
-	Executor    Node
-	Verifier    Node
-	Outcome     string   // active | done | canceled | failed
-	RunPolicy   string   // enabled | held
-	SpawnedFrom string   // 拉出本 task 的父 task；根为空
-	Joins       []string // 本 task 合入的 task
-	JoinedBy    []string // 合入本 task 的 task
+	ID         string
+	Info       string
+	Env        Env
+	Planner    Node
+	Executor   Node
+	Verifier   Node
+	Outcome    string
+	RunPolicy  string
+	Persistent bool
+	Activation uint64
 }
 
-// TaskSink 原子接收协调图中全部 task info 的自动投影。
+// Sequence returns planner, executor and verifier in execution order.
+func (t Task) Sequence() []Node { return []Node{t.Planner, t.Executor, t.Verifier} }
+
+// Edge makes To consume the immutable complete output of From.
+type Edge struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// Output pairs the immutable files and memory produced by one node.
+type Output struct {
+	Node      Node
+	FilesRef  string
+	MemoryRef string
+	Report    string
+}
+
+// TaskSink atomically receives the complete task-info projection.
 type TaskSink func([]Task) error
 
-// Sequence 按固定顺序返回三个角色节点。
-func (t Task) Sequence() []Node {
-	return []Node{t.Planner, t.Executor, t.Verifier}
-}
-
-// Edge 是角色节点之间的有向关系。
-type Edge struct {
-	From string
-	To   string
-	Kind string
-}
-
-// Graph 是可并发访问的协调图。
+// Graph is safe for concurrent callers. Each running activation has its own runner.
 type Graph struct {
-	mu               sync.Mutex
-	tasks            []Task
-	edges            []Edge
-	nextID           uint64
-	helps            []helpState
-	progress         ProgressStore
-	help             *helpCoordinator
-	join             *joinCoordinator
-	taskSink         TaskSink
-	statePath        string
-	executing        bool
-	running          *runner
-	revision         int64
-	publishingTaskID string
-	publishedTaskID  string
-
-	// publishMu serialises publications against each other. They deliberately do
-	// not serialise against execution: rendering a checkpoint onto the display
-	// surface touches neither the read floor nor any environment.
+	mu         sync.Mutex
+	tasks      []Task
+	nodes      []Node
+	edges      []Edge
+	outputs    map[string]Output
+	nextID     uint64
+	helps      []helpState
+	progress   ProgressStore
+	help       *helpCoordinator
+	taskSink   TaskSink
+	statePath  string
+	runners    map[string]*runner
+	changed    chan struct{}
+	runContext context.Context
+	runWG      sync.WaitGroup
+	revision   int64
+	publishing publicationState
+	published  publicationState
+	// Publication serializes display updates without blocking task execution.
 	publishMu sync.Mutex
 }
 
-func newGraph() *Graph {
-	return New()
-}
-
-// SetProgressStore 设置进行中 task 的进度存储。入口 Run 成功结束后扔掉整棵子树的进度。
+// SetProgressStore sets the durable progress store for task activations.
 func (g *Graph) SetProgressStore(store ProgressStore) {
 	g.mu.Lock()
 	g.progress = store
@@ -171,113 +147,53 @@ func emitTasks(sink TaskSink, tasks []Task) error {
 	return sink(tasks)
 }
 
-func (g *Graph) reset() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.tasks = []Task{}
-	g.edges = []Edge{}
-	g.nextID = 0
-	g.helps = nil
-	g.executing = false
-	g.running = nil
-	g.revision = 0
-	g.publishingTaskID = ""
-	g.publishedTaskID = ""
-}
-
-// AddTask 追加一个图上独立的 task，内部连好 planner → executor → verifier。
-// root task 的环境按顺序从前一个 root fork，便于后续 task 增量续作。
+// AddTask appends an independent task with its planner → executor → verifier edges.
 func (g *Graph) AddTask() Task {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	task := g.decorateLocked(g.addRootLocked())
+	task := g.addTaskLocked("")
 	g.revision++
 	return task
 }
 
-// Spawn 从已有角色节点拉出新 task，并在合入点接回。
-// 新 task 仍是 planner → executor → verifier；from 连到其 planner，其 verifier 连到 join。
-// join 与 from 必须同属一棵任务树，且 start/ask 依赖不能成环（含 Spawn(x, x)），否则返回 ErrJoinCycle。
-func (g *Graph) Spawn(from, join string) (Task, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.executing {
-		return Task{}, ErrGraphBusy
-	}
-	before := g.stateLocked()
-	child, err := g.spawnLocked(from, join)
-	if err != nil {
-		return Task{}, err
-	}
-	g.revision++
-	if err := g.saveOrRestoreLocked(before); err != nil {
-		return Task{}, err
-	}
-	return child, nil
-}
-
-func (g *Graph) spawnLocked(from, join string) (Task, error) {
-	fromNode, ok := g.nodeByIDLocked(from)
-	if !ok {
-		return Task{}, fmt.Errorf("%w: %q", ErrUnknownNode, from)
-	}
-	joinNode, ok := g.nodeByIDLocked(join)
-	if !ok {
-		return Task{}, fmt.Errorf("%w: %q", ErrUnknownNode, join)
-	}
-	if g.treeRootLocked(fromNode.TaskID) != g.treeRootLocked(joinNode.TaskID) ||
-		g.reachesNodeLocked(join, from) {
-		return Task{}, fmt.Errorf("%w: %q -> %q", ErrJoinCycle, from, join)
-	}
-	parent, ok := g.taskByIDLocked(fromNode.TaskID)
-	if !ok {
-		return Task{}, fmt.Errorf("%w: %q", ErrUnknownNode, from)
-	}
-	child := g.addSpawnLocked(parent.Env.ID, from, join)
-	return g.decorateLocked(child), nil
-}
-
-func (g *Graph) addSpawnLocked(parentEnvID, from, join string) Task {
-	child := g.addTaskLocked(parentEnvID)
-	g.edges = append(g.edges,
-		Edge{From: from, To: child.Planner.ID, Kind: EdgeKindSpawn},
-		Edge{From: child.Verifier.ID, To: join, Kind: EdgeKindJoin},
-	)
-	return child
-}
-
-// Snapshot 是图的只读拷贝，供 manager 查看。
+// Snapshot is a detached copy of tasks, dependencies and immutable history.
 type Snapshot struct {
-	Revision         int64  `json:"revision"`
-	Executing        bool   `json:"executing"`
-	PublishingTaskID string `json:"publishing_task_id,omitempty"`
-	PublishedTaskID  string `json:"published_task_id,omitempty"`
-	Tasks            []Task `json:"tasks"`
-	Edges            []Edge `json:"edges"`
+	Revision         int64    `json:"revision"`
+	Executing        bool     `json:"executing"`
+	PublishingTaskID string   `json:"publishing_task_id,omitempty"`
+	PublishedTaskID  string   `json:"published_task_id,omitempty"`
+	PublishingNodeID string   `json:"publishing_node_id,omitempty"`
+	PublishedNodeID  string   `json:"published_node_id,omitempty"`
+	Tasks            []Task   `json:"tasks"`
+	Nodes            []Node   `json:"nodes"`
+	Edges            []Edge   `json:"edges"`
+	Outputs          []Output `json:"outputs"`
 }
 
-// PromptProjection 返回注入提示词用的稳定投影：剥掉逐请求易变的 Revision 和
-// Executing（模型从工具返回里已能看到等价信息），保证图内容不变时字节逐请求一致，
-// 不因协调整理打掉 manager 的历史前缀缓存。
-//
-// 不对 Tasks/Edges 排序：g.tasks 和 g.edges 本身就是 append 有序切片，删除走保序
-// 原地压缩，同样内容的字节已经稳定。按 ID 排序反而会破坏创建顺序——ID 是 task-%d
-// 的递增计数，字典序在第 10 个 task 之后就与创建顺序不一致（task-10 < task-2）。
+// PromptProjection omits request-varying revision and execution flags.
 func (s Snapshot) PromptProjection() ([]byte, error) {
 	return json.Marshal(struct {
-		PublishingTaskID string `json:"publishing_task_id,omitempty"`
-		PublishedTaskID  string `json:"published_task_id,omitempty"`
-		Tasks            []Task `json:"tasks"`
-		Edges            []Edge `json:"edges"`
+		PublishingTaskID string   `json:"publishing_task_id,omitempty"`
+		PublishedTaskID  string   `json:"published_task_id,omitempty"`
+		PublishingNodeID string   `json:"publishing_node_id,omitempty"`
+		PublishedNodeID  string   `json:"published_node_id,omitempty"`
+		Tasks            []Task   `json:"tasks"`
+		Nodes            []Node   `json:"nodes"`
+		Edges            []Edge   `json:"edges"`
+		Outputs          []Output `json:"outputs"`
 	}{
 		PublishingTaskID: s.PublishingTaskID,
 		PublishedTaskID:  s.PublishedTaskID,
+		PublishingNodeID: s.PublishingNodeID,
+		PublishedNodeID:  s.PublishedNodeID,
 		Tasks:            s.Tasks,
+		Nodes:            s.Nodes,
 		Edges:            s.Edges,
+		Outputs:          s.Outputs,
 	})
 }
 
-// Snapshot 返回当前 tasks 和边；Run 期间 executing 为 true。
+// Snapshot returns the current graph and all historical checkpoints.
 func (g *Graph) Snapshot() Snapshot {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -287,229 +203,39 @@ func (g *Graph) Snapshot() Snapshot {
 func (g *Graph) snapshotLocked() Snapshot {
 	return Snapshot{
 		Revision:         g.revision,
-		Executing:        g.executing,
-		PublishingTaskID: g.publishingTaskID,
-		PublishedTaskID:  g.publishedTaskID,
-		Tasks:            g.decoratedTasksLocked(),
-		Edges:            append([]Edge(nil), g.edges...),
+		Executing:        len(g.runners) > 0,
+		PublishingTaskID: g.publishing.TaskID,
+		PublishedTaskID:  g.published.TaskID,
+		PublishingNodeID: g.publishing.NodeID,
+		PublishedNodeID:  g.published.NodeID,
+		Tasks:            append([]Task{}, g.tasks...),
+		Nodes:            append([]Node{}, g.nodes...),
+		Edges:            append([]Edge{}, g.edges...),
+		Outputs:          g.outputListLocked(),
 	}
 }
 
-func (g *Graph) decoratedTasksLocked() []Task {
-	nodeTasks := make(map[string]string, len(g.tasks)*3)
-	plannerTasks := make(map[string]string, len(g.tasks))
-	verifierTasks := make(map[string]string, len(g.tasks))
-	for _, task := range g.tasks {
-		nodeTasks[task.Planner.ID] = task.ID
-		nodeTasks[task.Executor.ID] = task.ID
-		nodeTasks[task.Verifier.ID] = task.ID
-		plannerTasks[task.Planner.ID] = task.ID
-		verifierTasks[task.Verifier.ID] = task.ID
-	}
-
-	spawnedFrom := make(map[string]string, len(g.tasks))
-	joins := make(map[string][]string, len(g.tasks))
-	joinedBy := make(map[string][]string, len(g.tasks))
-	seenJoins := make(map[[2]string]struct{}, len(g.tasks))
-	seenJoinedBy := make(map[[2]string]struct{}, len(g.tasks))
-	for _, edge := range g.edges {
-		switch edge.Kind {
-		case EdgeKindSpawn:
-			fromTask, fromKnown := nodeTasks[edge.From]
-			toTask, toKnown := plannerTasks[edge.To]
-			if !fromKnown || !toKnown {
-				continue
-			}
-			if _, exists := spawnedFrom[toTask]; !exists {
-				spawnedFrom[toTask] = fromTask
-			}
-		case EdgeKindJoin:
-			fromTask, fromKnown := nodeTasks[edge.From]
-			toTask, toKnown := nodeTasks[edge.To]
-			if !fromKnown || !toKnown {
-				continue
-			}
-			pair := [2]string{fromTask, toTask}
-			if _, exists := seenJoinedBy[pair]; !exists {
-				seenJoinedBy[pair] = struct{}{}
-				joinedBy[toTask] = append(joinedBy[toTask], fromTask)
-			}
-			if verifierTasks[edge.From] != fromTask {
-				continue
-			}
-			if _, exists := seenJoins[pair]; !exists {
-				seenJoins[pair] = struct{}{}
-				joins[fromTask] = append(joins[fromTask], toTask)
-			}
+func (g *Graph) outputListLocked() []Output {
+	outputs := make([]Output, 0, len(g.outputs))
+	for _, node := range g.nodes {
+		if output, ok := g.outputs[node.ID]; ok {
+			outputs = append(outputs, output)
 		}
 	}
-
-	tasks := make([]Task, len(g.tasks))
-	for i, task := range g.tasks {
-		task.SpawnedFrom = spawnedFrom[task.ID]
-		task.Joins = append([]string{}, joins[task.ID]...)
-		task.JoinedBy = append([]string{}, joinedBy[task.ID]...)
-		tasks[i] = task
-	}
-	return tasks
+	return outputs
 }
 
-// SnapshotAt 返回 revision-consistent 快照；revision=0 表示最新。
-func (g *Graph) SnapshotAt(ctx context.Context, revision int64) (Snapshot, error) {
-	if err := ctx.Err(); err != nil {
-		return Snapshot{}, err
-	}
-	if g == nil {
-		return Snapshot{}, fmt.Errorf("snapshot: nil graph")
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	snap := g.snapshotLocked()
-	if revision != 0 && revision != snap.Revision {
-		return Snapshot{}, fmt.Errorf("%w: %d", ErrUnknownRevision, revision)
-	}
-	return snap, nil
-}
-
-// Unspawn 拆掉尚未开跑的子 task 及其子孙。根 task 返回 ErrUnspawnRoot；Run 期间返回 ErrGraphBusy。
-func (g *Graph) Unspawn(taskID string) ([]string, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.executing {
-		return nil, ErrGraphBusy
-	}
-	before := g.stateLocked()
-	removed, err := g.unspawnLocked(taskID)
-	if err != nil {
-		return nil, err
-	}
-	g.revision++
-	if err := g.saveOrRestoreLocked(before); err != nil {
-		return nil, err
-	}
-	return removed, nil
-}
-
-func (g *Graph) unspawnLocked(taskID string) ([]string, error) {
-	task, ok := g.taskByIDLocked(taskID)
-	if !ok {
-		return nil, fmt.Errorf("%w: %q", ErrUnknownTask, taskID)
-	}
-	if g.spawnedFromLocked(task) == "" {
-		return nil, fmt.Errorf("%w: %q", ErrUnspawnRoot, taskID)
-	}
-	remove := g.spawnedSubtreeLocked(taskID)
-	for _, publicationTaskID := range []string{g.publishingTaskID, g.publishedTaskID} {
-		if _, ok := remove[publicationTaskID]; ok {
-			return nil, fmt.Errorf(
-				"coordination: cannot unspawn publication task %q",
-				publicationTaskID,
-			)
-		}
-	}
-	nodeIDs := make(map[string]struct{})
-	removed := make([]string, 0, len(remove))
-	for _, existing := range g.tasks {
-		if _, ok := remove[existing.ID]; !ok {
-			continue
-		}
-		removed = append(removed, existing.ID)
-		for _, node := range existing.Sequence() {
-			nodeIDs[node.ID] = struct{}{}
-		}
-	}
-	edges := g.edges[:0]
-	for _, edge := range g.edges {
-		if _, ok := nodeIDs[edge.From]; ok {
-			continue
-		}
-		if _, ok := nodeIDs[edge.To]; ok {
-			continue
-		}
-		edges = append(edges, edge)
-	}
-	g.edges = edges
-	tasks := g.tasks[:0]
-	for _, existing := range g.tasks {
-		if _, ok := remove[existing.ID]; ok {
-			continue
-		}
-		tasks = append(tasks, existing)
-	}
-	g.tasks = tasks
-	return removed, nil
-}
-
-func (g *Graph) spawnedSubtreeLocked(rootID string) map[string]struct{} {
-	nodeTasks := make(map[string]string, len(g.tasks)*3)
-	for _, task := range g.tasks {
-		for _, node := range task.Sequence() {
-			nodeTasks[node.ID] = task.ID
-		}
-	}
-	children := make(map[string][]string, len(g.tasks))
-	for _, edge := range g.edges {
-		if edge.Kind != EdgeKindSpawn {
-			continue
-		}
-		parentID, parentKnown := nodeTasks[edge.From]
-		childID, childKnown := nodeTasks[edge.To]
-		if parentKnown && childKnown {
-			children[parentID] = append(children[parentID], childID)
-		}
-	}
-
-	seen := map[string]struct{}{rootID: {}}
-	queue := []string{rootID}
-	for i := 0; i < len(queue); i++ {
-		for _, childID := range children[queue[i]] {
-			if _, dup := seen[childID]; dup {
-				continue
-			}
-			seen[childID] = struct{}{}
-			queue = append(queue, childID)
-		}
-	}
-	return seen
-}
-
-// Task 按 ID 查找 task；不存在时 ok 为 false。
+// Task looks up a task by its stable identity.
 func (g *Graph) Task(id string) (Task, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	task, ok := g.taskByIDLocked(id)
-	if !ok {
-		return Task{}, false
-	}
-	return g.decorateLocked(task), true
+	return g.taskByIDLocked(id)
 }
 
-// Downstream 返回该节点指出的下游角色节点。
-// 按边的原有顺序且按 ID 去重；节点不存在时返回空切片。
-func (g *Graph) Downstream(nodeID string) []Node {
+func (g *Graph) nodeByID(id string) (Node, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	nodes := make([]Node, 0)
-	if _, ok := g.nodeByIDLocked(nodeID); !ok {
-		return nodes
-	}
-
-	seen := make(map[string]struct{})
-	for _, edge := range g.edges {
-		if edge.From != nodeID || edge.To == "" {
-			continue
-		}
-		if _, dup := seen[edge.To]; dup {
-			continue
-		}
-		node, ok := g.nodeByIDLocked(edge.To)
-		if !ok {
-			continue
-		}
-		seen[edge.To] = struct{}{}
-		nodes = append(nodes, node)
-	}
-	return nodes
+	return g.nodeByIDLocked(id)
 }
 
 // Incoming 返回指向该节点的上游角色节点。
@@ -543,147 +269,41 @@ func (g *Graph) Incoming(nodeID string) []Node {
 	return nodes
 }
 
-// IncomingJoins 返回以 join 边指向该节点的上游角色节点。
-// 按边的原有顺序且按 ID 去重；节点不存在时返回空切片。
-func (g *Graph) IncomingJoins(nodeID string) []Node {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	nodes := make([]Node, 0)
-	if nodeID == "" {
-		return nodes
-	}
-	if _, ok := g.nodeByIDLocked(nodeID); !ok {
-		return nodes
-	}
-
-	seen := make(map[string]struct{})
-	for _, edge := range g.edges {
-		if edge.Kind != EdgeKindJoin || edge.To != nodeID || edge.From == "" {
-			continue
+func (g *Graph) addTaskLocked(id string) Task {
+	if id == "" {
+		for {
+			g.nextID++
+			id = fmt.Sprintf("task-%d", g.nextID)
+			if _, exists := g.taskByIDLocked(id); !exists {
+				break
+			}
 		}
-		if _, dup := seen[edge.From]; dup {
-			continue
-		}
-		node, ok := g.nodeByIDLocked(edge.From)
-		if !ok {
-			continue
-		}
-		seen[edge.From] = struct{}{}
-		nodes = append(nodes, node)
-	}
-	return nodes
-}
-
-// SpawnedTasks 返回从该角色节点拉出的子 task，按 spawn 边顺序。
-func (g *Graph) SpawnedTasks(nodeID string) []Task {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	tasks := make([]Task, 0)
-	if nodeID == "" {
-		return tasks
-	}
-	seen := make(map[string]struct{})
-	for _, edge := range g.edges {
-		if edge.Kind != EdgeKindSpawn || edge.From != nodeID {
-			continue
-		}
-		to, ok := g.nodeByIDLocked(edge.To)
-		if !ok || to.TaskID == "" {
-			continue
-		}
-		if _, dup := seen[to.TaskID]; dup {
-			continue
-		}
-		task, ok := g.taskByIDLocked(to.TaskID)
-		if !ok {
-			continue
-		}
-		seen[to.TaskID] = struct{}{}
-		tasks = append(tasks, g.decorateLocked(task))
-	}
-	return tasks
-}
-
-// Forks 返回从该环境 fork 出去的子环境，按 task 创建顺序。
-func (g *Graph) Forks(envID string) []Env {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	envs := make([]Env, 0)
-	if envID == "" {
-		return envs
-	}
-	for _, task := range g.tasks {
-		if task.Env.ParentID == envID {
-			envs = append(envs, task.Env)
+	} else if raw, ok := strings.CutPrefix(id, "task-"); ok {
+		if n, err := strconv.ParseUint(raw, 10, 64); err == nil {
+			g.nextID = max(g.nextID, n)
 		}
 	}
-	return envs
-}
-
-// Impact 返回将合入该 task 环境的子环境，按 join 边顺序。
-func (g *Graph) Impact(taskID string) []Env {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	envs := make([]Env, 0)
-	for _, id := range g.joinedByLocked(taskID) {
-		task, ok := g.taskByIDLocked(id)
-		if !ok || task.Env.ID == "" {
-			continue
-		}
-		envs = append(envs, task.Env)
-	}
-	return envs
-}
-
-func (g *Graph) addTaskLocked(parentEnvID string) Task {
-	g.nextID++
-	id := fmt.Sprintf("task-%d", g.nextID)
-	task := Task{
-		ID:        id,
-		Outcome:   OutcomeActive,
-		RunPolicy: RunPolicyEnabled,
-		Env: Env{
-			ID:       fmt.Sprintf("env-%d", g.nextID),
-			ParentID: parentEnvID,
-		},
-		Planner: Node{
-			ID:     id + ":" + RolePlanner,
-			TaskID: id,
-			Role:   RolePlanner,
-		},
-		Executor: Node{
-			ID:     id + ":" + RoleExecutor,
-			TaskID: id,
-			Role:   RoleExecutor,
-		},
-		Verifier: Node{
-			ID:     id + ":" + RoleVerifier,
-			TaskID: id,
-			Role:   RoleVerifier,
-		},
-	}
+	task := Task{ID: id, Outcome: OutcomeActive, RunPolicy: RunPolicyEnabled}
+	g.addActivationLocked(&task)
 	g.tasks = append(g.tasks, task)
-	g.edges = append(g.edges,
-		Edge{From: task.Planner.ID, To: task.Executor.ID, Kind: EdgeKindSequence},
-		Edge{From: task.Executor.ID, To: task.Verifier.ID, Kind: EdgeKindSequence},
-	)
 	return task
 }
 
-func (g *Graph) addRootLocked() Task {
-	parentEnvID := ""
-	roots := g.rootTasksLocked()
-	if len(roots) > 0 {
-		parentEnvID = roots[len(roots)-1].Env.ID
+func (g *Graph) addActivationLocked(task *Task) {
+	task.Activation++
+	task.Env = Env{ID: fmt.Sprintf("%s-%d", task.ID, task.Activation)}
+	node := func(role string) Node {
+		return Node{ID: fmt.Sprintf("%s:%d:%s", task.ID, task.Activation, role), TaskID: task.ID, Role: role}
 	}
-	return g.addTaskLocked(parentEnvID)
+	task.Planner = node(RolePlanner)
+	task.Executor = node(RoleExecutor)
+	task.Verifier = node(RoleVerifier)
+	g.nodes = append(g.nodes, task.Sequence()...)
+	g.edges = append(g.edges, Edge{From: task.Planner.ID, To: task.Executor.ID}, Edge{From: task.Executor.ID, To: task.Verifier.ID})
 }
 
+// ponytail: ordered slice lookups; add ID indexes if graph edits become a bottleneck.
 func (g *Graph) taskByIDLocked(id string) (Task, bool) {
-	if id == "" {
-		return Task{}, false
-	}
-	// ponytail: 线性扫描，图变大后再建索引
 	for _, task := range g.tasks {
 		if task.ID == id {
 			return task, true
@@ -693,38 +313,12 @@ func (g *Graph) taskByIDLocked(id string) (Task, bool) {
 }
 
 func (g *Graph) nodeByIDLocked(id string) (Node, bool) {
-	if id == "" {
-		return Node{}, false
-	}
-	for _, task := range g.tasks {
-		for _, node := range task.Sequence() {
-			if node.ID == id {
-				return node, true
-			}
+	for _, node := range g.nodes {
+		if node.ID == id {
+			return node, true
 		}
 	}
 	return Node{}, false
-}
-
-func (g *Graph) treeRootLocked(taskID string) string {
-	id := taskID
-	seen := make(map[string]struct{})
-	for id != "" {
-		if _, dup := seen[id]; dup {
-			return id
-		}
-		seen[id] = struct{}{}
-		task, ok := g.taskByIDLocked(id)
-		if !ok {
-			return id
-		}
-		parent := g.spawnedFromLocked(task)
-		if parent == "" {
-			return id
-		}
-		id = parent
-	}
-	return id
 }
 
 func (g *Graph) reachesNodeLocked(start, goal string) bool {
@@ -756,100 +350,213 @@ func (g *Graph) reachableNodesLocked(start string) map[string]struct{} {
 	return seen
 }
 
-func (g *Graph) decorateLocked(task Task) Task {
-	task.SpawnedFrom = g.spawnedFromLocked(task)
-	task.Joins = g.joinsLocked(task)
-	task.JoinedBy = g.joinedByLocked(task.ID)
-	return task
+// Output returns an immutable paired checkpoint by node ID.
+func (g *Graph) Output(nodeID string) (Output, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	output, ok := g.outputs[nodeID]
+	return output, ok
 }
 
-func (g *Graph) spawnedFromLocked(task Task) string {
-	for _, edge := range g.edges {
-		if edge.Kind != EdgeKindSpawn || edge.To != task.Planner.ID {
-			continue
-		}
-		from, ok := g.nodeByIDLocked(edge.From)
-		if ok {
-			return from.TaskID
-		}
+func (g *Graph) commitOutput(output Output) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	node, ok := g.nodeByIDLocked(output.Node.ID)
+	if !ok || node != output.Node {
+		return fmt.Errorf("%w: %q", ErrUnknownNode, output.Node.ID)
 	}
-	return ""
-}
-
-func (g *Graph) joinsLocked(task Task) []string {
-	ids := make([]string, 0)
-	seen := make(map[string]struct{})
-	for _, edge := range g.edges {
-		if edge.Kind != EdgeKindJoin || edge.From != task.Verifier.ID {
-			continue
-		}
-		to, ok := g.nodeByIDLocked(edge.To)
-		if !ok || to.TaskID == "" {
-			continue
-		}
-		if _, dup := seen[to.TaskID]; dup {
-			continue
-		}
-		seen[to.TaskID] = struct{}{}
-		ids = append(ids, to.TaskID)
+	if output.FilesRef == "" || output.MemoryRef == "" {
+		return fmt.Errorf("coordination: output %q requires paired file and memory references", node.ID)
 	}
-	return ids
-}
-
-func (g *Graph) joinedByLocked(taskID string) []string {
-	ids := make([]string, 0)
-	if taskID == "" {
-		return ids
-	}
-
-	seen := make(map[string]struct{})
-	for _, edge := range g.edges {
-		if edge.Kind != EdgeKindJoin {
-			continue
+	if existing, ok := g.outputs[node.ID]; ok {
+		if existing != output {
+			return fmt.Errorf("coordination: output %q is immutable", node.ID)
 		}
-		to, ok := g.nodeByIDLocked(edge.To)
-		if !ok || to.TaskID != taskID {
-			continue
-		}
-		from, ok := g.nodeByIDLocked(edge.From)
-		if !ok || from.TaskID == "" {
-			continue
-		}
-		if _, dup := seen[from.TaskID]; dup {
-			continue
-		}
-		seen[from.TaskID] = struct{}{}
-		ids = append(ids, from.TaskID)
-	}
-	return ids
-}
-
-func (g *Graph) taskTree(rootID string) []string {
-	if rootID == "" {
 		return nil
 	}
-	seen := map[string]struct{}{rootID: {}}
-	queue := []string{rootID}
-	for len(queue) > 0 {
-		id := queue[0]
-		queue = queue[1:]
-		task, ok := g.Task(id)
-		if !ok {
-			continue
-		}
-		for _, node := range task.Sequence() {
-			for _, child := range g.SpawnedTasks(node.ID) {
-				if _, dup := seen[child.ID]; dup {
-					continue
-				}
-				seen[child.ID] = struct{}{}
-				queue = append(queue, child.ID)
-			}
+	before := g.stateLocked()
+	g.outputs[node.ID] = output
+	g.revision++
+	return g.saveOrRestoreLocked(before)
+}
+
+// Connect adds an ordinary dependency. Replaying an existing edge is harmless.
+func (g *Graph) Connect(from, to string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, edge := range g.edges {
+		if edge.From == from && edge.To == to {
+			return nil
 		}
 	}
-	ids := make([]string, 0, len(seen))
-	for id := range seen {
-		ids = append(ids, id)
+	frozen, err := g.inputFrozenLocked(to)
+	if err != nil {
+		return err
 	}
-	return ids
+	if frozen {
+		return fmt.Errorf("%w: node %q", ErrGraphBusy, to)
+	}
+	if err := g.validateSourceLocked(from); err != nil {
+		return err
+	}
+	before := g.stateLocked()
+	if err := g.connectLocked(Edge{From: from, To: to}); err != nil {
+		return err
+	}
+	g.revision++
+	return g.saveOrRestoreLocked(before)
+}
+
+func (g *Graph) connectLocked(edge Edge) error {
+	for _, id := range []string{edge.From, edge.To} {
+		if _, ok := g.nodeByIDLocked(id); !ok {
+			return fmt.Errorf("%w: %q", ErrUnknownNode, id)
+		}
+	}
+	if g.reachesNodeLocked(edge.To, edge.From) {
+		return fmt.Errorf("%w: %q → %q", ErrCycle, edge.From, edge.To)
+	}
+	g.edges = append(g.edges, edge)
+	return nil
+}
+
+// Continue starts a new activation of an idle persistent task from its last output.
+func (g *Graph) Continue(taskID, info string) (Task, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	task, ok := g.taskByIDLocked(taskID)
+	if !ok {
+		return Task{}, fmt.Errorf("%w: %q", ErrUnknownTask, taskID)
+	}
+	if !task.Persistent || task.Outcome != OutcomeIdle {
+		return Task{}, fmt.Errorf("coordination: task %q must be persistent and idle to continue", taskID)
+	}
+	if g.runners[taskID] != nil {
+		return Task{}, ErrGraphBusy
+	}
+	info = strings.TrimSpace(info)
+	if info == "" {
+		return Task{}, fmt.Errorf("coordination: continuation info is required")
+	}
+	previous := task.Verifier.ID
+	if _, ok := g.outputs[previous]; !ok {
+		return Task{}, fmt.Errorf("coordination: task %q has no completed verifier output", taskID)
+	}
+	before := g.stateLocked()
+	task.Info = info
+	task.Outcome = OutcomeActive
+	g.addActivationLocked(&task)
+	for i := range g.tasks {
+		if g.tasks[i].ID == taskID {
+			g.tasks[i] = task
+			break
+		}
+	}
+	g.edges = append(g.edges, Edge{From: previous, To: task.Planner.ID})
+	g.revision++
+	if err := g.saveAndProjectLocked(before); err != nil {
+		return Task{}, err
+	}
+	return task, nil
+}
+
+// CloseTask closes one persistent task and cancels only its current activation.
+func (g *Graph) CloseTask(taskID string) error {
+	g.mu.Lock()
+	task, ok := g.taskByIDLocked(taskID)
+	if !ok {
+		g.mu.Unlock()
+		return fmt.Errorf("%w: %q", ErrUnknownTask, taskID)
+	}
+	if !task.Persistent {
+		g.mu.Unlock()
+		return fmt.Errorf("coordination: task %q is not persistent", taskID)
+	}
+	if task.Outcome == OutcomeClosed {
+		g.mu.Unlock()
+		return nil
+	}
+	before := g.stateLocked()
+	for i := range g.tasks {
+		if g.tasks[i].ID == taskID {
+			g.tasks[i].Outcome = OutcomeClosed
+			break
+		}
+	}
+	g.revision++
+	if err := g.saveOrRestoreLocked(before); err != nil {
+		g.mu.Unlock()
+		return err
+	}
+	running := g.runners[taskID]
+	g.mu.Unlock()
+	if running != nil {
+		running.cancel()
+	}
+	return nil
+}
+
+func (g *Graph) addCheckpointNode(node Node) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if existing, ok := g.nodeByIDLocked(node.ID); ok {
+		if existing != node {
+			return fmt.Errorf("coordination: node %q is immutable", node.ID)
+		}
+		return nil
+	}
+	task, ok := g.taskByIDLocked(node.TaskID)
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrUnknownTask, node.TaskID)
+	}
+	if !currentActivationNode(task, node) || !validNodeForTask(task, node) {
+		return fmt.Errorf("coordination: invalid checkpoint node %q", node.ID)
+	}
+	before := g.stateLocked()
+	g.nodes = append(g.nodes, node)
+	g.revision++
+	return g.saveOrRestoreLocked(before)
+}
+
+func currentActivationNode(task Task, node Node) bool {
+	return strings.HasPrefix(node.ID, fmt.Sprintf("%s:%d:", task.ID, task.Activation))
+}
+
+func validRole(role string) bool {
+	return role == RolePlanner || role == RoleExecutor || role == RoleVerifier
+}
+
+func validNodeForTask(task Task, node Node) bool {
+	if node.TaskID != task.ID || !validRole(node.Role) {
+		return false
+	}
+	suffix, ok := strings.CutPrefix(node.ID, task.ID+":")
+	if !ok {
+		return false
+	}
+	raw, remainder, ok := strings.Cut(suffix, ":")
+	if !ok {
+		return false
+	}
+	activation, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || activation == 0 || activation > task.Activation {
+		return false
+	}
+	role, checkpoint, extra := strings.Cut(remainder, ":")
+	return role == node.Role && (!extra || checkpoint != "")
+}
+
+func (g *Graph) validateSourceLocked(nodeID string) error {
+	node, ok := g.nodeByIDLocked(nodeID)
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrUnknownNode, nodeID)
+	}
+	if _, ok := g.outputs[nodeID]; ok {
+		return nil
+	}
+	task, ok := g.taskByIDLocked(node.TaskID)
+	if !ok || !currentActivationNode(task, node) || task.Outcome == OutcomeClosed {
+		return fmt.Errorf("coordination: source %q has no committed output and cannot run", nodeID)
+	}
+	return nil
 }

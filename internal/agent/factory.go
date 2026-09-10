@@ -39,7 +39,7 @@ const (
 	coordOrchestrateToolName = "coordination_orchestrate"
 	coordPublishTaskToolName = "coordination_publishTask"
 	coordRequestHelpToolName = "coordination_requestHelp"
-	coordJoinToolName        = "join"
+	coordInputToolName       = "input"
 
 	hookInjectSubscribedMemory      = "inject_subscribed_memory"
 	hookCompactOnOverflow           = "compact_on_overflow"
@@ -80,7 +80,7 @@ var knownFileTools = map[string]struct{}{
 	coordOrchestrateToolName:      {},
 	coordPublishTaskToolName:      {},
 	coordRequestHelpToolName:      {},
-	coordJoinToolName:             {},
+	coordInputToolName:            {},
 }
 
 // organizerOnlyTools 只允许 subgraph_organizer 装配：记忆图的批量改写权集中在整理 Agent。
@@ -102,7 +102,7 @@ var managerOnlyTools = map[string]struct{}{
 }
 
 var taskRoleOnlyTools = map[string]struct{}{
-	coordJoinToolName: {},
+	coordInputToolName: {},
 }
 
 // FileAgent 是 threadmill.yaml 里单个 Agent 的配置。
@@ -466,8 +466,8 @@ func bindLoopTools(loop *Loop, e env.Env) error {
 	}
 	loop.mu.Lock()
 	loop.memory = e.Memory
-	// 换环境必须丢掉记忆投影 memo：memo 只按 revision + 订阅列表判等，而 Fork 出的子图
-	// 与父图 revision 相同（Graph.Clone 保留 Revision），订阅列表也跨 Bind 保留，
+	// 换环境必须丢掉记忆投影 memo：memo 只按 revision + 订阅列表判等，而快照恢复
+	// 保留原图 revision，订阅列表也跨 Bind 保留，
 	// 不清会把上一个环境的记忆文本泄漏给新环境。
 	loop.memoryBlockRev = 0
 	loop.memoryBlockSubs = nil
@@ -1003,7 +1003,7 @@ func organizeMemory(
 		before,
 		organizer.organizeQueryText(),
 	))
-	selected := len(memory.Snapshot().NodesInSubgraphs([]string{subgraphID}))
+	selected := len(memory.Snapshot().CurrentNodesInSubgraphs([]string{subgraphID}))
 	organizer.publish(ctx, event.MemoryOrganized(
 		organizer.agentID,
 		operation,

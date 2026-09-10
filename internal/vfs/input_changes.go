@@ -6,39 +6,39 @@ import (
 )
 
 const (
-	JoinChangeAdded    = "added"
-	JoinChangeModified = "modified"
-	JoinChangeDeleted  = "deleted"
+	InputChangeAdded    = "added"
+	InputChangeModified = "modified"
+	InputChangeDeleted  = "deleted"
 )
 
-// JoinChange describes one direct candidate change relative to its fork point.
+// InputChange describes one direct candidate change relative to its base snapshot.
 // Reading changes never mutates another environment.
-type JoinChange struct {
+type InputChange struct {
 	Path string `json:"path"`
 	Kind string `json:"kind"`
 }
 
-// JoinApplyResult reports the paths accepted or rejected by one atomic apply.
-type JoinApplyResult struct {
+// InputApplyResult reports the paths accepted or rejected by one atomic apply.
+type InputApplyResult struct {
 	Applied   []string `json:"applied"`
 	Conflicts []string `json:"conflicts,omitempty"`
 }
 
-// JoinChanges returns the candidate's direct delta in stable path order.
-func (s *Store) JoinChanges(candidateID string) ([]JoinChange, error) {
+// InputChanges returns the candidate's direct delta in stable path order.
+func (s *Store) InputChanges(candidateID string) ([]InputChange, error) {
 	if err := s.Absorb(candidateID); err != nil {
 		return nil, err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.joinChangesLocked(candidateID), nil
+	return s.inputChangesLocked(candidateID), nil
 }
 
-func (s *Store) joinChangesLocked(candidateID string) []JoinChange {
+func (s *Store) inputChangesLocked(candidateID string) []InputChange {
 	candidate := s.envs[candidateID]
 	if candidate == nil {
-		return []JoinChange{}
+		return []InputChange{}
 	}
 	paths := make([]string, 0, len(candidate.files))
 	for path := range candidate.files {
@@ -46,38 +46,38 @@ func (s *Store) joinChangesLocked(candidateID string) []JoinChange {
 	}
 	slices.Sort(paths)
 
-	changes := make([]JoinChange, 0, len(paths))
+	changes := make([]InputChange, 0, len(paths))
 	for _, path := range paths {
 		item := candidate.files[path]
-		base := s.mergeBase(candidate, candidate.parentID, path)
-		kind := JoinChangeModified
+		base := s.baseContent(candidate, candidate.baseID, path)
+		kind := InputChangeModified
 		switch {
 		case item.tombstone:
-			kind = JoinChangeDeleted
+			kind = InputChangeDeleted
 		case !base.exists || base.tombstone:
-			kind = JoinChangeAdded
+			kind = InputChangeAdded
 		}
-		changes = append(changes, JoinChange{Path: path, Kind: kind})
+		changes = append(changes, InputChange{Path: path, Kind: kind})
 	}
 	return changes
 }
 
-// ApplyJoin explicitly adopts selected candidate paths into targetID. Safe mode
+// ApplyInput explicitly adopts selected candidate paths into targetID. Safe mode
 // rejects the whole request when any selected path conflicts; replace mode uses
 // the candidate versions intentionally. An empty path list selects every change.
-func (s *Store) ApplyJoin(
+func (s *Store) ApplyInput(
 	candidateID, targetID string,
 	paths []string,
 	replace bool,
-) (JoinApplyResult, error) {
+) (InputApplyResult, error) {
 	if candidateID == "" || targetID == "" || candidateID == targetID {
-		return JoinApplyResult{}, fmt.Errorf("vfs: invalid join environments")
+		return InputApplyResult{}, fmt.Errorf("vfs: invalid input environments")
 	}
 	if err := s.Absorb(candidateID); err != nil {
-		return JoinApplyResult{}, err
+		return InputApplyResult{}, err
 	}
 	if err := s.Absorb(targetID); err != nil {
-		return JoinApplyResult{}, err
+		return InputApplyResult{}, err
 	}
 
 	s.mu.Lock()
@@ -85,9 +85,9 @@ func (s *Store) ApplyJoin(
 
 	candidate := s.envs[candidateID]
 	if candidate == nil {
-		return JoinApplyResult{}, fmt.Errorf("vfs: join candidate %q does not exist", candidateID)
+		return InputApplyResult{}, fmt.Errorf("vfs: input candidate %q does not exist", candidateID)
 	}
-	changes := s.joinChangesLocked(candidateID)
+	changes := s.inputChangesLocked(candidateID)
 	available := make(map[string]struct{}, len(changes))
 	for _, change := range changes {
 		available[change.Path] = struct{}{}
@@ -103,10 +103,10 @@ func (s *Store) ApplyJoin(
 		for _, path := range paths {
 			clean, err := jail(path)
 			if err != nil {
-				return JoinApplyResult{}, err
+				return InputApplyResult{}, err
 			}
 			if _, ok := available[clean]; !ok {
-				return JoinApplyResult{}, fmt.Errorf("vfs: path %q is not a candidate change", clean)
+				return InputApplyResult{}, fmt.Errorf("vfs: path %q is not a candidate change", clean)
 			}
 			if _, duplicate := seen[clean]; duplicate {
 				continue
@@ -117,7 +117,7 @@ func (s *Store) ApplyJoin(
 		slices.Sort(selected)
 	}
 	if len(selected) == 0 {
-		return JoinApplyResult{Applied: []string{}}, nil
+		return InputApplyResult{Applied: []string{}}, nil
 	}
 
 	selectedSet := make(map[string]struct{}, len(selected))
@@ -132,7 +132,7 @@ func (s *Store) ApplyJoin(
 			apply = append(apply, pending{path: path, b: cloneBlob(candidate.files[path])})
 		}
 	} else {
-		planned, conflicts := s.mergePlanLocked(candidateID, targetID)
+		planned, conflicts := s.inputPlanLocked(candidateID, targetID)
 		selectedConflicts := make([]string, 0, len(conflicts))
 		for _, conflict := range conflicts {
 			for path := range selectedSet {
@@ -143,7 +143,7 @@ func (s *Store) ApplyJoin(
 			}
 		}
 		if len(selectedConflicts) > 0 {
-			return JoinApplyResult{Conflicts: selectedConflicts}, nil
+			return InputApplyResult{Conflicts: selectedConflicts}, nil
 		}
 		for _, item := range planned {
 			if _, ok := selectedSet[item.path]; ok {
@@ -153,7 +153,7 @@ func (s *Store) ApplyJoin(
 	}
 
 	if err := s.applyPendingLocked(targetID, apply); err != nil {
-		return JoinApplyResult{}, err
+		return InputApplyResult{}, err
 	}
-	return JoinApplyResult{Applied: selected}, nil
+	return InputApplyResult{Applied: selected}, nil
 }

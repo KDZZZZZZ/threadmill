@@ -8,9 +8,9 @@ Threadmill is a lightweight **Agent OS**.
 
 The agent itself only thinks and calls tools. Every file read, file write, code edit, and command execution must go through a single **Tool layer**. The Tool layer connects the agent to an isolated virtual environment:
 
-- The virtual filesystem keeps many agents' file versions with snapshot + delta, so the project is not copied for each agent.
+- The virtual filesystem shares file versions through snapshot + delta. Edges do not require a private project copy; durable checkpoints may retain copy/reflink backing files, and retained floors currently have no automatic garbage collector.
 - The virtual execution system queues commands such as `cargo test`, `pytest`, and shell, then maps them onto a limited set of CPU, memory, and execution slots.
-- A coordination graph decides which agent runs when.
+- A coordination graph schedules ordinary tasks from explicit `From`/`To` dependencies. It has no root task category or global serial execution rule; a task without outgoing dependencies does not hold up unrelated tasks.
 - A memory graph decides which context that agent sees while it runs.
 
 This is how one personal computer can keep thousands of isolated logical agents, while consuming real files, processes, and compute only on demand.
@@ -76,7 +76,8 @@ Example:
 ## Working rules
 
 - Architecture changes and module optimization must follow [`docs/architecture-governance.md`](docs/architecture-governance.md). Dependencies not shown in its architecture diagram require explicit human approval.
-- For manager/planner task decomposition and parallel execution, follow [`docs/parallel-decomposition-method.md`](docs/parallel-decomposition-method.md): apply the IPD Loop, keep parallelism inside a root's helper layer, and preserve its I1/I2/I3 invariants.
+- For manager/planner task decomposition and parallel execution, follow [`docs/parallel-decomposition-method.md`](docs/parallel-decomposition-method.md): apply the IPD Loop and preserve I1/I2/I3 for each deliverable. Ownership does not create a task hierarchy or an implicit wait/cancel relationship; dependencies are ordinary edges, including Help returns only when explicitly requested.
+- Unified input behavior follows [`docs/unified-edge-design.md`](docs/unified-edge-design.md): reuse the intersection of all complete source states, process differing files before differing memory, and directly inherit a singleton source without memory organization. A persistent task keeps its identity across separate activations.
 - Before any Go coding, review, debugging, troubleshooting, or setup task, load the `samber/cc-skills-golang@golang-how-to` skill first — it routes to whichever other Go skills the task needs.
 - Use `tdd` for test-first feature or bug work.
 - Use `source-driven-development` when implementing against a library or framework.

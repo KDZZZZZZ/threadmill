@@ -1,38 +1,157 @@
 package context
 
 import (
+	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
-func TestOpenStoreRestoresGraphsAndForkBaselines(t *testing.T) {
+func TestStoreRestoreUsesExactImmutableSnapshot(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "memory.json")
-	first, err := OpenStore(path)
+	store, err := OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first.Save("parent", Graph{Nodes: []Node{{ID: "base", Statement: "base"}}})
-	first.Fork("parent", "child")
-	first.Save("child", Graph{Nodes: []Node{
-		{ID: "base", Statement: "base"},
-		{ID: "from-child", Statement: "child"},
-	}})
-	first.Save("parent", Graph{Nodes: []Node{
-		{ID: "base", Statement: "base"},
-		{ID: "from-parent", Statement: "parent"},
-	}})
-	second, err := OpenStore(path)
+	if _, exists := store.Snapshot("missing"); exists {
+		t.Fatal("unknown snapshot reported as a valid empty graph")
+	}
+	if err := store.SaveSnapshot("empty", Graph{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := store.Snapshot("empty"); !exists {
+		t.Fatal("valid empty snapshot reported as unknown")
+	}
+	old := Subgraph{ID: "old-package", Kind: SubgraphKindPackage}
+	if err := store.AppendNode("target", old, Node{ID: "old", Statement: "old candidate"}); err != nil {
+		t.Fatal(err)
+	}
+	want := Graph{
+		Revision:  7,
+		Subgraphs: []Subgraph{{ID: "new-package", Kind: SubgraphKindPackage}},
+		Nodes:     []Node{{ID: "new", Statement: "accepted input", SubgraphIDs: []string{"new-package"}}},
+	}
+	if err := store.SaveSnapshot("ready", want); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSnapshot("ready", want); err != nil {
+		t.Fatalf("idempotent save: %v", err)
+	}
+	if err := store.Restore("target", "ready"); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Load("target"); !reflect.DeepEqual(got, want.Clone()) {
+		t.Fatalf("restore retained old managed memory: %#v", got)
+	}
+	if err := store.AppendNode("target", Subgraph{ID: "new-package"}, Node{ID: "new", Statement: "later work"}); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := second.Merge("child", "parent"); err != nil {
+	if got := reopened.Load("target"); len(got.Nodes) != 1 || got.Nodes[0].Statement != "later work" {
+		t.Fatalf("live environment edits were lost on restart: %#v", got)
+	}
+	if err := reopened.Restore("other-target", "ready"); err != nil {
 		t.Fatal(err)
 	}
-	got := second.Load("parent")
-	for _, id := range []string{"base", "from-parent", "from-child"} {
-		if _, ok := got.nodeByID(id); !ok {
-			t.Fatalf("restored merge missing %q: %#v", id, got.Nodes)
-		}
+	if got := reopened.Load("other-target"); !reflect.DeepEqual(got, want.Clone()) {
+		t.Fatalf("source snapshot followed target edits or was lost on restart: %#v", got)
+	}
+	if err := reopened.Restore("target", "unknown"); err == nil {
+		t.Fatal("restore accepted an unknown snapshot")
+	}
+}
+
+func TestStoreImmutableSnapshotsRejectEveryWritePath(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		write func(*Store) error
+	}{
+		{name: "normal commit", write: func(store *Store) error { return store.View("fixed").Commit(Graph{}) }},
+		{name: "runtime append", write: func(store *Store) error {
+			return store.AppendNode("fixed", Subgraph{ID: "knowledge"}, Node{ID: "new", Statement: "new"})
+		}},
+		{name: "drop subgraph", write: func(store *Store) error { return store.DropSubgraph("fixed", "knowledge") }},
+		{name: "snapshot overwrite", write: func(store *Store) error { return store.SaveSnapshot("fixed", Graph{}) }},
+		{name: "restore another snapshot", write: func(store *Store) error { return store.Restore("fixed", "empty") }},
+		{name: "restore identical distinct snapshot", write: func(store *Store) error {
+			if err := store.SaveSnapshot("duplicate", store.Load("fixed")); err != nil {
+				return err
+			}
+			return store.Restore("fixed", "duplicate")
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "memory.json")
+			store, err := OpenStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			original := Graph{
+				Subgraphs: []Subgraph{{ID: "knowledge"}},
+				Nodes:     []Node{{ID: "n", Statement: "fixed memory", SubgraphIDs: []string{"knowledge"}}},
+			}
+			if err := store.SaveSnapshot("fixed", original); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.SaveSnapshot("empty", Graph{}); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := OpenStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := test.write(reopened); err == nil {
+				t.Fatal("write changed an immutable source")
+			}
+			if got := reopened.Load("fixed"); !reflect.DeepEqual(got, original.Clone()) {
+				t.Fatalf("failed write changed source: %#v", got)
+			}
+		})
+	}
+}
+
+func TestStoreSnapshotPersistenceFailureDoesNotPublishOrReplaceState(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "memory.json")
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := Graph{Nodes: []Node{{ID: "old", Statement: "old state"}}}
+	if err := store.Save("target", original); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSnapshot("ready", Graph{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSnapshot("uncommitted", Graph{}); err == nil {
+		t.Fatal("expected snapshot persistence failure")
+	}
+	if _, exists := store.Snapshot("uncommitted"); exists {
+		t.Fatal("failed snapshot became visible")
+	}
+	if err := store.Restore("target", "ready"); err == nil {
+		t.Fatal("expected restore persistence failure")
+	}
+	if got := store.Load("target"); !reflect.DeepEqual(got, original.Clone()) {
+		t.Fatalf("failed restore changed target: %#v", got)
+	}
+	if err := os.Remove(path + ".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSnapshot("uncommitted", Graph{}); err != nil {
+		t.Fatalf("snapshot retry: %v", err)
+	}
+	if err := store.Restore("target", "ready"); err != nil {
+		t.Fatalf("restore retry: %v", err)
 	}
 }
 
@@ -63,19 +182,19 @@ func TestStoreSaveFailureKeepsPreviousSnapshot(t *testing.T) {
 	}
 }
 
-func TestStoreForkFailureDoesNotCreateChild(t *testing.T) {
+func TestStoreRestoreFailureDoesNotCreateTarget(t *testing.T) {
 	store := NewStore()
-	if err := store.Save("parent", Graph{Nodes: []Node{{ID: "parent", Statement: "parent"}}}); err != nil {
+	if err := store.SaveSnapshot("ready", Graph{Nodes: []Node{{ID: "fact", Statement: "fact"}}}); err != nil {
 		t.Fatal(err)
 	}
 	store.path = filepath.Join(t.TempDir(), "missing", "memory.json")
 
-	err := store.Fork("parent", "child")
+	err := store.Restore("target", "ready")
 	if err == nil {
-		t.Fatal("Fork() error = nil, want persistence error")
+		t.Fatal("Restore() error = nil, want persistence error")
 	}
-	if got := store.Load("child"); len(got.Nodes) != 0 {
-		t.Fatalf("Load(child) after failed Fork = %#v, want empty graph", got.Nodes)
+	if _, exists := store.Snapshot("target"); exists {
+		t.Fatal("failed Restore created a target environment")
 	}
 }
 
@@ -224,44 +343,33 @@ func TestStoreSaveLoadDoesNotShareBackingData(t *testing.T) {
 	}
 }
 
-func TestStoreForkCopiesParentThenIsolatesWrites(t *testing.T) {
+func TestStoreRestoreCopiesSnapshotThenIsolatesWrites(t *testing.T) {
 	t.Parallel()
 
 	store := NewStore()
-	store.Save("parent", Graph{
-		Nodes: []Node{{ID: "n1", Statement: "from-parent"}},
-	})
-	store.Fork("parent", "child")
-
-	if got := store.Load("child"); len(got.Nodes) != 1 || got.Nodes[0].Statement != "from-parent" {
-		t.Fatalf("forked child = %#v, want from-parent", got)
+	if err := store.SaveSnapshot("ready", Graph{
+		Nodes: []Node{{ID: "n1", Statement: "accepted input"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Restore("target", "ready"); err != nil {
+		t.Fatal(err)
 	}
 
-	store.Save("child", Graph{
-		Nodes: []Node{{ID: "n1", Statement: "from-child"}},
-	})
-	if store.Load("parent").Nodes[0].Statement != "from-parent" {
-		t.Fatal("child write leaked into parent")
+	if got := store.Load("target"); len(got.Nodes) != 1 || got.Nodes[0].Statement != "accepted input" {
+		t.Fatalf("restored environment = %#v, want accepted input", got)
 	}
-	if store.Load("child").Nodes[0].Statement != "from-child" {
-		t.Fatal("child write did not stay in child")
+
+	if err := store.Save("target", Graph{
+		Nodes: []Node{{ID: "n1", Statement: "target update"}},
+	}); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestStoreForkDoesNotOverwriteExistingChild(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	store.Save("parent", Graph{
-		Nodes: []Node{{ID: "n1", Statement: "parent"}},
-	})
-	store.Save("child", Graph{
-		Nodes: []Node{{ID: "n1", Statement: "existing"}},
-	})
-	store.Fork("parent", "child")
-
-	if store.Load("child").Nodes[0].Statement != "existing" {
-		t.Fatal("fork overwrote an existing child snapshot")
+	if store.Load("ready").Nodes[0].Statement != "accepted input" {
+		t.Fatal("target write leaked into input snapshot")
+	}
+	if store.Load("target").Nodes[0].Statement != "target update" {
+		t.Fatal("target write did not stay in target")
 	}
 }
 
@@ -274,15 +382,15 @@ func TestStoreStatsExposeMemoryGraphInventory(t *testing.T) {
 		Nodes:     []Node{{ID: "n-1", Statement: "fact", SubgraphIDs: []string{"sg-1"}}},
 		Edges:     []Edge{{FromRef: "subgraph:sg-1", ToNodeID: "n-1", Kind: EdgeKindDerivesFromSubgraph}},
 	}
-	if err := store.Save("parent", graph); err != nil {
+	if err := store.SaveSnapshot("ready", graph); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Fork("parent", "child"); err != nil {
+	if err := store.Restore("target", "ready"); err != nil {
 		t.Fatal(err)
 	}
 
 	got := store.Stats()
-	if got.Environments != 2 || got.Baselines != 1 || got.Subgraphs != 2 || got.Nodes != 2 || got.Edges != 2 {
+	if got.Environments != 2 || got.Subgraphs != 2 || got.Nodes != 2 || got.Edges != 2 {
 		t.Fatalf("stats = %#v", got)
 	}
 }

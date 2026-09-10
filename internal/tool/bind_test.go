@@ -51,10 +51,7 @@ func TestBindMemoryToolsStayInTheirEnv(t *testing.T) {
 	}
 }
 
-func TestBindReplacesGlobalMemoryTools(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
+func TestBindReplacesMemoryCallbacks(t *testing.T) {
 	store := ctxgraph.NewStore()
 	store.Save("env-1", ctxgraph.Graph{
 		Subgraphs: []ctxgraph.Subgraph{{ID: "bound"}},
@@ -67,10 +64,11 @@ func TestBindReplacesGlobalMemoryTools(t *testing.T) {
 		}},
 	})
 
+	var original ctxgraph.Copy
 	leaking := MemoryTools(func() ctxgraph.Copy {
-		return ctxgraph.Clone("leak")
+		return original
 	}, func(copy ctxgraph.Copy) error {
-		ctxgraph.Update(copy)
+		original = copy
 		return nil
 	})
 	tools := Bind(store, "env-1", leaking)
@@ -79,8 +77,8 @@ func TestBindReplacesGlobalMemoryTools(t *testing.T) {
 		t.Fatalf("add: %v", err)
 	}
 
-	if nodes := ctxgraph.Clone("check").Graph.NodesInSubgraphs([]string{"bound"}); len(nodes) != 0 {
-		t.Fatalf("bound write leaked to global graph: %#v", nodes)
+	if nodes := original.Graph.NodesInSubgraphs([]string{"bound"}); len(nodes) != 0 {
+		t.Fatalf("bound write leaked to the original memory callbacks: %#v", nodes)
 	}
 	if nodes := store.Load("env-1").NodesInSubgraphs([]string{"bound"}); len(nodes) != 1 || nodes[0].ID != "n1" {
 		t.Fatal("bound write did not stay in env-1")

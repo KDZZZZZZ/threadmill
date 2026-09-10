@@ -1,5 +1,7 @@
 # Threadmill 相比 Pi 的高并发 Agent OS 架构与效果
 
+> **历史材料（统一边迁移前）**：本页保留当时的设计、提示词或测试记录；root、spawn/join、任务树及旧输入协议不再作为当前规范。现行语义与实现边界见[统一边设计](unified-edge-design.md)，当前配置以 `threadmill.yaml` 为准。历史性能与测试结论仅适用于文中所列版本。
+
 | 项目 | 内容 |
 | --- | --- |
 | 文档状态 | 当前架构说明与固定实测基线 |
@@ -86,7 +88,7 @@ flowchart LR
 | Task 完成、取消和恢复是显式状态 | Release、Discard、Reap 的安全时点确定 | 逻辑 Agent 不必永久占有目录、挂载或进程 |
 | 每个工具调用绑定环境 ID | 文件视图与命令归属确定 | 命令前才按需物化；所有命令可进入同一个机器级调度器 |
 
-角色工作区的选择和清理在 [`internal/coordination/assemble.go`](../internal/coordination/assemble.go)，Join Session 的创建、处置守卫和回收在 [`internal/coordination/run.go`](../internal/coordination/run.go)、[`internal/coordination/join_tool.go`](../internal/coordination/join_tool.go) 与 [`internal/vfs/join.go`](../internal/vfs/join.go)。命令调度器拿到同一个环境 ID，先物化正确视图，再申请物理执行槽，见 [`internal/exec/scheduler.go`](../internal/exec/scheduler.go#L224-L317)。
+角色工作区的选择和清理在 [`internal/coordination/assemble.go`](../internal/coordination/assemble.go)，历史 Join Session 的创建、处置守卫和回收在 [`internal/coordination/run.go`](../internal/coordination/run.go)、[迁移前的 join_tool.go](https://github.com/KDZZZZZZ/threadmill/blob/dbcd2a092d6a1bb76471c8fdcb672454afaf35ac/internal/coordination/join_tool.go) 与迁移前的 `internal/vfs/join.go`。当前输入原语见 [`internal/vfs/input_changes.go`](../internal/vfs/input_changes.go)。命令调度器拿到同一个环境 ID，先物化正确视图，再申请物理执行槽，见 [`internal/exec/scheduler.go`](../internal/exec/scheduler.go#L224-L317)。
 
 所以这里的因果关系是：**协调图定义资源所有权和边界，Tool Layer 强制执行边界，VFS 才能安全共享文件基线，Exec 才能安全复用物理槽。** 没有前两层，OverlayFS 和 semaphore 仍可外挂，但外部编排必须自行维护父子关系、合入点、清理点和监控归属，很难形成同一套端到端快路径。
 
@@ -118,7 +120,7 @@ flowchart LR
 | Fork | 逻辑 snapshot + delta | 无需复制基线 | Agent 多但真正执行命令的比例低 |
 | Materialize | 原生或 FUSE OverlayFS | reflink → 完整复制 | 只在命令需要真实目录时付费 |
 | Absorb | 直接读取 OverlayFS `upperdir` | 分桶 fingerprint → 内容比较 | 只读取实际修改和 whiteout，不扫描合并目录 |
-| 顺序交接 | Handoff 已物化目录 | 普通逻辑 Fork | Planner/Executor/Verifier 串行时避免重复物化 |
+| 迁移前的顺序交接 | Handoff 已物化目录（统一边后已删除） | 普通逻辑 Fork | 历史优化：串行后继移动目录；当前消费者使用固定输出 |
 
 Materialize 对同一环境做 singleflight，并用独立 I/O 槽控制复制风暴，见 [`internal/vfs/live.go`](../internal/vfs/live.go#L16-L45)。原生和 FUSE OverlayFS 吸收优先只扫描 upper 层，把 whiteout 当删除日志，遇到未知语义再退回正确的合并树算法，见 [`internal/vfs/absorb_overlay_linux.go`](../internal/vfs/absorb_overlay_linux.go#L43-L124)。
 
@@ -174,7 +176,7 @@ Threadmill 的记忆不是一份不断增长的聊天串，而是带来源、状
 
 设计目标是“允许可整理的混乱”：底图允许冗余和局部冲突，读取时按当前 Task 子图取最小相关视图。只有节点总量或单次新增跨过软阈值时，才调用一个受限的整理 Agent；失败只记录事件，不阻断任务，见 [`internal/agent/curation.go`](../internal/agent/curation.go#L14-L45) 和 [`internal/agent/curation.go`](../internal/agent/curation.go#L78-L136)。
 
-这限制的是送入模型的上下文和整理调用次数，不等同于底层记忆存储零复制。当前 `context.Store.Fork` 仍会克隆父图和 merge baseline，见 [`internal/context/store.go`](../internal/context/store.go#L182-L215)；本次本地运行时压测没有覆盖大记忆图，因此没有把记忆存储扩展性计入首页性能结论。
+这限制的是送入模型的上下文和整理调用次数，不等同于底层记忆存储零复制。当前记忆输入使用不可变快照与交集/差异分区，见 [`internal/context/input.go`](../internal/context/input.go)；本次本地运行时压测没有覆盖大记忆图，因此没有把记忆存储扩展性计入首页性能结论。
 
 ### 5. 监控直接对应容量决策
 

@@ -1,6 +1,6 @@
 # Threadmill 验收计划（草案）
 
-状态：v0.2。合成用例只做协议冒烟，主要结论来自真实项目；压力测试全程采集运行指标，性能阈值在首轮基线后校准。
+状态：v0.3，协调语义同步 [统一边设计](docs/unified-edge-design.md)。下文是验收计划，§11 的旧版本记录不证明本次迁移通过全部用例。合成用例只做协议冒烟，主要结论来自真实项目；压力测试全程采集运行指标，性能阈值在首轮基线后校准。
 
 ## 1. 验收目标
 
@@ -13,7 +13,7 @@
   -> 协调图（planner -> executor -> verifier）
   -> Agent ReAct（模型 -> 工具 -> 模型）
   -> VFS / 命令执行 / 记忆图
-  -> 子任务 spawn / join 或动态求助
+  -> 普通任务依赖 / 统一 Input 或动态求助
   -> 任务报告、持久化、取消与恢复
 ```
 
@@ -72,12 +72,12 @@
 | F04 | P1 | TUI | 输入、流式输出、任务活动、token、resize、Esc、Ctrl+C、`/quit` | 不重复渲染流式全文；状态正确；取消后仍可继续输入；退出无卡死 |
 | F05 | P0 | Provider / ReAct | Responses API、SSE、文本、工具调用、工具结果回灌、usage | 完成“模型调用工具，再读取结果回答”；delta 顺序正确；最终答复不重复 |
 | F06 | P0 | 文件与 bash 工具 | read/write/edit/ls/grep/find/bash、超时、输出截断、非零退出 | 工具结果可被模型继续使用；路径不能越界；超时能终止进程组；输出上限生效 |
-| F07 | P0 | VFS 与环境隔离 | fork、snapshot、三路 merge、冲突、release、live/overlay 同步 | 父子/兄弟环境不可见对方未合并修改；合法增量合并；冲突原子失败；宿主基线不被意外修改 |
-| F08 | P0 | 协调图主流程 | pending 图替换、planner/executor/verifier 顺序、报告 | 三角色各执行一次且顺序正确；verifier 输出成为任务报告；完成后进度被清理 |
-| F09 | P1 | 子任务与动态求助 | spawn/join、requestHelp/provideHelp、非法成环/跨树 | 可并行的子任务被调度并 join；求助任务完成后原节点恢复；非法图不产生部分变更 |
-| F10 | P1 | 记忆与上下文 | 订阅、organize、drop、compact、fork/merge、重启加载 | 相关记忆可找回；未订阅内容不注入；drop 不删图；compact 保留关键事实；环境间不串记忆 |
-| F11 | P0 | checkpoint 与恢复 | 模型中断、工具前后中断、角色完成后中断、进程重启 | 已完成角色不重跑；未完成 ReAct 可继续；无重复任务报告；完成后 checkpoint 清理 |
-| F12 | P0 | 取消与资源回收 | manager 抢占、任务树取消、命令进程组回收、临时目录 | 取消在时限内返回；子任务和 bash 子进程不残留；再次发送消息可正常工作 |
+| F07 | P0 | VFS 与环境隔离 | snapshot、完整状态交集、差异候选、冲突、release、live/overlay 同步 | 环境不可见其他任务尚未选入的修改；共同状态复用，差异含删除/类型/权限；冲突原子失败；保留快照不随新 base 改变；宿主发布不影响其他环境 |
+| F08 | P0 | 协调图主流程 | pending 图替换、planner/executor/verifier 顺序、报告 | 三角色各执行一次且顺序正确；verifier 输出成为任务报告；完成的导出 journal 清除，持久配对出口与输入恢复记录保留 |
+| F09 | P1 | 普通依赖、动态求助与持久线程 | tasks/edges、requestHelp/provide_help、Input、成环、continue/close | 独立任务并发；单来源直接继承，共同部分直接取，差异先文件后记忆；仅显式返回边阻塞求助者；无出边任务不阻塞无关任务；persistent 跨重启保留并可继续；非法图无部分变更 |
+| F10 | P1 | 记忆与上下文 | 订阅、organize、drop、compact、统一 input/snapshot、重启加载 | 相关记忆可找回；未订阅内容不注入；drop 不删图；compact 保留关键事实；环境间不串记忆 |
+| F11 | P0 | checkpoint 与恢复 | 模型中断、工具前后中断、成对出口提交、输入冻结、进程重启、版本校验 | 已有持久化 Output/Pending 的角色不重跑；中断输入按原批次恢复；报告重试不重跑已提交角色；旧 graph/progress 被拒绝；不据此宣称未提交模型/工具副作用恰好一次 |
+| F12 | P0 | 取消与资源回收 | 单 task 取消、Manager 会话停止、命令进程组回收、临时工作区 | 取消在时限内返回并回收该运行的命令；不按创建关系取消其他 task；persistent 的持久快照保留且可恢复；再次发送消息可正常工作 |
 | F13 | P1 | 事件与日志 | model/tool start/delta/end/error、agent ID、token | 事件成对、顺序可解释；delta 不刷入常规日志；错误有 agent/tool 上下文且无敏感信息 |
 | F14 | P1 | 真实项目交付 | 定位、修改、构建、测试、diff 质量、范围控制 | 结果由项目自己的验收命令证明；不改无关文件；不伪造测试；报告与实际状态一致 |
 | F15 | P0 | 压测监控 | 延迟、流量、错误、饱和度、runtime、资源回收 | 监控缺口先补齐；压测期间可定位每次卡顿/失败所在阶段；异常触发告警并保留 profile |
@@ -117,18 +117,18 @@ go test -tags=integration -run '^TestLiveReActWithUserInputAndTool$' -v ./intern
 - 修改命中根因、范围可解释；不得删除或弱化失败测试来制造通过。
 - 定向测试和受影响包测试通过，最终 patch 可由普通 git 工具审阅。
 - 最终产生唯一任务报告，包含耗时、token、outcome。
-- progress 和 ReAct checkpoint 在成功后清理。
+- 已完成的导出 journal 和 ReAct checkpoint 清理；持久配对出口与 TaskProgress.Inputs 恢复记录保留，不删除全部 progress。
 
-### L04：子任务、join 与动态求助（P1）
+### L04：普通依赖、统一输入与动态求助（P1）
 
-准备两个互不依赖的输入，要求两个子任务分别处理，再由父 verifier 汇总；其中一个角色在运行时调用 `coordination_requestHelp` 提交编排建议，manager 用 `coordination_orchestrate(action=provide_help)` 增加帮助任务。
+准备两个互不依赖的输入，要求两个普通 task 分别处理，再通过显式依赖把两份出口接入汇总角色；其中一个角色在运行时调用 `coordination_requestHelp` 提交编排建议，manager 用 `coordination_orchestrate(action=provide_help)` 增加帮助任务及显式返回边。另建没有跨 task 出边的 persistent task，完成一轮、重启并继续。
 
-检查并行启动、槽位限制、兄弟隔离、join 顺序、子记忆/文件合并、原任务恢复，以及同一求助不会被重复合并。
+检查并行启动、槽位限制、任务隔离、完整交集复用、文件先于记忆、单来源不整理、原任务恢复，以及同一求助不会被重复消费。persistent task 应保留身份和旧出口，继续时创建新激活；其创建者结束或无关任务完成不应被它阻塞。
 
 已有真实协调图测试作为基础：
 
 ```sh
-go test -tags=integration -run '^TestLiveGraphRunMemoryOpsAndEnvVersions$' -v ./internal/coordination
+go test -tags=integration -run '^TestLiveSingleSourceInputKeepsMemoryAndFilesPaired$' -v ./internal/coordination
 ```
 
 ### L05：跨轮记忆与压缩（P1）
@@ -141,7 +141,7 @@ go test -tags=integration -run '^TestLiveGraphRunMemoryOpsAndEnvVersions$' -v ./
 
 分别在以下位置终止：模型流式中、工具调用前、长 bash 中、planner 完成后、子任务运行中。先用 Esc/中断做优雅取消，再模拟进程退出并重新启动。
 
-要求取消后不再输出旧任务 delta；长命令及子进程组被回收；重启只续跑未完成部分；已完成角色、已合并求助和任务报告不重复。
+要求取消后不再输出该运行的旧 delta；长命令及子进程组被回收；重启按持久输入和成对出口恢复，不重新选择前驱或重跑已提交角色。分别验证单 task 取消不扩散到独立任务、held 来源只阻塞其消费者，以及 persistent 继续后仍能读取旧文件与记忆。
 
 ### L07：故障注入（P0）
 
@@ -158,7 +158,7 @@ go test -tags=integration -run '^TestLiveGraphRunMemoryOpsAndEnvVersions$' -v ./
 - 能否先读项目约束，再定位相关实现、调用方和测试。
 - 能否用项目已有工具完成构建和验证，而不是只做文本编辑。
 - 大仓库中是否只加载相关上下文，是否会被无关文件拖慢或压爆窗口。
-- 两个子任务并行时是否真正隔离，join 后是否保留双方非冲突修改。
+- 两个任务并行时是否真正隔离，统一 Input 是否直接复用共同部分并按明确决策保留双方差异。
 - 面对冲突、失败测试或依赖问题时，是否如实报告而不是宣称完成。
 - 最终改动是否最小、可维护、无无关文件和敏感信息。
 
@@ -175,11 +175,11 @@ go test -tags=integration -run '^TestLiveGraphRunMemoryOpsAndEnvVersions$' -v ./
 | 用户请求 | 请求数、成功/失败/取消、排队时长、首字延迟、总耗时、重试次数 |
 | 模型 | 请求耗时、TTFT、输入/输出/reasoning/cache token、流式中断、provider 错误分类、估算费用 |
 | Agent | ReAct step、tool call、compact 次数、上下文使用率、checkpoint save/load/discard |
-| 协调图 | active/pending/completed/canceled task、图宽度/深度、spawn/join/help 次数、节点等待时长 |
+| 协调图 | active/idle/done/failed/canceled/closed task、图宽度/深度、依赖数、Input 阶段/help/activation 次数、节点等待时长 |
 | 工具与 exec | 调用次数/耗时/错误、执行队列长度、active slots、进程启动耗时、超时、截断、退出码 |
-| VFS/记忆 | materialize/absorb/fork/merge/flush 耗时、字节量、冲突、节点/边/子图数量、存储文件大小 |
+| VFS/记忆 | materialize/absorb、环境创建、完整输入分区与应用、flush 耗时、字节量、冲突、节点/边/子图数量、存储文件大小 |
 | Go/runtime | CPU、RSS/heap、GC 次数和暂停、goroutine、线程、mutex/block、文件描述符 |
-| 资源回收 | 子进程组、live 临时目录、checkpoint、progress、磁盘占用在任务结束后的残留量 |
+| 资源回收 | 子进程组、live 临时目录、checkpoint、progress；另记持久 Output、floor、归档与记忆的保留磁盘量，不把保留历史等同于临时资源泄漏 |
 
 ### 在线告警和自动取证
 
@@ -202,16 +202,16 @@ go test -tags=integration -run '^TestLiveGraphRunMemoryOpsAndEnvVersions$' -v ./
 | ID | 压力维度 | 负载阶梯 | 主要观察 |
 | --- | --- | --- | --- |
 | S01 | 请求突发 | 1/10/50/100 条连续 Send | manager 队列、响应串线、取消与尾延迟 |
-| S02 | 协调图 | 宽度 1/4/16/64，深度 1/3/6，总任务至 100 | 调度正确性、spawn/join、内存、饥饿、死锁 |
+| S02 | 协调图 | 宽度 1/4/16/64，深度 1/3/6，总任务至 100，含无出边/held/persistent task | 普通依赖调度、Input、无关任务不阻塞、内存、饥饿、死锁 |
 | S03 | 命令调度 | 100/500/1000 个短命令，slots=1/2/4/8 | 并发上限、排队、公平性、进程回收、吞吐 |
 | S04 | 仓库规模 | 1k/10k/50k+ 文件，含大文件和深目录 | materialize、grep/find、上下文选择、磁盘与 RSS |
 | S05 | 记忆与长会话 | 1k/10k/100k 节点，20/100/500 轮 | 查询、压缩、持久化、恢复、上下文溢出 |
-| S06 | 文件竞争 | 兄弟任务写不同文件、同文件、文件/目录互换 | 隔离、三路 merge、冲突原子性、无静默覆盖 |
+| S06 | 文件竞争 | 并行任务写不同文件、同文件、文件/目录互换或删除 | 隔离、完整交集与差异处理、冲突原子性、无静默覆盖 |
 | S07 | 故障风暴 | 5%/20% provider/tool 失败、SSE 截断、随机超时 | 错误传播、状态一致性、恢复、告警准确性 |
 | S08 | 随机取消/重启 | 在每个角色和工具阶段注入取消或进程退出 | checkpoint、幂等、资源回收、重复副作用 |
 | S09 | Soak | 30 分钟预跑、2 小时验收、8 小时扩展 | 慢泄漏、状态漂移、长尾、费用和磁盘增长 |
 
-压力通过标准：没有 panic、race、死锁、越界访问、静默数据丢失或环境串线；所有未注入失败的任务最终进入明确终态；active exec 从不超过 slots；负载撤除后进程、goroutine、FD、临时目录和队列回到稳态范围。达到饱和后允许延迟上升，但不能出现吞吐永久坍塌或取消失效。
+压力通过标准：没有 panic、race、死锁、越界访问、静默数据丢失或环境串线；所有未注入失败且已启用的激活最终完成，persistent 进入 idle；active exec 从不超过 slots；负载撤除后进程、goroutine、FD、临时工作区和队列回到稳态范围。持久归档/floor 的增长单列，当前没有新增自动 GC。达到饱和后允许延迟上升，但不能出现吞吐永久坍塌或取消失效。
 
 ## 8. 性能与真实项目质量
 
@@ -224,14 +224,14 @@ go test -tags=integration -run '^TestLiveGraphRunMemoryOpsAndEnvVersions$' -v ./
 | 真实模型首字延迟 | L01 | P95 <= 10s；provider 时间单列 |
 | 一次工具 ReAct | L02 | P95 <= 45s，5 次至少 4 次成功 |
 | Threadmill 自举任务 | L03 | 在任务预算内完成；受影响测试通过；相同任务 P95 不比基线慢 20% |
-| 动态求助任务 | L04 | P95 <= 300s，3 次全部完成且无重复 join |
-| 取消延迟 | 长模型请求、长 bash、100 节点任务树 | 本地部分 P95 <= 2s；provider 断连单列 |
-| 文件视图 | 1k/10k/50k+ 文件的 materialize/absorb/fork/merge | 记录 sec/op、B/op、allocs/op；显著回归不超过 20% |
-| 记忆图 | 1k/10k/100k 节点的查询/fork/merge/flush | 记录 P50/P95、堆内存；显著回归不超过 20% |
-| 稳态资源 | S01–S08 后回落 | GC 后 RSS 相对稳态增长 <= 20%；goroutine/FD/子进程/临时目录无净增长 |
+| 动态求助任务 | L04 | P95 <= 300s，3 次全部完成且无重复输入消费 |
+| 取消延迟 | 长模型请求、长 bash、100 节点普通 DAG 的单 task 取消与会话停止 | 本地部分 P95 <= 2s；provider 断连单列 |
+| 文件视图 | 1k/10k/50k+ 文件的 materialize/absorb、环境创建、完整输入比较与应用 | 记录 sec/op、B/op、allocs/op；显著回归不超过 20% |
+| 记忆图 | 1k/10k/100k 节点的查询、快照、交集/差异分区与 flush | 记录 P50/P95、堆内存；显著回归不超过 20% |
+| 稳态资源 | S01–S08 后回落 | Go GC 后 RSS 相对稳态增长 <= 20%；goroutine/FD/子进程/临时工作区无净增长；保留磁盘快照单列 |
 | 单任务效率 | 每类真实项目任务 | 报告总时长、模型调用、tool call、token、估算费用及每个成功任务成本 |
 
-采样必须拆出排队、VFS、进程启动、provider 连接、首 token、模型生成、工具、join/merge、持久化时间，避免把 provider 慢误判为 Threadmill 慢。出现性能异常时，以 pprof/trace 定位后再决定是否优化。
+采样必须拆出排队、VFS、进程启动、provider 连接、首 token、模型生成、工具、Input 文件/记忆阶段、持久化时间，避免把 provider 慢误判为 Threadmill 慢。出现性能异常时，以 pprof/trace 定位后再决定是否优化。
 
 ## 9. 建议执行顺序
 
@@ -256,7 +256,7 @@ go test -tags=integration -run '^TestLiveGraphRunMemoryOpsAndEnvVersions$' -v ./
 - 性能达到建议门槛；未达到时有分段耗时、profile 或明确外部 provider 证据。
 - 所有失败、豁免和待定产品语义均有责任人及复验条件。
 
-## 11. 当前基线与待确认项
+## 11. 历史基线与当前语义边界
 
 2026-08-20 在 `feat/tui` 工作树重新执行 `go build ./...`、`go vet ./...`、`go test -shuffle=on ./...` 和 `go test -race -shuffle=on ./...`，均通过。先前 `TestSchedulerDoesNotAbsorbOnRun` 与既定的 `Run -> Release -> Absorb` 生命周期矛盾，测试口径已修正，exec 阻断解除。
 
@@ -264,7 +264,9 @@ go test -tags=integration -run '^TestLiveGraphRunMemoryOpsAndEnvVersions$' -v ./
 
 当前已有空闲/错误快照，覆盖 model/tool/task/memory 生命周期、TTFT、时延桶、token、exec 排队和槽位、VFS/记忆规模以及 Go heap/goroutine/GC。监控层仍不算完备：Prometheus/OpenTelemetry 导出、run/trace 关联、周期性 CPU/RSS/FD/子进程采样、在线告警和异常自动 profile 仍待实现。
 
-首轮开始前还需确认两项产品语义：
+以下协调语义已明确，验收按当前统一边实现执行：
 
-1. 根任务的文件增量最终应合入宿主工作区、保留为可恢复版本，还是只存在于任务环境；不同答案会改变 L03/L06 的落盘标准。
-2. provider 级 429/5xx 是否要求 Threadmill 自动重试；当前草案只要求错误可观察、状态不损坏、用户可再次发起。
+1. 普通 task 的文件与记忆出口持久保留；发布由 Manager 显式选择当前已结束激活的已提交文件出口，在宿主项目目录展示，不自动推进其他环境的 base。任务完成、验收结论和发布分别判断。
+2. graph/progress 版本 1 拒绝旧 root/Join 状态，没有自动迁移器；恢复验收使用匹配版本的新状态。保留旧版本证据不能替代本轮回归。
+
+provider 级 429/5xx 是否要求 Threadmill 自动重试仍需在真实供应商验收时确认；当前草案只要求错误可观察、状态不损坏、用户可再次发起。

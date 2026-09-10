@@ -38,30 +38,37 @@ type Options struct {
 	Logger     *slog.Logger
 }
 
-// Manager 是长命经理加串行任务调度。
+// Manager 是长命经理，调度相互独立的 task 激活。
 type Manager struct {
-	graph       *coordination.Graph
-	stores      coordination.Stores
-	assemble    coordination.AssembleFunc
-	loop        *agent.Loop
-	tokens      *tokenCounter
-	metrics     *event.Collector
-	events      *event.Bus
-	output      func(string)
-	modelName   string
-	startedAt   time.Time
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
-	mu          sync.Mutex
-	inputs      []managerInput
-	pending     int
-	idle        *sync.Cond
-	err         error
-	settling    bool
-	cancelRun   context.CancelFunc
-	taskRunning bool
-	logFile     io.Closer
-	logger      *slog.Logger
+	graph     *coordination.Graph
+	stores    coordination.Stores
+	assemble  coordination.AssembleFunc
+	loop      *agent.Loop
+	tokens    *tokenCounter
+	metrics   *event.Collector
+	events    *event.Bus
+	output    func(string)
+	outputMu  sync.Mutex
+	modelName string
+	startedAt time.Time
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	mu        sync.Mutex
+	inputs    []managerInput
+	pending   int
+	idle      *sync.Cond
+	err       error
+	settling  bool
+	runs      map[string]taskRun
+	closed    bool
+	logFile   io.Closer
+	logger    *slog.Logger
+}
+
+type taskRun struct {
+	activation uint64
+	cancel     context.CancelFunc // nil after this activation settles
+	persistent bool
 }
 
 // managerInput 只保存与 loop FIFO 同步的投影元数据；消息本体由 loop 持有。
@@ -158,6 +165,7 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 		output:    opt.Output,
 		modelName: file.LLM.Model,
 		startedAt: time.Now(),
+		runs:      make(map[string]taskRun),
 	}
 	s.idle = sync.NewCond(&s.mu)
 	s.stores = coordination.Stores{
@@ -228,12 +236,17 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := loop.AddHooks(s.hooks()); err != nil {
+	ctx, cancel := context.WithCancel(parent)
+	s.cancel = cancel
+	s.graph.SetRunContext(ctx)
+	if err := loop.AddHooks(s.hooks(ctx)); err != nil {
+		cancel()
 		return nil, err
 	}
 	loop.BindCheckpointStore(managerCheckpoints)
 	managerPending, err := loop.HasPendingCheckpoint()
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	if managerPending {
@@ -241,8 +254,6 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 		s.pending++
 	}
 	s.loop = loop
-	ctx, cancel := context.WithCancel(parent)
-	s.cancel = cancel
 	ready := make(chan struct{})
 	var readyOnce sync.Once
 	if err := loop.AddHooks(agent.Hooks{
@@ -280,12 +291,7 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 		return nil, ctx.Err()
 	}
 	if !managerPending {
-		err = s.runReady(ctx)
-	}
-	if err != nil {
-		cancel()
-		s.wg.Wait()
-		return nil, err
+		s.runReady(ctx)
 	}
 	s.wg.Add(1)
 	go func() {
@@ -302,7 +308,7 @@ func (s *Manager) Send(text string) {
 	s.enqueue(text, true)
 }
 
-// WaitIdle 等到经理队列清空且没有正在跑的任务。
+// WaitIdle 等到经理队列清空且普通任务完成；独立持久任务可继续运行。
 func (s *Manager) WaitIdle(ctx context.Context) error {
 	if ctx == nil {
 		panic("nil context")
@@ -316,7 +322,11 @@ func (s *Manager) WaitIdle(ctx context.Context) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for (((s.pending > 0 || s.taskRunning) && s.err == nil) || s.settling) && ctx.Err() == nil {
+	for ctx.Err() == nil {
+		waiting := s.pending > 0 || s.foregroundRunningLocked()
+		if !s.settling && (!waiting || s.err != nil) {
+			break
+		}
 		s.idle.Wait()
 	}
 	if s.err != nil && !errors.Is(s.err, context.Canceled) {
@@ -330,13 +340,21 @@ func (s *Manager) Snapshot() coordination.Snapshot {
 	return s.graph.Snapshot()
 }
 
-// Cancel 取消正在跑的任务树或抢占经理当前轮；没有可取消的工作时返回 false。
+// Cancel 取消普通任务；没有普通任务时抢占经理当前轮。持久任务由会话管理。
 func (s *Manager) Cancel() bool {
 	s.mu.Lock()
-	cancel := s.cancelRun
+	cancels := make(map[string]context.CancelFunc, len(s.runs))
+	for taskID, run := range s.runs {
+		if run.cancel != nil && !run.persistent {
+			cancels[taskID] = run.cancel
+		}
+	}
 	s.mu.Unlock()
-	if cancel != nil {
+	for taskID, cancel := range cancels {
+		s.graph.CancelTask(taskID)
 		cancel()
+	}
+	if len(cancels) > 0 {
 		return true
 	}
 	return s.loop.Preempt()
@@ -347,29 +365,43 @@ func (s *Manager) ModelName() string {
 	return s.modelName
 }
 
-// Busy 表示还有未完成的经理轮或任务。
+// Busy 表示还有未完成的经理轮或普通任务。
 func (s *Manager) Busy() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.pending > 0 || s.taskRunning || s.settling
+	return s.pending > 0 || s.foregroundRunningLocked() || s.settling
+}
+
+func (s *Manager) foregroundRunningLocked() bool {
+	for _, run := range s.runs {
+		if run.cancel != nil && !run.persistent {
+			return true
+		}
+	}
+	return false
 }
 
 // Metrics 返回 manager、事件、调度器、VFS、记忆图和 Go runtime 的一致近照。
 func (s *Manager) Metrics() Metrics {
 	s.mu.Lock()
 	pending := s.pending
-	taskRunning := s.taskRunning
+	running := 0
+	for _, run := range s.runs {
+		if run.cancel != nil {
+			running++
+		}
+	}
 	startedAt := s.startedAt
 	s.mu.Unlock()
 
 	var memoryStats runtime.MemStats
 	runtime.ReadMemStats(&memoryStats)
 	metrics := Metrics{
-		Time:        time.Now(),
-		Uptime:      time.Since(startedAt),
-		Pending:     pending,
-		TaskRunning: taskRunning,
-		Events:      s.metrics.Snapshot(),
+		Time:    time.Now(),
+		Uptime:  time.Since(startedAt),
+		Pending: pending,
+		Tasks:   TaskMetrics{Running: running},
+		Events:  s.metrics.Snapshot(),
 		Runtime: RuntimeMetrics{
 			Goroutines:   runtime.NumGoroutine(),
 			HeapAlloc:    memoryStats.HeapAlloc,
@@ -398,17 +430,25 @@ func (s *Manager) Metrics() Metrics {
 			metrics.Tasks.Failed++
 		case coordination.OutcomeCanceled:
 			metrics.Tasks.Canceled++
+		case coordination.OutcomeIdle:
+			metrics.Tasks.Idle++
+		case coordination.OutcomeClosed:
+			metrics.Tasks.Closed++
 		}
 	}
 	return metrics
 }
 
-// Close 停掉经理循环。
+// Close 停止会话，等待实际执行结束后释放存储。
 func (s *Manager) Close() {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
 	if s.cancel != nil {
 		s.cancel()
 	}
 	s.wg.Wait()
+	s.graph.WaitRuns()
 	if s.stores.Files != nil {
 		if err := s.stores.Files.Close(); err != nil && s.logger != nil {
 			s.logger.Warn("close VFS", "error", err)
@@ -419,7 +459,7 @@ func (s *Manager) Close() {
 	}
 }
 
-func (s *Manager) hooks() agent.Hooks {
+func (s *Manager) hooks(session context.Context) agent.Hooks {
 	return agent.Hooks{
 		BeforeTurn: []agent.TurnHook{
 			func(_ context.Context, message agent.UserMessage) error {
@@ -443,12 +483,12 @@ func (s *Manager) hooks() agent.Hooks {
 				if len(message.ToolCalls) > 0 || message.Content == "" || s.output == nil {
 					return nil
 				}
-				s.output(message.Content)
+				s.emitOutput(message.Content)
 				return nil
 			},
 		},
 		AfterTurn: []agent.AfterTurnHook{
-			func(ctx context.Context, user agent.UserMessage, result agent.TurnResult) error {
+			func(_ context.Context, user agent.UserMessage, result agent.TurnResult) error {
 				if result.Err != nil && !errors.Is(result.Err, context.Canceled) {
 					if agent.IsRecoverableTurnError(result.Err) {
 						return nil
@@ -462,11 +502,7 @@ func (s *Manager) hooks() agent.Hooks {
 						return err
 					}
 				}
-				err := s.runReady(ctx)
-				if err != nil {
-					s.setErr(err)
-					return err
-				}
+				s.runReady(session)
 				s.turnDone()
 				return nil
 			},
@@ -474,87 +510,89 @@ func (s *Manager) hooks() agent.Hooks {
 	}
 }
 
-func (s *Manager) runReady(ctx context.Context) error {
-	s.mu.Lock()
-	running := s.taskRunning
-	s.mu.Unlock()
-	if running {
-		return nil
-	}
-
-	var root coordination.Task
+func (s *Manager) runReady(ctx context.Context) {
 	for _, task := range s.graph.Snapshot().Tasks {
-		if task.SpawnedFrom != "" || task.Outcome != coordination.OutcomeActive {
+		if task.Outcome != coordination.OutcomeActive || task.RunPolicy == coordination.RunPolicyHeld {
 			continue
 		}
-		// root 串行执行且后继 root 的环境从队头 fork：队头 held 时整条队列停住，
-		// 不能越过它启动后面的 root，否则会 fork 到一个还没运行过的环境。
-		if task.RunPolicy == coordination.RunPolicyHeld {
-			return nil
+		s.mu.Lock()
+		if s.closed || ctx.Err() != nil {
+			s.mu.Unlock()
+			return
 		}
-		root = task
-		break
-	}
-	if root.ID == "" {
-		return nil
-	}
-
-	runCtx, cancel := context.WithCancel(ctx)
-	s.mu.Lock()
-	if s.taskRunning {
+		if run, started := s.runs[task.ID]; started && (run.activation == task.Activation || run.cancel != nil) {
+			s.mu.Unlock()
+			continue
+		}
+		runCtx, cancel := context.WithCancel(ctx)
+		s.runs[task.ID] = taskRun{activation: task.Activation, cancel: cancel, persistent: task.Persistent}
+		s.wg.Add(1)
 		s.mu.Unlock()
-		cancel()
-		return nil
+		go func() {
+			defer s.wg.Done()
+			s.runTask(runCtx, cancel, task)
+			// Continue may have queued another activation while this run settled.
+			s.runReady(ctx)
+		}()
 	}
-	s.taskRunning = true
-	s.cancelRun = cancel
-	s.wg.Add(1)
-	s.mu.Unlock()
-	go func() {
-		defer s.wg.Done()
-		s.runRoot(runCtx, cancel, root)
-	}()
-	return nil
 }
 
-func (s *Manager) runRoot(ctx context.Context, cancel context.CancelFunc, task coordination.Task) {
+func (s *Manager) runTask(ctx context.Context, cancel context.CancelFunc, task coordination.Task) {
 	defer cancel()
 	started := time.Now()
 	s.events.Publish(ctx, event.TaskStart(task.ID))
 	before := s.tokens.sumPrefix(task.ID + ":")
 	var report string
 	reported := false
+	completed := task
 	_, runErr := s.graph.RunWithReport(
 		ctx, task.ID, task.Info, s.stores, s.assemble,
-		func(latest coordination.Task, output string, taskErr error) error {
+		func(finished coordination.Task, output string, taskErr error) error {
+			completed = finished
 			tokens := s.tokens.sumPrefix(task.ID+":") - before
-			report = formatReport(latest, output, taskErr, time.Since(started), tokens)
-			if err := s.stores.ProjectManagerTaskReport(latest, report); err != nil {
+			report = formatReport(finished, output, taskErr, time.Since(started), tokens)
+			if err := s.stores.ProjectManagerTaskReport(finished, report); err != nil {
 				return err
 			}
 			reported = true
 			return nil
 		},
 	)
-	latest, _ := s.graph.Task(task.ID)
-	s.events.Publish(ctx, event.TaskEnd(task.ID, latest.Outcome, started, runErr))
-	if latest.Outcome == coordination.OutcomeActive || !reported {
+	// Failed persistence can leave this activation active. A newer activation's
+	// state belongs to its own run and must not replace the captured report task.
+	if latest, ok := s.graph.Task(task.ID); ok && latest.Activation == completed.Activation {
+		completed.Outcome = latest.Outcome
+	}
+	s.events.Publish(ctx, event.TaskEnd(task.ID, completed.Outcome, started, runErr))
+	if completed.Outcome == coordination.OutcomeActive || !reported {
 		s.mu.Lock()
-		s.taskRunning = false
-		s.cancelRun = nil
+		run := s.runs[task.ID]
+		run.cancel = nil
+		s.runs[task.ID] = run
 		s.mu.Unlock()
 		s.setErr(runErr)
 		return
 	}
 
-	if s.output != nil {
-		s.output(report)
-	}
+	s.emitOutput(report)
 	s.mu.Lock()
-	s.taskRunning = false
-	s.cancelRun = nil
-	s.enqueueLocked(report, false)
+	run := s.runs[task.ID]
+	run.cancel = nil
+	s.runs[task.ID] = run
+	if !s.closed {
+		s.enqueueLocked(report, false)
+	}
+	s.idle.Broadcast()
 	s.mu.Unlock()
+}
+
+func (s *Manager) emitOutput(text string) {
+	if s.output == nil {
+		return
+	}
+	s.outputMu.Lock()
+	defer s.outputMu.Unlock()
+	s.output(text)
 }
 
 func (s *Manager) enqueueManager(text string) {
@@ -568,6 +606,9 @@ func (s *Manager) enqueue(text string, projectUserMessage bool) {
 }
 
 func (s *Manager) enqueueLocked(text string, projectUserMessage bool) {
+	if s.closed {
+		return
+	}
 	s.inputs = append(s.inputs, managerInput{projectUserMessage: projectUserMessage})
 	s.pending++
 	s.loop.Enqueue(agent.UserMessage{Content: text})
@@ -579,7 +620,7 @@ func (s *Manager) turnDone() {
 	idle := false
 	if s.pending <= 0 {
 		s.pending = 0
-		idle = !s.taskRunning
+		idle = !s.foregroundRunningLocked()
 		if idle {
 			s.settling = true
 		}
@@ -603,12 +644,14 @@ func (s *Manager) logSnapshot() {
 	s.logger.Info("runtime snapshot",
 		"uptime", snapshot.Uptime,
 		"pending", snapshot.Pending,
-		"task_running", snapshot.TaskRunning,
+		"tasks_running", snapshot.Tasks.Running,
 		"tasks_total", snapshot.Tasks.Total,
 		"tasks_active", snapshot.Tasks.Active,
+		"tasks_idle", snapshot.Tasks.Idle,
 		"tasks_done", snapshot.Tasks.Done,
 		"tasks_failed", snapshot.Tasks.Failed,
 		"tasks_canceled", snapshot.Tasks.Canceled,
+		"tasks_closed", snapshot.Tasks.Closed,
 		"model_completed", snapshot.Events.Model.Completed,
 		"model_errors", snapshot.Events.Model.Errors,
 		"model_active", snapshot.Events.Model.Active,
@@ -710,14 +753,12 @@ func (s *Manager) logSnapshot() {
 		"vfs_materialize_copies", snapshot.VFS.MaterializeCopies,
 		"vfs_materialize_copy_errors", snapshot.VFS.MaterializeCopyErrors,
 		"vfs_materialize_copy_duration", snapshot.VFS.MaterializeCopyDuration,
-		"vfs_handoffs", snapshot.VFS.Handoffs,
 		"vfs_publish_attempts", snapshot.VFS.PublishAttempts,
 		"vfs_publish_commits", snapshot.VFS.PublishCommits,
 		"vfs_publish_errors", snapshot.VFS.PublishErrors,
 		"vfs_publish_cleanup_errors", snapshot.VFS.PublishCleanupErrors,
 		"vfs_publish_duration", snapshot.VFS.PublishDuration,
 		"memory_environments", snapshot.Memory.Environments,
-		"memory_baselines", snapshot.Memory.Baselines,
 		"memory_subgraphs", snapshot.Memory.Subgraphs,
 		"memory_nodes", snapshot.Memory.Nodes,
 		"memory_edges", snapshot.Memory.Edges,

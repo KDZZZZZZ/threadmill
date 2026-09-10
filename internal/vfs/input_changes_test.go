@@ -9,20 +9,19 @@ import (
 	"testing"
 )
 
-// applySafeJoin keeps the low-level conflict matrix focused on the safe join
-// strategy without retaining the removed production auto-merge API.
-func applySafeJoin(s *Store, candidateID, targetID string) error {
-	result, err := s.ApplyJoin(candidateID, targetID, nil, false)
+// applySafeInput exercises the safe input strategy across the conflict matrix.
+func applySafeInput(s *Store, candidateID, targetID string) error {
+	result, err := s.ApplyInput(candidateID, targetID, nil, false)
 	if err != nil {
 		return err
 	}
 	if len(result.Conflicts) > 0 {
-		return fmt.Errorf("vfs: join conflict: %s", result.Conflicts[0])
+		return fmt.Errorf("vfs: input conflict: %s", result.Conflicts[0])
 	}
 	return nil
 }
 
-func TestJoinChangesDoesNotModifyTarget(t *testing.T) {
+func TestInputChangesDoesNotModifyTarget(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -30,7 +29,7 @@ func TestJoinChangesDoesNotModifyTarget(t *testing.T) {
 	if err := target.Write("kept.txt", []byte("target")); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Fork("target", "candidate"); err != nil {
+	if err := store.CreateEnvironment("target", "candidate"); err != nil {
 		t.Fatal(err)
 	}
 	candidate := store.View("candidate")
@@ -41,16 +40,16 @@ func TestJoinChangesDoesNotModifyTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changes, err := store.JoinChanges("candidate")
+	changes, err := store.InputChanges("candidate")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []JoinChange{
-		{Path: "added.txt", Kind: JoinChangeAdded},
-		{Path: "kept.txt", Kind: JoinChangeModified},
+	want := []InputChange{
+		{Path: "added.txt", Kind: InputChangeAdded},
+		{Path: "kept.txt", Kind: InputChangeModified},
 	}
-	if !equalJoinChanges(changes, want) {
-		t.Fatalf("JoinChanges() = %#v, want %#v", changes, want)
+	if !equalInputChanges(changes, want) {
+		t.Fatalf("InputChanges() = %#v, want %#v", changes, want)
 	}
 
 	got, err := target.Read("kept.txt")
@@ -65,7 +64,7 @@ func TestJoinChangesDoesNotModifyTarget(t *testing.T) {
 	}
 }
 
-func TestApplyJoinAppliesOnlySelectedPaths(t *testing.T) {
+func TestApplyInputAppliesOnlySelectedPaths(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -76,7 +75,7 @@ func TestApplyJoinAppliesOnlySelectedPaths(t *testing.T) {
 	if err := target.Write("two.txt", []byte("base-two")); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Fork("target", "candidate"); err != nil {
+	if err := store.CreateEnvironment("target", "candidate"); err != nil {
 		t.Fatal(err)
 	}
 	candidate := store.View("candidate")
@@ -87,18 +86,18 @@ func TestApplyJoinAppliesOnlySelectedPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := store.ApplyJoin("candidate", "target", []string{"one.txt"}, false)
+	result, err := store.ApplyInput("candidate", "target", []string{"one.txt"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !equalStrings(result.Applied, []string{"one.txt"}) || len(result.Conflicts) != 0 {
-		t.Fatalf("ApplyJoin() = %#v, want one.txt applied", result)
+		t.Fatalf("ApplyInput() = %#v, want one.txt applied", result)
 	}
 	assertFileBody(t, target, "one.txt", "candidate-one")
 	assertFileBody(t, target, "two.txt", "base-two")
 }
 
-func TestApplyJoinConflictDoesNotPartiallyModifyTarget(t *testing.T) {
+func TestApplyInputConflictDoesNotPartiallyModifyTarget(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -109,7 +108,7 @@ func TestApplyJoinConflictDoesNotPartiallyModifyTarget(t *testing.T) {
 	if err := target.Write("clean.txt", []byte("base-clean")); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Fork("target", "candidate"); err != nil {
+	if err := store.CreateEnvironment("target", "candidate"); err != nil {
 		t.Fatal(err)
 	}
 	candidate := store.View("candidate")
@@ -123,18 +122,18 @@ func TestApplyJoinConflictDoesNotPartiallyModifyTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := store.ApplyJoin("candidate", "target", nil, false)
+	result, err := store.ApplyInput("candidate", "target", nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !equalStrings(result.Conflicts, []string{"conflict.txt"}) || len(result.Applied) != 0 {
-		t.Fatalf("ApplyJoin() = %#v, want conflict and no applied paths", result)
+		t.Fatalf("ApplyInput() = %#v, want conflict and no applied paths", result)
 	}
 	assertFileBody(t, target, "conflict.txt", "target")
 	assertFileBody(t, target, "clean.txt", "base-clean")
 }
 
-func TestApplyJoinPreservesDeletionAndExecutableBit(t *testing.T) {
+func TestApplyInputPreservesDeletionAndExecutableBit(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
@@ -142,7 +141,7 @@ func TestApplyJoinPreservesDeletionAndExecutableBit(t *testing.T) {
 	if err := target.Write("removed.txt", []byte("remove me")); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Fork("target", "candidate"); err != nil {
+	if err := store.CreateEnvironment("target", "candidate"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.View("candidate").Delete("removed.txt"); err != nil {
@@ -159,7 +158,7 @@ func TestApplyJoinPreservesDeletionAndExecutableBit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := store.ApplyJoin(
+	result, err := store.ApplyInput(
 		"candidate",
 		"target",
 		[]string{"removed.txt", "script.sh"},
@@ -169,7 +168,7 @@ func TestApplyJoinPreservesDeletionAndExecutableBit(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(result.Conflicts) != 0 || !equalStrings(result.Applied, []string{"removed.txt", "script.sh"}) {
-		t.Fatalf("ApplyJoin() = %#v", result)
+		t.Fatalf("ApplyInput() = %#v", result)
 	}
 	if _, err := target.Read("removed.txt"); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("removed.txt error = %v, want fs.ErrNotExist", err)
@@ -187,7 +186,7 @@ func TestApplyJoinPreservesDeletionAndExecutableBit(t *testing.T) {
 	}
 }
 
-func equalJoinChanges(left, right []JoinChange) bool {
+func equalInputChanges(left, right []InputChange) bool {
 	if len(left) != len(right) {
 		return false
 	}

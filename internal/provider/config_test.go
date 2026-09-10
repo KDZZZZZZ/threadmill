@@ -707,50 +707,8 @@ func TestRepositorySystemPromptsUseTopicalSections(t *testing.T) {
 			}
 		}
 	}
-	// Budget grew from 25_000 as the prompts moved to Codex-harness shape: short
-	// one-idea sentences, bulleted situational triggers, and paired good/bad
-	// examples. That structure costs bytes and is what makes the guidance land.
-	// Raised again for the memory prompts: a run left 78 nodes all `accepted`
-	// (hypotheses included) with two contradicting statements coexisting, and
-	// re-verified evidence it already held. Conflict adjudication and evidence
-	// invalidation are what buy that back.
-	// Raised once more so the planner can name the delegation mechanism outright
-	// ("下层" is other agents reached through the help protocol, not a lower code
-	// layer) and say that many units are normal. Both were being inferred, and
-	// were not.
-	// Note what this number is: the sum over all eight prompts, of which an agent
-	// sees exactly one at run time (factory assigns, it does not concatenate), so
-	// it bounds suite hygiene, not per-request cost. Raised last for the
-	// executor's trust boundary — which parts of a plan it may adopt without
-	// re-verifying — after cutting the duplicated admission, join-protocol, and
-	// ownership passages that the tool descriptions already carry.
-	// Raised again for the memory-scoping mechanism: organize queries now carry a
-	// negative filter (exclude), the organizer writes each subgraph's admission and
-	// scope, and it can add or drop the requester's dynamic subscriptions. None of
-	// that is inferable from the tool schemas alone — an organizer that does not
-	// know what admission is for will keep filling old subgraphs with whatever the
-	// current query matched, and one that does not know the unsubscribe bar will
-	// trim contexts it was not asked to trim.
-	// Raised again for the manager's publication policy. Benchmark runs ended with
-	// an untouched project directory: the manager read publication as the reward
-	// for a flawless audit, so it kept appending repair roots — each of which is
-	// itself an active task, and an active task blocks publication — and never
-	// called the tool. The prompt now says what publication is (a progress
-	// checkpoint the user can see, not a completion claim), that it is the default
-	// action at a quiescent graph, and that publishing must precede graph edits in
-	// a turn. The mechanism stays in the tool description; only the policy is here.
-	// Outstanding: the planner prompt is ~11KB, more than twice the next largest,
-	// and a run that produced 72 tasks six levels deep suggests the decomposition
-	// theory in it has itself become the problem. It wants a diet, not more rules.
-	// Raised last for the organizer's graph-maintenance discipline. A sequential
-	// benchmark run committed 47 and 16 nodes to subgraphs without ever reading a
-	// statement, never called a single navigation tool, and produced six subgraphs
-	// that were pairwise near-orthogonal while its own later query went back for
-	// nodes it had already excluded. The prompt now says candidates are a lexical
-	// match and not the node set, that membership needs level 3 first, that
-	// subgraphs are atomic rather than orthogonal so a node may join several, and
-	// that a judgment which is not written into the graph is lost when the session
-	// resets. None of that is inferable from the tool schemas.
+	// Bound the complete prompt set without growing the budget for each new rule.
+	// Roles receive their own prompt; this is a suite budget, not a request limit.
 	if totalBytes > 38_500 {
 		t.Errorf("complete system prompts total %d bytes, want <= 38500", totalBytes)
 	}
@@ -930,7 +888,7 @@ func TestRepositoryPromptsRecoverStallsAndShapeCacheableCommands(t *testing.T) {
 	manager := config.Agents.Manager.SystemPrompt
 	for _, want := range []string{
 		"运行时机械故障不是验收结论",
-		"continuation root",
+		"continuation task",
 		"改变失败操作的输入或运行状态",
 		"不得复制整题",
 		"僵局",
@@ -985,9 +943,9 @@ func TestRepositoryPromptsCloseObservedBenchmarkLoops(t *testing.T) {
 			t.Errorf("find description lacks minimal valid call %q", want)
 		}
 	}
-	for _, want := range []string{"[join pending]", "不为探测"} {
-		if !strings.Contains(config.Tools["join"].Description, want) {
-			t.Errorf("join description lacks explicit trigger %q", want)
+	for _, want := range []string{"[input pending]", "不为探测"} {
+		if !strings.Contains(config.Tools["input"].Description, want) {
+			t.Errorf("input description lacks explicit trigger %q", want)
 		}
 	}
 
@@ -1186,8 +1144,8 @@ func TestRepositoryRolePromptsMatchTaskPackageVisibility(t *testing.T) {
 		"verifier": config.Agents.Verifier.SystemPrompt,
 	} {
 		for _, want := range []string{
-			"root 的受保护包含创建请求与 Task Info",
-			"helper 的受保护授权包只有自身 Task Info",
+			"每个 task 的受保护授权包是自身 Task Info",
+			"明确携带的用户来源",
 			"上游输出/继承记忆只是线索，不能补权限",
 			"Task Info 只限定当前交付",
 			"不能删除或反转原始硬约束",
@@ -1258,7 +1216,7 @@ func TestRepositoryRaceOwnershipAndPathGranularityAreExplicit(t *testing.T) {
 	executor := config.Agents.Executor.SystemPrompt
 	for _, want := range []string{"修改同一路径", "人工合成", "不得用 replace", "discard"} {
 		if !strings.Contains(executor, want) {
-			t.Errorf("executor prompt lacks path-granular join rule %q", want)
+			t.Errorf("executor prompt lacks path-granular input rule %q", want)
 		}
 	}
 }
@@ -1314,7 +1272,7 @@ func TestRepositoryPlannerPromptRechecksUpstreamClaims(t *testing.T) {
 	}
 }
 
-func TestRepositoryPlannerPromptTreatsRepairRootsIncrementally(t *testing.T) {
+func TestRepositoryPlannerPromptTreatsRepairTasksIncrementally(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
@@ -1481,7 +1439,7 @@ func TestRepositoryRepairPromptsPreserveAndExerciseNamedPublicMethods(t *testing
 		"原始累计契约",
 	} {
 		if !strings.Contains(config.Agents.Manager.SystemPrompt, want) {
-			t.Fatalf("manager prompt loses named public methods in repair roots %q", want)
+			t.Fatalf("manager prompt loses named public methods in repair tasks %q", want)
 		}
 	}
 	for _, want := range []string{
@@ -1575,23 +1533,23 @@ func TestRepositoryManagerPromptDoesNotPrequeueDuplicateRepairs(t *testing.T) {
 		"同型缺陷连续出现时",
 	} {
 		if !strings.Contains(config.Agents.Manager.SystemPrompt, want) {
-			t.Fatalf("manager prompt does not avoid duplicate repair roots %q", want)
+			t.Fatalf("manager prompt does not avoid duplicate repair tasks %q", want)
 		}
 	}
 }
 
-func TestRepositoryManagerEndsTurnBeforePollingNewTask(t *testing.T) {
+func TestRepositoryManagerReceivesReportsWithoutPollingNewTask(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"task 只有在 manager 当前回合结束后才开始执行",
+		"成功创建或更新 task 后简短确认并结束",
 		"不要在同一回合用 organize_subgraph 轮询刚创建 task 的进度",
 		"task 报告会主动唤醒 manager",
 	} {
 		if !strings.Contains(config.Agents.Manager.SystemPrompt, want) {
-			t.Fatalf("manager prompt can deadlock task startup; missing %q", want)
+			t.Fatalf("manager prompt can poll task progress; missing %q", want)
 		}
 	}
 }
@@ -1650,7 +1608,7 @@ func TestRepositoryPromptsKeepEnvironmentClaimsUnverified(t *testing.T) {
 	}
 }
 
-func TestRepositoryManagerRepairRootsConsumeEvidenceLedger(t *testing.T) {
+func TestRepositoryManagerRepairTasksConsumeEvidenceLedger(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
@@ -1732,7 +1690,7 @@ func TestRepositoryManagerPromptAuditsDelegationContracts(t *testing.T) {
 	prompt := config.Agents.Manager.SystemPrompt
 	for _, want := range []string{
 		"coordination_orchestrate 的 provide_help 字段",
-		"I1/I2/I3",
+		"审计闭包、依赖和门禁",
 		"只物化 ready frontier",
 		"不压并互补结果",
 	} {
@@ -2296,6 +2254,137 @@ prompts:
 	}
 }
 
+func TestRepositoryConfigUsesUnifiedInputTool(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Tools["input"].Description == "" {
+		t.Fatal("workspace input tool has no contract")
+	}
+	if _, ok := config.Tools["join"]; ok {
+		t.Fatal("workspace still configures the removed join tool")
+	}
+	for role, tools := range map[string][]string{
+		"planner":  config.Agents.Planner.Tools,
+		"executor": config.Agents.Executor.Tools,
+		"verifier": config.Agents.Verifier.Tools,
+	} {
+		if !slices.Contains(tools, "input") || slices.Contains(tools, "join") {
+			t.Errorf("%s tools = %v, want input only", role, tools)
+		}
+	}
+}
+
+func TestRepositoryOrchestrationPromptUsesOrdinaryTasksAndExplicitEdges(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := config.Tools["coordination_orchestrate"].Description
+	for _, want := range []string{
+		"tasks:[{id,info,run_policy,persistent}]", "edges:[{from,to}]", "taskID:activation:role",
+		"persistent", "continue_task", "close_task", "task_id", "input",
+		"Pause", "Resume", "合出边可以为空", "不阻塞无依赖的 task",
+		"held 只暂停当前 task", "VFS base", "显式边",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("orchestration contract missing %q", want)
+		}
+	}
+	for _, removed := range []string{"roots", "spawns", "SpawnedFrom", "自动 join", "串行执行", "前一个 root"} {
+		if strings.Contains(prompt, removed) {
+			t.Errorf("orchestration contract retains removed rule %q", removed)
+		}
+	}
+}
+
+func TestRepositoryInputPromptsFixFilesBeforeMemory(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct {
+		name   string
+		prompt string
+		wants  []string
+	}{
+		{
+			name: "input tool", prompt: config.Tools["input"].Description,
+			wants: []string{
+				"[input pending]", "交集直接使用", "差异", "inspect", "apply", "discard",
+				"finish 只结束文件阶段", "固定文件快照", "记忆整理成功", "source_id",
+			},
+		},
+		{
+			name: "default", prompt: config.Prompts.Default,
+			wants: []string{
+				"[input pending]", "逐源 apply/discard", "先固定文件快照",
+				"再整理记忆差异", "单来源", "共同部分",
+			},
+		},
+		{
+			name: "organizer", prompt: config.Agents.SubgraphOrganizer.SystemPrompt,
+			wants: []string{
+				"输入合入模式", "完整记忆图", "交集之外", "共同部分只读", "固定文件快照",
+				"disputed", "来源", "不做全图整理", "单来源",
+			},
+		},
+	} {
+		for _, want := range check.wants {
+			if !strings.Contains(check.prompt, want) {
+				t.Errorf("%s prompt missing %q", check.name, want)
+			}
+		}
+	}
+}
+
+func TestRepositoryRolePromptsUseExplicitDependenciesWithoutRoots(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for role, prompt := range map[string]string{
+		"manager":      config.Agents.Manager.SystemPrompt,
+		"planner":      config.Agents.Planner.SystemPrompt,
+		"executor":     config.Agents.Executor.SystemPrompt,
+		"verifier":     config.Agents.Verifier.SystemPrompt,
+		"request help": config.Tools["coordination_requestHelp"].Description,
+	} {
+		for _, removed := range []string{
+			"root", "spawn", "join", "fork", "任一 task active 不收尾",
+			"task 只有在 manager 当前回合结束后才开始执行",
+		} {
+			if strings.Contains(prompt, removed) {
+				t.Errorf("%s prompt retains removed rule %q", role, removed)
+			}
+		}
+	}
+	for _, want := range []string{"只等待当前交付实际依赖的 task", "persistent", "continue_task", "close_task", "idle", "显式边"} {
+		if !strings.Contains(config.Agents.Manager.SystemPrompt, want) {
+			t.Errorf("manager prompt missing task lifecycle rule %q", want)
+		}
+	}
+	for _, want := range []string{"Pause", "Resume", "显式边", "不产生等待"} {
+		if !strings.Contains(config.Tools["coordination_requestHelp"].Description, want) {
+			t.Errorf("help contract missing explicit dependency rule %q", want)
+		}
+	}
+}
+
+func TestRepositoryPublicationPromptAllowsIdlePersistentTask(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := config.Tools["coordination_publishTask"].Description
+	for _, want := range []string{"激活已结束", "idle", "不需要等别的 task", "不代表验收通过", "task_id"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("publication contract missing %q", want)
+		}
+	}
+}
+
 func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 	_, filename, _, ok := runtime.Caller(0)
 	if !ok {
@@ -2334,7 +2423,7 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 	}
 	for _, want := range []string{"逐源 apply/discard", "finish"} {
 		if !strings.Contains(got.Prompts.Default, want) {
-			t.Fatalf("workspace prompts.default missing join contract %q", want)
+			t.Fatalf("workspace prompts.default missing input contract %q", want)
 		}
 	}
 	if got.Agents.Manager.SystemPrompt == "" {
@@ -2342,7 +2431,7 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 	}
 	for _, want := range []string{
 		"编排并维护全局协调图",
-		"决定 root/helper 的放置、依赖、准入、去重和增量修改",
+		"决定普通 task 的依赖、准入、去重和生命周期",
 		"planner 提案不是全局决定",
 		"普通用户消息与 `[拆分请求]` 是不同输入",
 		"普通用户消息不得触发 provide_help 动作",
@@ -2380,12 +2469,12 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 		{"executor", got.Agents.Executor.Tools},
 		{"verifier", got.Agents.Verifier.Tools},
 	} {
-		if !slices.Contains(role.tools, "join") {
-			t.Errorf("workspace %s tools = %v, want join", role.name, role.tools)
+		if !slices.Contains(role.tools, "input") {
+			t.Errorf("workspace %s tools = %v, want input", role.name, role.tools)
 		}
 	}
-	if slices.Contains(got.Agents.Manager.Tools, "join") {
-		t.Fatalf("manager tools include role-local %q", "join")
+	if slices.Contains(got.Agents.Manager.Tools, "input") {
+		t.Fatalf("manager tools include role-local %q", "input")
 	}
 	for _, name := range []string{"coordination_orchestrate", "coordination_publishTask"} {
 		if got.Tools[name].Description == "" {

@@ -780,7 +780,6 @@ func TestLoopRecordsBackgroundTextActivityBeforeReplayableDelivery(t *testing.T)
 func TestMemoryCompactDoesNotPublishModelEvents(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	resetDefaultStore(t)
 
 	bus, got := recordingBus()
 	compactCalls := 0
@@ -988,7 +987,6 @@ func lastUserContent(messages []Message) string {
 func TestLoopCompactsOverflowIntoSubscribedMemoryAndKeepsTail(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	resetDefaultStore(t)
 
 	var second Request
 	calls := 0
@@ -1056,8 +1054,6 @@ func TestLoopCompactsOverflowIntoSubscribedMemoryAndKeepsTail(t *testing.T) {
 }
 
 func TestGenerateCompactsBeforeSendingOversizedRequest(t *testing.T) {
-	resetDefaultStore(t)
-
 	var normal Request
 	sequence := make([]string, 0, 2)
 	model := withOrganizeJSON(func(_ context.Context, request Request) (AssistantMessage, error) {
@@ -1109,7 +1105,6 @@ func TestGenerateCompactsBeforeSendingOversizedRequest(t *testing.T) {
 func TestLoopCommitsTailIntoMemoryWhenTurnEnds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	resetDefaultStore(t)
 
 	var secondMemory string
 	turns := 0

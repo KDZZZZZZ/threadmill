@@ -2,6 +2,7 @@ package coordination
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,14 +10,31 @@ import (
 	"strings"
 )
 
+const graphStateVersion = 1
+
+// ErrGraphStateVersion rejects legacy graph formats and unsupported future formats.
+var ErrGraphStateVersion = errors.New("coordination: unsupported graph state version")
+
 type graphState struct {
-	Revision         int64       `json:"revision"`
-	NextID           uint64      `json:"next_id"`
-	PublishingTaskID string      `json:"publishing_task_id,omitempty"`
-	PublishedTaskID  string      `json:"published_task_id,omitempty"`
-	Tasks            []Task      `json:"tasks"`
-	Edges            []Edge      `json:"edges"`
-	Helps            []helpState `json:"helps,omitempty"`
+	Version    int              `json:"version"`
+	Nodes      []Node           `json:"nodes"`
+	Outputs    []Output         `json:"outputs"`
+	Revision   int64            `json:"revision"`
+	NextID     uint64           `json:"next_id"`
+	Publishing publicationState `json:"publishing,omitzero"`
+	Published  publicationState `json:"published,omitzero"`
+	Tasks      []Task           `json:"tasks"`
+	Edges      []Edge           `json:"edges"`
+	Helps      []helpState      `json:"helps,omitempty"`
+}
+
+// publicationState fixes one selection across task continuation and retries.
+type publicationState struct {
+	TaskID     string `json:"task_id"`
+	Activation uint64 `json:"activation"`
+	NodeID     string `json:"node_id"`
+	FilesRef   string `json:"files_ref"`
+	Outcome    string `json:"outcome"`
 }
 
 // OpenGraph 打开一张持久化协调图；文件不存在时创建空图。
@@ -52,94 +70,174 @@ func OpenGraph(path string) (*Graph, error) {
 }
 
 func validateGraphState(state graphState) error {
+	if state.Version != graphStateVersion {
+		return fmt.Errorf("%w: got %d, want %d", ErrGraphStateVersion, state.Version, graphStateVersion)
+	}
 	if state.Revision < 0 {
 		return fmt.Errorf("negative revision")
 	}
-	knownTasks := make(map[string]struct{}, len(state.Tasks))
-	knownNodes := make(map[string]struct{}, len(state.Tasks)*3)
+	tasks := make(map[string]Task, len(state.Tasks))
+	envs := make(map[string]bool, len(state.Tasks))
 	var maxID uint64
 	for _, task := range state.Tasks {
-		if task.ID == "" {
-			return fmt.Errorf("task id is required")
+		if !validTaskID(task.ID) {
+			return fmt.Errorf("invalid task ID %q", task.ID)
 		}
-		if _, exists := knownTasks[task.ID]; exists {
+		if _, exists := tasks[task.ID]; exists {
 			return fmt.Errorf("duplicate task %q", task.ID)
 		}
-		knownTasks[task.ID] = struct{}{}
-		if raw := strings.TrimPrefix(task.ID, "task-"); raw != task.ID {
-			id, err := strconv.ParseUint(raw, 10, 64)
-			if err != nil {
-				return fmt.Errorf("invalid task id %q", task.ID)
-			}
-			maxID = max(maxID, id)
+		if task.Activation == 0 {
+			return fmt.Errorf("task %q has no activation", task.ID)
 		}
-		for role, node := range map[string]Node{
-			RolePlanner: task.Planner, RoleExecutor: task.Executor, RoleVerifier: task.Verifier,
-		} {
-			if node.ID != task.ID+":"+role || node.TaskID != task.ID || node.Role != role {
-				return fmt.Errorf("invalid %s node for task %q", role, task.ID)
+		if !validTaskID(task.Env.ID) || envs[task.Env.ID] {
+			return fmt.Errorf("invalid or duplicate environment %q", task.Env.ID)
+		}
+		if task.RunPolicy != RunPolicyEnabled && task.RunPolicy != RunPolicyHeld {
+			return fmt.Errorf("task %q has invalid run policy %q", task.ID, task.RunPolicy)
+		}
+		switch task.Outcome {
+		case OutcomeActive, OutcomeDone, OutcomeCanceled, OutcomeFailed:
+		case OutcomeIdle, OutcomeClosed:
+			if !task.Persistent {
+				return fmt.Errorf("nonpersistent task %q has outcome %q", task.ID, task.Outcome)
 			}
-			if _, exists := knownNodes[node.ID]; exists {
-				return fmt.Errorf("duplicate node %q", node.ID)
+		default:
+			return fmt.Errorf("task %q has invalid outcome %q", task.ID, task.Outcome)
+		}
+		tasks[task.ID] = task
+		envs[task.Env.ID] = true
+		if raw, ok := strings.CutPrefix(task.ID, "task-"); ok {
+			if id, err := strconv.ParseUint(raw, 10, 64); err == nil {
+				maxID = max(maxID, id)
 			}
-			knownNodes[node.ID] = struct{}{}
 		}
 	}
 	if state.NextID < maxID {
-		return fmt.Errorf("next id %d precedes task %d", state.NextID, maxID)
+		return fmt.Errorf("next ID %d precedes task %d", state.NextID, maxID)
 	}
-	for field, taskID := range map[string]string{
-		"publishing task": state.PublishingTaskID,
-		"published task":  state.PublishedTaskID,
-	} {
-		if taskID == "" {
-			continue
+	nodes := make(map[string]Node, len(state.Nodes))
+	for _, node := range state.Nodes {
+		task, ok := tasks[node.TaskID]
+		if !ok {
+			return fmt.Errorf("node %q has unknown task %q", node.ID, node.TaskID)
 		}
-		if _, ok := knownTasks[taskID]; !ok {
-			return fmt.Errorf("%s %q is unknown", field, taskID)
+		if !validNodeForTask(task, node) {
+			return fmt.Errorf("invalid node %q", node.ID)
 		}
-		for _, task := range state.Tasks {
-			if task.ID == taskID && task.Outcome != OutcomeDone && task.Outcome != OutcomeFailed {
-				return fmt.Errorf("%s %q has outcome %q", field, taskID, task.Outcome)
+		if _, exists := nodes[node.ID]; exists {
+			return fmt.Errorf("duplicate node %q", node.ID)
+		}
+		nodes[node.ID] = node
+	}
+	for _, task := range state.Tasks {
+		for role, node := range map[string]Node{RolePlanner: task.Planner, RoleExecutor: task.Executor, RoleVerifier: task.Verifier} {
+			if node.ID != fmt.Sprintf("%s:%d:%s", task.ID, task.Activation, role) || node.TaskID != task.ID || node.Role != role || nodes[node.ID] != node {
+				return fmt.Errorf("invalid %s node for task %q", role, task.ID)
 			}
 		}
 	}
+	outputs := make(map[string]Output, len(state.Outputs))
+	for _, output := range state.Outputs {
+		if node, ok := nodes[output.Node.ID]; !ok || node != output.Node {
+			return fmt.Errorf("output has unknown node %q", output.Node.ID)
+		}
+		if output.FilesRef == "" || output.MemoryRef == "" {
+			return fmt.Errorf("output %q requires paired file and memory references", output.Node.ID)
+		}
+		if _, exists := outputs[output.Node.ID]; exists {
+			return fmt.Errorf("duplicate output %q", output.Node.ID)
+		}
+		outputs[output.Node.ID] = output
+	}
+	edges := make(map[Edge]bool, len(state.Edges))
+	successors := make(map[string][]string)
+	indegree := make(map[string]int, len(nodes))
 	for _, edge := range state.Edges {
-		if _, ok := knownNodes[edge.From]; !ok {
+		if _, ok := nodes[edge.From]; !ok {
 			return fmt.Errorf("edge from unknown node %q", edge.From)
 		}
-		if _, ok := knownNodes[edge.To]; !ok {
+		if _, ok := nodes[edge.To]; !ok {
 			return fmt.Errorf("edge to unknown node %q", edge.To)
 		}
-		switch edge.Kind {
-		case EdgeKindSequence, EdgeKindSpawn, EdgeKindJoin:
-		default:
-			return fmt.Errorf("invalid edge kind %q", edge.Kind)
+		if edges[edge] {
+			return fmt.Errorf("duplicate edge %q → %q", edge.From, edge.To)
+		}
+		edges[edge] = true
+		successors[edge.From] = append(successors[edge.From], edge.To)
+		indegree[edge.To]++
+	}
+	queue := make([]string, 0, len(nodes))
+	for id := range nodes {
+		if indegree[id] == 0 {
+			queue = append(queue, id)
 		}
 	}
-	knownHelp := make(map[string]struct{}, len(state.Helps))
+	for i := 0; i < len(queue); i++ {
+		for _, id := range successors[queue[i]] {
+			indegree[id]--
+			if indegree[id] == 0 {
+				queue = append(queue, id)
+			}
+		}
+	}
+	if len(queue) != len(nodes) {
+		return ErrCycle
+	}
+	for _, task := range state.Tasks {
+		for _, edge := range []Edge{{From: task.Planner.ID, To: task.Executor.ID}, {From: task.Executor.ID, To: task.Verifier.ID}} {
+			if !edges[edge] {
+				return fmt.Errorf("task %q is missing role sequence edge", task.ID)
+			}
+		}
+	}
+	for _, publication := range []publicationState{state.Publishing, state.Published} {
+		if publication == (publicationState{}) {
+			continue
+		}
+		task, ok := tasks[publication.TaskID]
+		if !ok {
+			return fmt.Errorf("unknown publication task %q", publication.TaskID)
+		}
+		output, ok := outputs[publication.NodeID]
+		if !ok || output.Node.TaskID != task.ID || output.FilesRef != publication.FilesRef {
+			return fmt.Errorf("publication does not match committed output %q", publication.NodeID)
+		}
+		if publication.Activation == 0 || publication.Activation > task.Activation ||
+			publication.NodeID != fmt.Sprintf("%s:%d:%s", task.ID, publication.Activation, output.Node.Role) {
+			return fmt.Errorf("invalid publication activation for %q", publication.NodeID)
+		}
+		switch publication.Outcome {
+		case OutcomeDone, OutcomeFailed:
+		case OutcomeIdle, OutcomeClosed:
+			if !task.Persistent {
+				return fmt.Errorf("nonpersistent publication task %q has outcome %q", task.ID, publication.Outcome)
+			}
+		default:
+			return fmt.Errorf("invalid publication outcome %q", publication.Outcome)
+		}
+	}
+	helps := make(map[string]bool, len(state.Helps))
 	for _, help := range state.Helps {
 		if help.ID == "" || help.CallID == "" {
-			return fmt.Errorf("help id and call id are required")
+			return fmt.Errorf("help ID and call ID are required")
 		}
-		if _, exists := knownHelp[help.ID]; exists {
+		if helps[help.ID] {
 			return fmt.Errorf("duplicate help request %q", help.ID)
 		}
-		knownHelp[help.ID] = struct{}{}
-		if _, ok := knownNodes[help.NodeID]; !ok {
-			return fmt.Errorf("help request %q has unknown node %q", help.ID, help.NodeID)
+		helps[help.ID] = true
+		for _, id := range []string{help.NodeID, help.PauseID, help.ResumeID} {
+			if _, ok := nodes[id]; !ok {
+				return fmt.Errorf("help request %q has unknown node %q", help.ID, id)
+			}
 		}
 		if help.Units != nil {
 			if err := validateHelpUnits(help.Units); err != nil {
-				return fmt.Errorf("help request %q has invalid frontier: %w", help.ID, err)
+				return fmt.Errorf("help request %q: %w", help.ID, err)
 			}
 		}
-		for _, child := range help.Children {
-			if _, ok := knownNodes[child.From]; !ok {
-				return fmt.Errorf("help request %q has unknown source %q", help.ID, child.From)
-			}
-			if _, ok := knownTasks[child.TaskID]; !ok {
-				return fmt.Errorf("help request %q has unknown child %q", help.ID, child.TaskID)
+		for _, id := range help.TaskIDs {
+			if _, ok := tasks[id]; !ok {
+				return fmt.Errorf("help request %q has unknown task %q", help.ID, id)
 			}
 		}
 	}
@@ -147,44 +245,40 @@ func validateGraphState(state graphState) error {
 }
 
 func (g *Graph) stateLocked() graphState {
-	tasks := append([]Task(nil), g.tasks...)
-	for i := range tasks {
-		tasks[i].SpawnedFrom = ""
-		tasks[i].Joins = nil
-		tasks[i].JoinedBy = nil
-	}
 	return graphState{
-		Revision:         g.revision,
-		NextID:           g.nextID,
-		PublishingTaskID: g.publishingTaskID,
-		PublishedTaskID:  g.publishedTaskID,
-		Tasks:            tasks,
-		Edges:            append([]Edge(nil), g.edges...),
-		Helps:            cloneHelpStates(g.helps),
+		Version:    graphStateVersion,
+		Nodes:      append([]Node(nil), g.nodes...),
+		Outputs:    g.outputListLocked(),
+		Revision:   g.revision,
+		NextID:     g.nextID,
+		Publishing: g.publishing,
+		Published:  g.published,
+		Tasks:      append([]Task(nil), g.tasks...),
+		Edges:      append([]Edge(nil), g.edges...),
+		Helps:      cloneHelpStates(g.helps),
 	}
 }
 
 func (g *Graph) applyStateLocked(state graphState) {
 	g.tasks = append([]Task(nil), state.Tasks...)
-	for i := range g.tasks {
-		if g.tasks[i].RunPolicy == "" {
-			g.tasks[i].RunPolicy = RunPolicyEnabled
-		}
+	g.nodes = append([]Node(nil), state.Nodes...)
+	g.outputs = make(map[string]Output, len(state.Outputs))
+	for _, output := range state.Outputs {
+		g.outputs[output.Node.ID] = output
 	}
 	g.edges = append([]Edge(nil), state.Edges...)
 	g.nextID = state.NextID
 	g.helps = cloneHelpStates(state.Helps)
 	g.revision = state.Revision
-	g.publishingTaskID = state.PublishingTaskID
-	g.publishedTaskID = state.PublishedTaskID
-	g.executing = false
+	g.publishing = state.Publishing
+	g.published = state.Published
 }
 
 func cloneHelpStates(states []helpState) []helpState {
 	cloned := append([]helpState(nil), states...)
 	for i := range cloned {
 		cloned[i].Units = cloneHelpUnits(states[i].Units)
-		cloned[i].Children = append([]helpChildState(nil), states[i].Children...)
+		cloned[i].TaskIDs = append([]string(nil), states[i].TaskIDs...)
 	}
 	return cloned
 }
@@ -210,10 +304,29 @@ func (g *Graph) saveLocked() error {
 
 func (g *Graph) saveOrRestoreLocked(before graphState) error {
 	if err := g.saveLocked(); err != nil {
-		executing := g.executing
 		g.applyStateLocked(before)
-		g.executing = executing
 		return err
 	}
+	g.notifyLocked()
 	return nil
+}
+
+func (g *Graph) saveAndProjectLocked(before graphState) error {
+	if err := g.saveLocked(); err != nil {
+		g.applyStateLocked(before)
+		return err
+	}
+	if err := emitTasks(g.taskSink, g.snapshotLocked().Tasks); err != nil {
+		g.applyStateLocked(before)
+		return errors.Join(err, g.saveLocked())
+	}
+	g.notifyLocked()
+	return nil
+}
+
+func (g *Graph) notifyLocked() {
+	if g.changed != nil {
+		close(g.changed)
+	}
+	g.changed = make(chan struct{})
 }

@@ -4,35 +4,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
-// ErrInvalidPending 表示提交的期望子图不合法。
+// ErrInvalidPending indicates an invalid desired graph.
 var ErrInvalidPending = errors.New("coordination: invalid pending subgraph")
 
-// PendingSpawn 是一条期望的 spawn/join，info 是子任务目标。
-type PendingSpawn struct {
-	From string `json:"from"`
-	Join string `json:"join"`
-	Info string `json:"info"`
+// PendingTask describes an existing task or a new independent task.
+// Omitted IDs allocate task-N; existing IDs preserve omitted info and run policy.
+// Persistent tasks keep that property until closed through CloseTask.
+type PendingTask struct {
+	ID         string `json:"id,omitempty"`
+	Info       string `json:"info,omitempty"`
+	RunPolicy  string `json:"run_policy,omitempty"`
+	Persistent bool   `json:"persistent,omitempty"`
 }
 
-// PendingRoot 是一个期望的根任务。RunPolicy 省略表示保持现状；新建 root 默认 enabled。
-type PendingRoot struct {
-	Info      string `json:"info"`
-	RunPolicy string `json:"run_policy,omitempty"`
-}
-
-// PendingSubgraph 是尚未执行切片的完整期望状态；Run 中也可改尚未开始的节点。
-// 根按序号对齐：少于现有根数会失败，多出的从前一个根的 task 环境 fork；
-// spawn 仍按 from/join 匹配，已完成的辅助分支自动保留。
+// PendingSubgraph is the complete desired pending task and dependency set.
 type PendingSubgraph struct {
-	Roots  []PendingRoot  `json:"roots,omitempty"`
-	Spawns []PendingSpawn `json:"spawns"`
+	Tasks []PendingTask `json:"tasks"`
+	Edges []Edge        `json:"edges"`
 }
 
-// ReplacePending 用期望态替换尚未执行的切片。Run 中已开始的 task info 和节点关联边不可变。
-// 失败（含成环）时图不变。
+// ReplacePending atomically replaces the editable graph and projects task info.
 func (g *Graph) ReplacePending(ctx context.Context, next PendingSubgraph) (Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
@@ -41,311 +36,300 @@ func (g *Graph) ReplacePending(ctx context.Context, next PendingSubgraph) (Snaps
 		return Snapshot{}, fmt.Errorf("replace pending: nil graph")
 	}
 	g.mu.Lock()
-	nextGraph := &Graph{
-		tasks:            append([]Task(nil), g.tasks...),
-		edges:            append([]Edge(nil), g.edges...),
-		nextID:           g.nextID,
-		helps:            cloneHelpStates(g.helps),
-		statePath:        g.statePath,
-		publishingTaskID: g.publishingTaskID,
-		publishedTaskID:  g.publishedTaskID,
-	}
-	if err := nextGraph.applyPendingLocked(next); err != nil {
-		g.mu.Unlock()
+	defer g.mu.Unlock()
+	before := g.stateLocked()
+	if err := g.applyPendingLocked(next); err != nil {
 		return Snapshot{}, err
 	}
-	if err := completedTasksUnchanged(g, nextGraph); err != nil {
-		g.mu.Unlock()
+	g.revision++
+	if err := g.saveAndProjectLocked(before); err != nil {
 		return Snapshot{}, err
 	}
-	if g.running != nil {
-		if err := runningSliceUnchanged(g, nextGraph, g.running); err != nil {
-			g.mu.Unlock()
-			return Snapshot{}, err
-		}
-	}
-	nextGraph.revision = g.revision + 1
-	if err := nextGraph.saveLocked(); err != nil {
-		g.mu.Unlock()
-		return Snapshot{}, err
-	}
-	snap := nextGraph.snapshotLocked()
-	if err := emitTasks(g.taskSink, snap.Tasks); err != nil {
-		rollbackErr := g.saveLocked()
-		g.mu.Unlock()
-		return Snapshot{}, errors.Join(err, rollbackErr)
-	}
-	g.tasks = nextGraph.tasks
-	g.edges = nextGraph.edges
-	g.nextID = nextGraph.nextID
-	g.helps = nextGraph.helps
-	g.revision = nextGraph.revision
-	g.publishingTaskID = nextGraph.publishingTaskID
-	g.publishedTaskID = nextGraph.publishedTaskID
-	g.mu.Unlock()
+	snap := g.snapshotLocked()
 	return snap, nil
 }
 
-func runningSliceUnchanged(current, next *Graph, running *runner) error {
-	startedTasks, startedNodes := running.executionSnapshot()
-	for id := range startedTasks {
-		before, ok := current.taskByIDLocked(id)
-		if !ok {
-			continue
-		}
-		after, ok := next.taskByIDLocked(id)
-		if !ok {
-			return fmt.Errorf("%w: task %q already started", ErrGraphBusy, id)
-		}
-		if before.Info != after.Info {
-			return fmt.Errorf("%w: task %q info already in use", ErrGraphBusy, id)
-		}
-		if before.RunPolicy != after.RunPolicy {
-			return fmt.Errorf("%w: task %q run policy already in use", ErrGraphBusy, id)
+// applyPendingLocked validates a complete candidate before exposing any mutation.
+func (g *Graph) applyPendingLocked(next PendingSubgraph) error {
+	candidate := New()
+	candidate.applyStateLocked(g.stateLocked())
+	if err := candidate.replacePendingLocked(next); err != nil {
+		return err
+	}
+	if err := immutableHistoryUnchanged(g, candidate); err != nil {
+		return err
+	}
+	for _, running := range g.runners {
+		if err := runningSliceUnchanged(g, candidate, running); err != nil {
+			return err
 		}
 	}
+	if err := persistedInputsUnchanged(g, candidate); err != nil {
+		return err
+	}
+	state := candidate.stateLocked()
+	if err := validateGraphState(state); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPending, err)
+	}
+	g.applyStateLocked(state)
+	return nil
+}
 
-	beforeEdges := make(map[Edge]struct{}, len(current.edges))
-	for _, edge := range current.edges {
-		beforeEdges[edge] = struct{}{}
+// addPendingLocked applies an additive change for an existing Help request.
+// The caller owns the graph lock, revision and durable transaction.
+func (g *Graph) addPendingLocked(next PendingSubgraph) error {
+	full := PendingSubgraph{Edges: append([]Edge(nil), g.edges...)}
+	for _, task := range g.tasks {
+		full.Tasks = append(full.Tasks, PendingTask{ID: task.ID, Info: task.Info, RunPolicy: task.RunPolicy, Persistent: task.Persistent})
 	}
-	afterEdges := make(map[Edge]struct{}, len(next.edges))
-	for _, edge := range next.edges {
-		afterEdges[edge] = struct{}{}
+	full.Tasks = append(full.Tasks, next.Tasks...)
+	seen := make(map[Edge]bool, len(full.Edges))
+	for _, edge := range full.Edges {
+		seen[edge] = true
 	}
-	for edge := range beforeEdges {
-		if _, unchanged := afterEdges[edge]; unchanged {
+	for _, edge := range next.Edges {
+		if !seen[edge] {
+			full.Edges = append(full.Edges, edge)
+			seen[edge] = true
+		}
+	}
+	return g.applyPendingLocked(full)
+}
+
+func (g *Graph) replacePendingLocked(next PendingSubgraph) error {
+	oldEdges := append([]Edge(nil), g.edges...)
+	oldSet := make(map[Edge]bool, len(oldEdges))
+	for _, edge := range oldEdges {
+		oldSet[edge] = true
+	}
+	wanted := make(map[string]PendingTask, len(next.Tasks))
+	for _, want := range next.Tasks {
+		want.Info = strings.TrimSpace(want.Info)
+		want.RunPolicy = strings.TrimSpace(want.RunPolicy)
+		if want.RunPolicy != "" && want.RunPolicy != RunPolicyEnabled && want.RunPolicy != RunPolicyHeld {
+			return fmt.Errorf("%w: invalid run policy %q", ErrInvalidPending, want.RunPolicy)
+		}
+		if want.ID != "" && !validTaskID(want.ID) {
+			return fmt.Errorf("%w: invalid task ID %q", ErrInvalidPending, want.ID)
+		}
+		if _, duplicate := wanted[want.ID]; duplicate && want.ID != "" {
+			return fmt.Errorf("%w: duplicate task %q", ErrInvalidPending, want.ID)
+		}
+		if _, exists := g.taskByIDLocked(want.ID); !exists {
+			if want.Info == "" {
+				return fmt.Errorf("%w: task info is required", ErrInvalidPending)
+			}
+			task := g.addTaskLocked(want.ID)
+			want.ID = task.ID
+		}
+		wanted[want.ID] = want
+	}
+	tasks := make([]Task, 0, len(wanted))
+	for _, task := range g.tasks {
+		want, keep := wanted[task.ID]
+		if !keep {
+			if task.Outcome == OutcomeActive && !g.taskHasHistoryLocked(task.ID) {
+				continue
+			}
+			want = PendingTask{ID: task.ID, Info: task.Info, RunPolicy: task.RunPolicy, Persistent: task.Persistent}
+			wanted[task.ID] = want
+		}
+		if want.Info != "" {
+			task.Info = want.Info
+		}
+		if want.RunPolicy != "" {
+			task.RunPolicy = want.RunPolicy
+		}
+		task.Persistent = task.Persistent || want.Persistent
+		tasks = append(tasks, task)
+	}
+	g.tasks = tasks
+	nodes := make([]Node, 0, len(g.nodes))
+	for _, node := range g.nodes {
+		if _, keep := wanted[node.TaskID]; keep {
+			nodes = append(nodes, node)
+		} else {
+			delete(g.outputs, node.ID)
+		}
+	}
+	g.nodes = nodes
+	g.edges = nil
+	seen := make(map[Edge]bool)
+	for _, task := range tasks {
+		for _, edge := range []Edge{{From: task.Planner.ID, To: task.Executor.ID}, {From: task.Executor.ID, To: task.Verifier.ID}} {
+			g.edges = append(g.edges, edge)
+			seen[edge] = true
+		}
+	}
+	for _, edge := range oldEdges {
+		if !g.immutableNodeLocked(edge.To) || seen[edge] {
 			continue
 		}
-		if err := rejectStartedEdge(edge, startedNodes); err != nil {
-			return err
-		}
+		g.edges = append(g.edges, edge)
+		seen[edge] = true
 	}
-	for edge := range afterEdges {
-		if _, unchanged := beforeEdges[edge]; unchanged {
+	explicit := make(map[Edge]bool, len(next.Edges))
+	for _, edge := range next.Edges {
+		if explicit[edge] {
+			return fmt.Errorf("%w: duplicate edge %q → %q", ErrInvalidPending, edge.From, edge.To)
+		}
+		explicit[edge] = true
+		if seen[edge] {
 			continue
 		}
-		if err := rejectStartedEdge(edge, startedNodes); err != nil {
-			return err
+		if !oldSet[edge] {
+			if err := g.validateSourceLocked(edge.From); err != nil {
+				return fmt.Errorf("%w: %w", ErrInvalidPending, err)
+			}
+		}
+		g.edges = append(g.edges, edge)
+		seen[edge] = true
+	}
+	return nil
+}
+
+func validTaskID(id string) bool {
+	return id != "" && strings.IndexFunc(id, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_')
+	}) < 0
+}
+
+func (g *Graph) taskHasHistoryLocked(taskID string) bool {
+	for _, output := range g.outputs {
+		if output.Node.TaskID == taskID {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *Graph) immutableNodeLocked(nodeID string) bool {
+	if _, ok := g.outputs[nodeID]; ok {
+		return true
+	}
+	node, ok := g.nodeByIDLocked(nodeID)
+	if !ok {
+		return false
+	}
+	task, ok := g.taskByIDLocked(node.TaskID)
+	if !ok {
+		return false
+	}
+	if task.Outcome != OutcomeActive {
+		return true
+	}
+	return !currentActivationNode(task, node)
+}
+
+func immutableHistoryUnchanged(current, next *Graph) error {
+	for _, task := range current.tasks {
+		frozen := task.Outcome != OutcomeActive
+		for _, node := range current.nodes {
+			if node.TaskID == task.ID && currentActivationNode(task, node) {
+				if _, ready := current.outputs[node.ID]; ready {
+					frozen = true
+					break
+				}
+			}
+		}
+		if !frozen {
+			continue
+		}
+		if candidate, ok := next.taskByIDLocked(task.ID); !ok || candidate != task {
+			return fmt.Errorf("%w: %w: task %q already produced output", ErrInvalidPending, ErrGraphBusy, task.ID)
+		}
+	}
+	for _, node := range current.nodes {
+		if current.immutableNodeLocked(node.ID) && !sameIncoming(current.edges, next.edges, node.ID) {
+			return fmt.Errorf("%w: completed node %q input is immutable", ErrGraphBusy, node.ID)
 		}
 	}
 	return nil
 }
 
-func rejectStartedEdge(edge Edge, started map[string]struct{}) error {
-	for _, id := range []string{edge.From, edge.To} {
-		if _, ok := started[id]; ok {
+func sameIncoming(left, right []Edge, nodeID string) bool {
+	incoming := func(edges []Edge) []string {
+		var ids []string
+		for _, edge := range edges {
+			if edge.To == nodeID {
+				ids = append(ids, edge.From)
+			}
+		}
+		return ids
+	}
+	return slices.Equal(incoming(left), incoming(right))
+}
+
+func runningSliceUnchanged(current, next *Graph, running *runner) error {
+	tasks, nodes := running.executionSnapshot()
+	for id := range tasks {
+		before, ok := current.taskByIDLocked(id)
+		if !ok {
+			continue
+		}
+		if after, ok := next.taskByIDLocked(id); !ok || before != after {
+			return fmt.Errorf("%w: task %q already started", ErrGraphBusy, id)
+		}
+	}
+	for id := range nodes {
+		if !sameIncoming(current.edges, next.edges, id) {
 			return fmt.Errorf("%w: node %q already started", ErrGraphBusy, id)
 		}
 	}
 	return nil
 }
 
-func completedTasksUnchanged(current, next *Graph) error {
+func persistedInputsUnchanged(current, next *Graph) error {
+	if current.progress == nil {
+		return nil
+	}
 	for _, task := range current.tasks {
-		if task.Outcome == OutcomeActive {
+		candidate, exists := next.taskByIDLocked(task.ID)
+		taskChanged := !exists || candidate != task
+		changedInputs := make(map[string]bool)
+		for _, node := range current.nodes {
+			if node.TaskID == task.ID && !sameIncoming(current.edges, next.edges, node.ID) {
+				changedInputs[node.ID] = true
+			}
+		}
+		if !taskChanged && len(changedInputs) == 0 {
 			continue
 		}
-		candidate, ok := next.taskByIDLocked(task.ID)
-		if !ok || !sameTask(task, candidate) || !sameEdges(
-			incidentEdges(current, task), incidentEdges(next, task),
-		) {
-			return fmt.Errorf(
-				"%w: completed task %q is immutable; preserve completed roots with empty info placeholders, omit completed helpers from spawns, and append a new root for follow-up work",
-				ErrInvalidPending,
-				task.ID,
-			)
-		}
-	}
-	return nil
-}
-
-func sameTask(left, right Task) bool {
-	return left.ID == right.ID &&
-		left.Info == right.Info &&
-		left.Env == right.Env &&
-		left.Planner == right.Planner &&
-		left.Executor == right.Executor &&
-		left.Verifier == right.Verifier &&
-		left.Outcome == right.Outcome &&
-		left.RunPolicy == right.RunPolicy
-}
-
-func incidentEdges(graph *Graph, task Task) []Edge {
-	nodes := map[string]struct{}{
-		task.Planner.ID:  {},
-		task.Executor.ID: {},
-		task.Verifier.ID: {},
-	}
-	var edges []Edge
-	for _, edge := range graph.edges {
-		_, from := nodes[edge.From]
-		_, to := nodes[edge.To]
-		if from || to {
-			edges = append(edges, edge)
-		}
-	}
-	return edges
-}
-
-func sameEdges(left, right []Edge) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for i := range left {
-		if left[i] != right[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func (g *Graph) applyPendingLocked(next PendingSubgraph) error {
-	roots := g.rootTasksLocked()
-	if len(next.Roots) < 1 {
-		return fmt.Errorf("%w: roots required", ErrInvalidPending)
-	}
-	if len(next.Roots) < len(roots) {
-		return fmt.Errorf("%w: cannot remove root tasks", ErrUnspawnRoot)
-	}
-	for _, want := range next.Roots {
-		switch strings.TrimSpace(want.RunPolicy) {
-		case "", RunPolicyEnabled, RunPolicyHeld:
-		default:
-			return fmt.Errorf(
-				"%w: root run_policy must be %q or %q",
-				ErrInvalidPending, RunPolicyEnabled, RunPolicyHeld,
-			)
-		}
-	}
-	for i, want := range next.Roots {
-		if strings.TrimSpace(want.Info) != "" {
-			continue
-		}
-		if i < len(roots) && roots[i].Outcome != OutcomeActive {
-			continue
-		}
-		return fmt.Errorf("%w: root info is required", ErrInvalidPending)
-	}
-	for len(roots) < len(next.Roots) {
-		g.addRootLocked()
-		roots = g.rootTasksLocked()
-	}
-	for i, want := range next.Roots {
-		if roots[i].Outcome != OutcomeActive {
-			continue
-		}
-		g.setInfoLocked(roots[i].ID, want.Info)
-		if policy := strings.TrimSpace(want.RunPolicy); policy != "" {
-			g.setRunPolicyLocked(roots[i].ID, policy)
-		}
-	}
-
-	type spawnKey struct {
-		From string
-		Join string
-		Info string
-	}
-	desired := make(map[spawnKey]PendingSpawn, len(next.Spawns))
-	for _, spawn := range next.Spawns {
-		spawn.From = strings.TrimSpace(spawn.From)
-		spawn.Join = strings.TrimSpace(spawn.Join)
-		if spawn.From == "" || spawn.Join == "" {
-			return fmt.Errorf("%w: spawn from and join are required", ErrInvalidPending)
-		}
-		if strings.TrimSpace(spawn.Info) == "" {
-			return fmt.Errorf("%w: spawn info is required", ErrInvalidPending)
-		}
-		desired[spawnKey{From: spawn.From, Join: spawn.Join, Info: spawn.Info}] = spawn
-	}
-
-	have := make(map[spawnKey]string)
-	for _, task := range g.tasks {
-		pair, ok := g.spawnPairLocked(task)
-		if !ok {
-			continue
-		}
-		key := spawnKey{From: pair.From, Join: pair.Join, Info: task.Info}
-		have[key] = task.ID
-		if task.Outcome != OutcomeActive {
-			desired[key] = PendingSpawn{From: pair.From, Join: pair.Join, Info: task.Info}
-		}
-	}
-	for key, spawn := range desired {
-		if id, ok := have[key]; ok {
-			g.setInfoLocked(id, spawn.Info)
-			continue
-		}
-		child, err := g.spawnLocked(spawn.From, spawn.Join)
+		state, _, err := current.progress.Load(task.Env.ID)
 		if err != nil {
 			return err
 		}
-		g.setInfoLocked(child.ID, spawn.Info)
-	}
-
-	for {
-		extra := false
-		for _, task := range append([]Task(nil), g.tasks...) {
-			pair, ok := g.spawnPairLocked(task)
-			if !ok {
-				continue
+		for _, input := range state.Inputs {
+			if taskChanged || changedInputs[input.NodeID] {
+				return fmt.Errorf("%w: node %q has a persisted input batch", ErrGraphBusy, input.NodeID)
 			}
-			if _, keep := desired[spawnKey{From: pair.From, Join: pair.Join, Info: task.Info}]; keep {
-				continue
-			}
-			if _, err := g.unspawnLocked(task.ID); err != nil {
-				return err
-			}
-			extra = true
-			break
-		}
-		if !extra {
-			break
 		}
 	}
 	return nil
 }
 
-func (g *Graph) rootTasksLocked() []Task {
-	out := make([]Task, 0)
-	for _, task := range g.tasks {
-		if g.spawnedFromLocked(task) == "" {
-			out = append(out, task)
+func (g *Graph) inputFrozenLocked(nodeID string) (bool, error) {
+	if g.immutableNodeLocked(nodeID) {
+		return true, nil
+	}
+	for _, running := range g.runners {
+		_, nodes := running.executionSnapshot()
+		if _, ok := nodes[nodeID]; ok {
+			return true, nil
 		}
 	}
-	return out
-}
-
-func (g *Graph) setInfoLocked(id, info string) {
-	for i := range g.tasks {
-		if g.tasks[i].ID == id {
-			g.tasks[i].Info = info
-			return
+	if g.progress != nil {
+		node, _ := g.nodeByIDLocked(nodeID)
+		task, _ := g.taskByIDLocked(node.TaskID)
+		state, _, err := g.progress.Load(task.Env.ID)
+		if err != nil {
+			return false, err
+		}
+		for _, input := range state.Inputs {
+			if input.NodeID == nodeID {
+				return true, nil
+			}
 		}
 	}
-}
-
-// setRunPolicyLocked 改写某个 task 的启动策略；held 的 root 留在队列里但不启动。
-func (g *Graph) setRunPolicyLocked(id, policy string) {
-	for i := range g.tasks {
-		if g.tasks[i].ID == id {
-			g.tasks[i].RunPolicy = policy
-			return
-		}
-	}
-}
-
-func (g *Graph) spawnPairLocked(task Task) (PendingSpawn, bool) {
-	var pair PendingSpawn
-	found := false
-	for _, edge := range g.edges {
-		if edge.Kind == EdgeKindSpawn && edge.To == task.Planner.ID {
-			pair.From = edge.From
-			found = true
-		}
-		if edge.Kind == EdgeKindJoin && edge.From == task.Verifier.ID {
-			pair.Join = edge.To
-		}
-	}
-	return pair, found
+	return false, nil
 }
