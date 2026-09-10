@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -17,14 +19,12 @@ import (
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	"github.com/KDZZZZZZ/threadmill/internal/logging"
 	"github.com/KDZZZZZZ/threadmill/internal/provider"
+	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
 const liveMemoryMarker = "THREADMILL_GRAPH_MEM_7f3a"
 
-func TestLiveGraphRunMemoryOpsAndEnvVersions(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
+func TestLiveSingleSourceInputKeepsMemoryAndFilesPaired(t *testing.T) {
 	_, filename, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("locate integration test")
@@ -44,7 +44,7 @@ func TestLiveGraphRunMemoryOpsAndEnvVersions(t *testing.T) {
 		log:   logging.New(logging.Config{Level: slog.LevelDebug}),
 	}
 
-	graph := newGraph()
+	graph := New()
 	progressDir := t.TempDir()
 	progress, err := NewDirProgressStore(progressDir)
 	if err != nil {
@@ -58,107 +58,101 @@ func TestLiveGraphRunMemoryOpsAndEnvVersions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store := ctxgraph.NewStore()
-	rootTask := graph.AddTask()
-	child := mustSpawn(t, graph, rootTask.Planner.ID, rootTask.Verifier.ID)
-	seed := liveSeedGraph(liveMemoryMarker)
-	store.Save(rootTask.Env.ID, seed)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
-	defer cancel()
-
-	got, err := graph.Run(
-		ctx,
-		rootTask.ID,
-		liveGraphQuery(liveMemoryMarker),
-		Stores{Memory: store},
-		Assemble(
-			Stores{Memory: store},
-			recorder,
-			cfg.Agents,
-			nil,
-			cfg.LLM.ContextWindow,
-			react,
-			agent.FileOverlay{Tools: cfg.Tools, Prompts: cfg.Prompts},
-		),
-	)
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
+	files := vfs.NewStore(t.TempDir())
+	t.Cleanup(func() { cancel(); graph.WaitRuns(); _ = files.Close() })
+	graph.SetRunContext(ctx)
+	if _, err := graph.ReplacePending(ctx, PendingSubgraph{
+		Tasks: []PendingTask{
+			{ID: "source", Info: liveGraphQuery(liveMemoryMarker)},
+			{ID: "consumer", Info: liveGraphQuery(liveMemoryMarker)},
+		},
+		Edges: []Edge{{From: "source:1:verifier", To: "consumer:1:planner"}},
+	}); err != nil {
+		t.Fatal(err)
 	}
-	if strings.TrimSpace(got) == "" {
-		t.Fatal("Run() returned empty verifier output")
+	source, _ := graph.Task("source")
+	consumer, _ := graph.Task("consumer")
+	store := ctxgraph.NewStore()
+	seed := liveSeedGraph(liveMemoryMarker)
+	if err := store.Save(source.Env.ID, seed); err != nil {
+		t.Fatal(err)
 	}
-
-	parent := store.Load(rootTask.Env.ID)
-	forked := store.Load(child.Env.ID)
-	global := ctxgraph.Clone("check").Graph
-	t.Logf("verifier output: %s", got)
-	t.Logf("tool calls: %v", recorder.snapshot())
-	t.Logf("parent revision=%d extra_subgraphs=%v extra_nodes=%v",
-		parent.Revision, subgraphsNotIn(parent, seed), nodeSubgraphPairs(parent, seed))
-	t.Logf("child revision=%d extra_subgraphs=%v extra_nodes=%v",
-		forked.Revision, subgraphsNotIn(forked, seed), nodeSubgraphPairs(forked, seed))
-
-	if !graphHasStatement(parent, liveMemoryMarker) {
-		t.Fatal("parent env lost seeded memory")
+	if err := files.View(source.Env.ID).Write("seed.txt", []byte(liveMemoryMarker)); err != nil {
+		t.Fatal(err)
 	}
-	if !graphHasStatement(forked, liveMemoryMarker) {
-		t.Fatal("child env did not fork seeded memory")
+	stores := Stores{Memory: store, Files: files}
+	assemble := Assemble(stores, recorder, cfg.Agents, nil, cfg.LLM.ContextWindow, react,
+		agent.FileOverlay{Tools: cfg.Tools, Prompts: cfg.Prompts})
+	if got, err := graph.Run(ctx, source.ID, source.Info, stores, assemble); err != nil || strings.TrimSpace(got) == "" {
+		t.Fatalf("source Run() = %q, %v", got, err)
 	}
-	if graphHasStatement(global, liveMemoryMarker) {
-		t.Fatal("seeded memory leaked to the global graph")
+	sourceOutput, ok := graph.Output(source.Verifier.ID)
+	if !ok {
+		t.Fatal("source verifier has no committed paired output")
 	}
-	if parent.Revision <= seed.Revision {
-		t.Fatalf("parent revision = %d, want > %d after memory ops", parent.Revision, seed.Revision)
+	sourceMemory, ok := store.Snapshot(sourceOutput.MemoryRef)
+	if !ok || !liveSeedWasOrganized(sourceMemory) || !recorder.called("organize_subgraph") {
+		t.Fatalf("source did not organize seeded memory: %+v; calls=%v", sourceMemory, recorder.snapshot())
 	}
-
-	parentOnly := subgraphsNotIn(parent, seed)
-	childOnly := subgraphsNotIn(forked, seed)
-	if len(parentOnly) == 0 && !recorder.called("organize_subgraph") {
-		t.Fatal("parent env gained no subgraph; organize_subgraph was not called")
+	// Later source writes must not change the input selected by the ordinary edge.
+	const lateSourceMarker = "source changed after its output committed"
+	if err := store.Save(source.Env.ID, store.Load(source.Env.ID).WithMemory([]ctxgraph.Node{{
+		ID: "source-later", Kind: ctxgraph.NodeKindFact, Statement: lateSourceMarker, Status: ctxgraph.NodeStatusAccepted,
+	}}, nil)); err != nil {
+		t.Fatal(err)
 	}
-	for _, id := range childOnly {
-		if !subgraphByID(parent, id) {
-			t.Fatalf("join dropped child subgraph %q", id)
+	if err := files.View(source.Env.ID).Write("seed.txt", []byte(lateSourceMarker)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := graph.Run(ctx, consumer.ID, consumer.Info, stores, assemble)
+	if err != nil || strings.TrimSpace(got) == "" {
+		t.Fatalf("consumer Run() = %q, %v", got, err)
+	}
+	t.Logf("consumer verifier output: %s; tool calls: %v", got, recorder.snapshot())
+	consumerMemory := store.Load(consumer.Env.ID)
+	if !liveSeedWasOrganized(consumerMemory) || graphHasStatement(consumerMemory, lateSourceMarker) {
+		t.Fatalf("consumer did not inherit the committed source memory: %+v", consumerMemory)
+	}
+	if current, _ := store.Snapshot(sourceOutput.MemoryRef); !reflect.DeepEqual(current, sourceMemory) {
+		t.Fatal("consumer execution changed the immutable source memory")
+	}
+	for _, ref := range []string{sourceOutput.FilesRef, consumer.Env.ID} {
+		if content, err := files.View(ref).Read("seed.txt"); err != nil || string(content) != liveMemoryMarker {
+			t.Fatalf("file snapshot %q = %q, %v", ref, content, err)
 		}
 	}
-	for _, id := range parentOnly {
-		if containsString(childOnly, id) {
-			continue
-		}
-		if subgraphByID(forked, id) {
-			t.Fatalf("child env saw parent subgraph %q written after fork", id)
-		}
-	}
-
-	for _, node := range parent.Nodes {
-		if nodeIn(seed, node.ID) || nodeIn(forked, node.ID) {
-			continue
-		}
-		for _, subgraphID := range node.SubgraphIDs {
-			if !containsString(parentOnly, subgraphID) {
-				continue
-			}
-			if nodeInSubgraph(forked, node.ID, subgraphID) {
-				t.Fatalf("child env saw parent node %q in subgraph %q written after fork", node.ID, subgraphID)
-			}
-		}
-	}
-	for _, node := range forked.Nodes {
-		if nodeIn(seed, node.ID) {
-			continue
-		}
-		if !nodeIn(parent, node.ID) {
-			t.Fatalf("join dropped child node %q", node.ID)
-		}
-	}
-
-	entries, err := os.ReadDir(progressDir)
+	// Completed role journals clear; ready inputs stay available after reopening.
+	restoredProgress, err := NewDirProgressStore(progressDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("progress files after Run = %v, want discarded", names(entries))
+	for _, task := range []Task{source, consumer} {
+		state, ok, err := restoredProgress.Load(task.Env.ID)
+		if err != nil || !ok || state.Pending != nil || len(state.Inputs) != 3 {
+			t.Fatalf("completed task %s progress = %+v, %v, %v", task.ID, state, ok, err)
+		}
+		for _, input := range state.Inputs {
+			if input.Phase != "ready" || !input.Started || input.FilesRef == "" || input.MemoryRef == "" {
+				t.Fatalf("input pair is not ready: %+v", input)
+			}
+			memory, ok := store.Snapshot(input.MemoryRef)
+			if !ok {
+				t.Fatalf("ready memory is missing: %s", input.MemoryRef)
+			}
+			if err := files.Restore(input.FilesRef); err != nil {
+				t.Fatalf("ready files are missing: %s: %v", input.FilesRef, err)
+			}
+			if input.NodeID == consumer.Planner.ID {
+				if len(input.Sources) != 1 || input.Sources[0].ID != sourceOutput.Node.ID ||
+					input.Sources[0].FilesRef != sourceOutput.FilesRef || input.Sources[0].MemoryRef != sourceOutput.MemoryRef {
+					t.Fatalf("consumer did not retain its single paired source: %+v", input.Sources)
+				}
+				if !reflect.DeepEqual(memory, sourceMemory) {
+					t.Fatal("single-source ready input reorganized the source memory")
+				}
+			}
+		}
 	}
 	reactEntries, err := os.ReadDir(reactDir)
 	if err != nil {
@@ -170,10 +164,9 @@ func TestLiveGraphRunMemoryOpsAndEnvVersions(t *testing.T) {
 }
 
 func liveGraphQuery(marker string) string {
-	return "记忆图里已有一条事实，陈述包含标记 " + marker +
-		"。必须调用 organize_subgraph，query 使用该标记，把相关节点整理进工具返回的子图。" +
-		"规划、执行、核验都基于这条记忆；核验结论里写上该标记。" +
-		"子任务同样必须调用 organize_subgraph。"
+	return "记忆依赖：" + marker + "。记忆图里已有一条事实，陈述包含该标记。" +
+		"必须调用 organize_subgraph，query 使用该标记，把相关节点整理进工具返回的子图。" +
+		"规划、执行、核验都基于这条记忆；核验结论里写上该标记。"
 }
 
 func liveSeedGraph(marker string) ctxgraph.Graph {
@@ -203,59 +196,15 @@ func graphHasStatement(graph ctxgraph.Graph, marker string) bool {
 	return false
 }
 
-func subgraphsNotIn(graph, baseline ctxgraph.Graph) []string {
-	var extra []string
-	for _, subgraph := range graph.Subgraphs {
-		if subgraphByID(baseline, subgraph.ID) {
+func liveSeedWasOrganized(graph ctxgraph.Graph) bool {
+	for _, node := range graph.Nodes {
+		if node.ID != "n-seed" || !strings.Contains(node.Statement, liveMemoryMarker) {
 			continue
 		}
-		extra = append(extra, subgraph.ID)
-	}
-	return extra
-}
-
-func subgraphByID(graph ctxgraph.Graph, id string) bool {
-	for _, subgraph := range graph.Subgraphs {
-		if subgraph.ID == id {
-			return true
-		}
-	}
-	return false
-}
-
-func nodeSubgraphPairs(graph, baseline ctxgraph.Graph) []string {
-	var extra []string
-	for _, node := range graph.Nodes {
-		if node.ID == "" || nodeIn(baseline, node.ID) {
-			continue
-		}
-		extra = append(extra, node.ID+":"+strings.Join(node.SubgraphIDs, ","))
-	}
-	return extra
-}
-
-func nodeIn(graph ctxgraph.Graph, id string) bool {
-	for _, node := range graph.Nodes {
-		if node.ID == id {
-			return true
-		}
-	}
-	return false
-}
-
-func nodeInSubgraph(graph ctxgraph.Graph, nodeID, subgraphID string) bool {
-	for _, node := range graph.Nodes {
-		if node.ID == nodeID && containsString(node.SubgraphIDs, subgraphID) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsString(ids []string, want string) bool {
-	for _, id := range ids {
-		if id == want {
-			return true
+		for _, subgraph := range graph.Subgraphs {
+			if subgraph.Kind == ctxgraph.SubgraphKindTask && slices.Contains(node.SubgraphIDs, subgraph.ID) {
+				return true
+			}
 		}
 	}
 	return false
@@ -307,7 +256,7 @@ func (p *recordingProvider) Generate(ctx context.Context, request agent.Request)
 func (p *recordingProvider) called(name string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return containsString(p.toolCalls, name)
+	return slices.Contains(p.toolCalls, name)
 }
 
 func (p *recordingProvider) snapshot() []string {

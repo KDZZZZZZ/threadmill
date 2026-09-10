@@ -5,26 +5,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 )
 
 type storeState struct {
 	Graphs    map[string]Graph `json:"graphs"`
-	Baselines map[string]Graph `json:"baselines"`
+	Snapshots map[string]bool  `json:"snapshots,omitempty"`
 }
 
-// Store 按环境 ID 保存记忆图快照。Spawn 用 Fork 复制父快照并记下合入基线；之后各环境独立写入。
+// Store 保存按环境隔离的记忆图和不可变输入、出口快照。
 type Store struct {
 	mu        sync.Mutex
 	graphs    map[string]Graph
-	baselines map[string]Graph // childID → Fork 瞬间的父快照
+	snapshots map[string]bool // immutable output and ready-state references
 	path      string
 }
 
 // StoreStats 汇总内存图存储的规模。数量按环境快照求和。
 type StoreStats struct {
 	Environments int `json:"environments"`
-	Baselines    int `json:"baselines"`
 	Subgraphs    int `json:"subgraphs"`
 	Nodes        int `json:"nodes"`
 	Edges        int `json:"edges"`
@@ -34,7 +34,7 @@ type StoreStats struct {
 func NewStore() *Store {
 	return &Store{
 		graphs:    make(map[string]Graph),
-		baselines: make(map[string]Graph),
+		snapshots: make(map[string]bool),
 	}
 }
 
@@ -47,7 +47,6 @@ func (s *Store) Stats() StoreStats {
 	defer s.mu.Unlock()
 	stats := StoreStats{
 		Environments: len(s.graphs),
-		Baselines:    len(s.baselines),
 	}
 	for _, graph := range s.graphs {
 		stats.Subgraphs += len(graph.Subgraphs)
@@ -82,19 +81,89 @@ func OpenStore(path string) (*Store, error) {
 		return nil, fmt.Errorf("decode memory store %q: %w", path, err)
 	}
 	store.graphs = cloneGraphMap(state.Graphs)
-	store.baselines = cloneGraphMap(state.Baselines)
+	for ref, immutable := range state.Snapshots {
+		if !immutable {
+			continue
+		}
+		if _, exists := store.graphs[ref]; !exists {
+			return nil, fmt.Errorf("context: snapshot %q has no graph", ref)
+		}
+		store.snapshots[ref] = true
+	}
 	return store, nil
 }
 
 // Load 返回该环境的图拷贝；不存在时返回空图。
 func (s *Store) Load(envID string) Graph {
+	graph, _ := s.Snapshot(envID)
+	return graph
+}
+
+// Snapshot returns an isolated graph copy and distinguishes missing state from
+// a valid empty graph. IDs may name a live environment or an immutable snapshot.
+func (s *Store) Snapshot(id string) (Graph, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	graph, ok := s.graphs[envID]
+	graph, ok := s.graphs[id]
 	if !ok {
-		return Graph{}
+		return Graph{}, false
 	}
-	return graph.Clone()
+	return graph.Clone(), true
+}
+
+// SaveSnapshot seals a graph under an immutable reference. Replaying the same
+// graph is idempotent; an existing reference cannot acquire different contents.
+func (s *Store) SaveSnapshot(ref string, graph Graph) error {
+	if ref == "" {
+		return fmt.Errorf("context: snapshot reference is required")
+	}
+	if err := graph.ValidateReferences(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous, existed := s.graphs[ref]
+	if existed && !sameGraph(previous, graph) {
+		return fmt.Errorf("context: snapshot %q already has different contents", ref)
+	}
+	if s.snapshots[ref] {
+		return nil
+	}
+	if s.snapshots == nil {
+		s.snapshots = make(map[string]bool)
+	}
+	if s.graphs == nil {
+		s.graphs = make(map[string]Graph)
+	}
+	s.graphs[ref], s.snapshots[ref] = graph.Clone(), true
+	if err := s.persistLocked(); err != nil {
+		delete(s.snapshots, ref)
+		if existed {
+			s.graphs[ref] = previous
+		} else {
+			delete(s.graphs, ref)
+		}
+		return err
+	}
+	return nil
+}
+
+// Restore binds the exact sealed graph to an environment, including managed
+// memory. Only the runtime should use this seam when publishing a ready state pair;
+// ordinary EnvView.Commit continues to preserve managed memory.
+func (s *Store) Restore(envID, snapshotRef string) error {
+	if envID == "" {
+		return fmt.Errorf("context: target environment is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.snapshots[snapshotRef] {
+		return fmt.Errorf("context: unknown immutable snapshot %q", snapshotRef)
+	}
+	if s.snapshots[envID] && envID != snapshotRef {
+		return fmt.Errorf("context: cannot restore over snapshot %q", envID)
+	}
+	return s.commitGraphLocked(envID, s.graphs[snapshotRef])
 }
 
 // Revision 返回该环境的图版本号，不拷贝图内容，供缓存层作失效提示。
@@ -194,74 +263,13 @@ func (v *EnvView) Commit(graph Graph) error {
 	return v.store.Save(v.envID, graph)
 }
 
-// Fork 把父环境快照复制到子环境，并记下当时的父快照作为合入基线。
-// 子环境已存在时不覆盖，也不改基线。
-func (s *Store) Fork(parentID, childID string) error {
-	if childID == "" {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.graphs == nil {
-		s.graphs = make(map[string]Graph)
-	}
-	if _, exists := s.graphs[childID]; exists {
-		return nil
-	}
-	parent := Graph{}
-	if parentID != "" {
-		parent = s.graphs[parentID].Clone()
-	}
-	s.graphs[childID] = parent.Clone()
-	if s.baselines == nil {
-		s.baselines = make(map[string]Graph)
-	}
-	previousBaseline, hadBaseline := s.baselines[childID]
-	s.baselines[childID] = parent.Clone()
-	if err := s.persistLocked(); err != nil {
-		delete(s.graphs, childID)
-		if hadBaseline {
-			s.baselines[childID] = previousBaseline
-		} else {
-			delete(s.baselines, childID)
-		}
-		return err
-	}
-	return nil
-}
-
-// Merge 把 from 相对其 Fork 基线的增量并入 into。同 ID 同陈述则并集 SubgraphIDs
-// （加入 A 与加入 B 互不影响）；同 ID 不同陈述则保留 into、给 from 换新 ID 并重写边。
-// 缺图当空图。
-//
-// 合入是 additive-only：只新增节点、子图和边，外加同 ID 同陈述节点的归属并集。into 中已有
-// 节点的内容与状态、已有子图的元数据都不会被 from 改写，from 的删除也不传播——child 想推翻
-// parent 的结论只能新增一个节点，由整理 Agent 在 parent 侧裁决。详见 Graph.mergeAdditive。
-func (s *Store) Merge(from, into string) error {
-	if into == "" {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.graphs == nil {
-		s.graphs = make(map[string]Graph)
-	}
-	var base Graph
-	if s.baselines != nil {
-		base = s.baselines[from].Clone()
-	}
-	ours := s.graphs[into].Clone()
-	theirs := s.graphs[from].Clone()
-	return s.commitGraphLocked(into, ours.mergeAdditive(from, base, theirs))
-}
-
 func (s *Store) persistLocked() error {
 	if s.path == "" {
 		return nil
 	}
 	data, err := json.Marshal(storeState{
 		Graphs:    s.graphs,
-		Baselines: s.baselines,
+		Snapshots: s.snapshots,
 	})
 	if err != nil {
 		return fmt.Errorf("encode memory store: %w", err)
@@ -278,6 +286,12 @@ func (s *Store) persistLocked() error {
 }
 
 func (s *Store) commitGraphLocked(envID string, graph Graph) error {
+	if s.snapshots[envID] {
+		if !sameGraph(s.graphs[envID], graph) {
+			return fmt.Errorf("context: snapshot %q is immutable", envID)
+		}
+		return nil
+	}
 	if s.graphs == nil {
 		s.graphs = make(map[string]Graph)
 	}
@@ -300,4 +314,9 @@ func cloneGraphMap(src map[string]Graph) map[string]Graph {
 		dst[id] = graph.Clone()
 	}
 	return dst
+}
+
+func sameGraph(a, b Graph) bool {
+	return a.Revision == b.Revision && slices.Equal(a.Subgraphs, b.Subgraphs) &&
+		slices.Equal(a.Edges, b.Edges) && slices.EqualFunc(a.Nodes, b.Nodes, sameNode)
 }

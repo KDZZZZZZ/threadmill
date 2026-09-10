@@ -3,7 +3,7 @@
 // 负载模型参数取自 DeepSWE 批次 all-03/all-04 的 67 个真实 agent 轨迹：
 //   - 模型思考间隔：均值 ~8s（p50 6.1s / p90 14.6s）
 //   - bash 命令时长：p50 35ms / p90 3.5s / p99 21s，均值 1.43s
-//   - 每 agent 生命周期：fork 一次性环境 → 若干轮（读/grep/编辑/bash）→ absorb 释放
+//   - 每 agent 生命周期：创建一次性环境 → 若干轮（读/grep/编辑/bash）→ absorb 释放
 package main
 
 import (
@@ -110,8 +110,8 @@ func run(
 		ExternalSandbox: true,
 		HeavyThreshold:  24 * time.Hour,
 	})
-	parent := "task-root"
-	if err := seedParent(store, parent, fileCount); err != nil {
+	seedEnv := "fixture-env"
+	if err := seedEnvironment(store, seedEnv, fileCount); err != nil {
 		return err
 	}
 
@@ -124,11 +124,11 @@ func run(
 			defer wg.Done()
 			a := &simAgent{
 				id:    id,
-				envID: fmt.Sprintf("task-root:agent-%d", id),
+				envID: fmt.Sprintf("fixture-env:agent-%d", id),
 				rng:   rand.New(rand.NewSource(seed + int64(id) + 1)),
 				store: store,
-				view:  store.View(fmt.Sprintf("task-root:agent-%d", id)),
-				exec:  sched.View(fmt.Sprintf("task-root:agent-%d", id), store),
+				view:  store.View(fmt.Sprintf("fixture-env:agent-%d", id)),
+				exec:  sched.View(fmt.Sprintf("fixture-env:agent-%d", id), store),
 				files: fileCount,
 				turns: turns,
 				think: thinkMult,
@@ -147,11 +147,11 @@ func run(
 	)
 	var cleanupErrors []error
 	for i := range agents {
-		if err := store.Discard(fmt.Sprintf("task-root:agent-%d", i)); err != nil {
+		if err := store.Discard(fmt.Sprintf("fixture-env:agent-%d", i)); err != nil {
 			cleanupErrors = append(cleanupErrors, err)
 		}
 	}
-	if err := store.Discard(parent); err != nil {
+	if err := store.Discard(seedEnv); err != nil {
 		cleanupErrors = append(cleanupErrors, err)
 	}
 	return errors.Join(cleanupErrors...)
@@ -175,11 +175,11 @@ func (a *simAgent) work(ctx context.Context) {
 	agentStarted := time.Now()
 	defer func() { a.m.observe("agent", time.Since(agentStarted)) }()
 	t0 := time.Now()
-	if err := a.store.Fork("task-root", a.envID); err != nil {
-		fmt.Fprintf(os.Stderr, "agent %d fork: %v\n", a.id, err)
+	if err := a.store.CreateEnvironment("fixture-env", a.envID); err != nil {
+		fmt.Fprintf(os.Stderr, "agent %d create environment: %v\n", a.id, err)
 		return
 	}
-	a.m.observe("fork", time.Since(t0))
+	a.m.observe("create_environment", time.Since(t0))
 
 	for turn := 0; turn < a.turns; turn++ {
 		// 思考间隔：真实分布 p50=6s mean=8s，按 think 系数压缩。
@@ -319,7 +319,7 @@ func makeFixtureRepo(root string, files, fileKB int) (string, error) {
 	return repo, nil
 }
 
-func seedParent(store *vfs.Store, parent string, files int) error {
+func seedEnvironment(store *vfs.Store, parent string, files int) error {
 	view := store.View(parent)
 	if err := view.Write("src/task_marker.txt", []byte("parent overlay seed")); err != nil {
 		return err
@@ -443,7 +443,7 @@ func report(
 		es.WaitDuration.Truncate(time.Millisecond), es.RunDuration.Truncate(time.Millisecond))
 	fmt.Printf("rss_peak=%s disk_live=%s\n", peakRSS(), dirSize(liveRoot))
 	fmt.Println("op          n      p50       p95       max        mean")
-	for _, op := range []string{"fork", "read", "list", "write", "bash", "bash_err", "release"} {
+	for _, op := range []string{"create_environment", "read", "list", "write", "bash", "bash_err", "release"} {
 		s, ok := m.summary()[op]
 		if !ok {
 			continue

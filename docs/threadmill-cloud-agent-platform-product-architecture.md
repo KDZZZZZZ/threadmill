@@ -6,7 +6,7 @@
 | --- | --- |
 | 文档状态 | 产品与架构概要 v0.2 |
 | 日期 | 2026-08-26 |
-| 当前底座 | 单机 Agent OS：协调图、Memory Graph、VFS、Sandbox、Join、Verifier |
+| 当前底座 | 单机 Agent OS：协调图、Memory Graph、VFS、Sandbox、Input、Verifier |
 | 目标产品 | B2B 中心化云端 Agent 协作开发平台 |
 
 ## 1. 性能与成本优势
@@ -62,7 +62,7 @@ Threadmill 当前压测使用384个逻辑 Agent 对64个物理命令槽。按相
 
 ### 1.4 Memory Graph 提高协作效率
 
-Threadmill 的记忆不是不断增长的聊天记录，而是可 fork、合入和按任务取用的知识图：
+Threadmill 的记忆是按任务取用、保留来源的知识图。任务入口直接复用所有来源的共同部分，只整理不同的部分：
 
 | 普通会话记忆 | Threadmill Memory Graph |
 | --- | --- |
@@ -89,15 +89,16 @@ flowchart LR
     Tools --> Queue[Global Exec Scheduler]
     Queue --> Slots[少量物理执行槽]
     Slots --> Sandbox[Sandbox Runner]
-    Graph --> Join[Explicit Join]
-    Join --> VFS
+    Graph --> Input[统一 Input]
+    Input --> VFS
+    Input --> Memory
 ```
 
 ### 2.1 协调图定义资源生命周期
 
-Coordination Graph 不只是任务列表。Spawn、角色、Join 和终态共同定义：
+Coordination Graph 用普通 task 和 `From`/`To` 依赖定义：
 
-- 子 Agent 从哪个文件和记忆状态 fork。
+- 当前角色从哪些固定文件与记忆出口取得输入。
 - 哪些角色使用一次性工作区，哪些状态需要持久化。
 - 哪些候选等待集成，由谁负责采纳。
 - 哪个时点可以安全释放目录、进程和环境。
@@ -106,7 +107,7 @@ Coordination Graph 不只是任务列表。Spawn、角色、Join 和终态共同
 
 ### 2.2 snapshot + delta 取代完整工作区复制
 
-VFS Fork 只记录父快照与子增量。Agent 读取和编辑的是自己的逻辑视图；只有真正运行构建、测试或脚本时，系统才按需创建 live workspace。
+VFS 环境创建只记录 base snapshot 与环境增量。Agent 读取和编辑的是自己的逻辑视图；只有真正运行构建、测试或脚本时，系统才按需创建 live workspace。
 
 ```text
 传统模式：N 个 Agent → N 份项目目录 → N 个运行环境
@@ -136,11 +137,11 @@ Agent 生命周期中的大部分时间用于模型推理、读取、等待依�
 
 384 Agent 压测中的命令占空比约为11.4%，平均命令需求约44个槽；64个全局槽即可吸收真实轨迹中的突发。这是逻辑宽度可以远大于物理宽度的直接原因。
 
-### 2.5 Memory Graph 与任务一起 fork 和汇合
+### 2.5 Memory Graph 按完整来源合入
 
 文件只能说明“代码现在是什么”，Memory Graph 还保存“为什么这样做、哪些约束不能违反、什么已经证实、什么仍有争议”。
 
-任务 Spawn 时，子 Agent 获得父任务记忆快照和自己的任务包；工作过程中产生的新事实、假设、失败和证据留在独立环境中；结果汇合时，新增知识按来源进入目标记忆，而不是把所有 Agent 的对话直接拼接。
+任务入口收集全部前驱的固定文件与记忆快照，并准备自己的任务包。共同部分直接使用；不同部分先处理文件，再按最终文件事实整理记忆。只有一个前驱时直接继承，不调用记忆整理。工作过程中产生的新事实、假设、失败和证据留在独立环境中。
 
 记忆节点同时带有内容性质、有效状态、来源引用、创建者和子图归属。Planner、Executor、Verifier 因而能够共享同一份任务事实，又只读取自己职责所需的最小视图。
 
@@ -151,9 +152,9 @@ Agent 生命周期中的大部分时间用于模型推理、读取、等待依�
 知识状态：directive → evidence → decision → verified fact
 ```
 
-### 2.6 候选隔离与显式 Join
+### 2.6 输入候选隔离与显式文件决策
 
-并行 Agent 的输出不是自动合并的代码，而是隔离候选。目标角色可以检查差异、选择文件、安全应用或丢弃；只有明确采纳的增量才进入目标工作区。
+并行 Agent 的不同文件状态形成隔离候选。目标角色检查差异、选择文件、安全应用或丢弃；共同文件直接使用，差异决策完成后才整理不同的记忆。
 
 因此系统可以大胆并行探索，而不必用共享工作目录换取速度，也不必把所有冲突推迟到最终 PR。
 
@@ -165,13 +166,13 @@ Threadmill 的壁垒不是 OverlayFS、队列或多 Agent UI 中的任何单项�
 
 要复制 Threadmill 的资源曲线，现有 Agent 平台必须同时改变：
 
-1. **任务模型**：协调图必须成为环境 fork、保存、Join 和回收的事实源。
+1. **任务模型**：协调图用普通依赖确定输入来源与固定出口；无合出边 task 独立运行，不设 root 或全局串行规则。
 2. **工具模型**：所有文件和命令工具必须强制携带环境身份，不能继续把真实 cwd 直接交给 Agent。
 3. **文件模型**：从“一会话一 checkout”改为 baseline、delta、lazy materialize 和 absorb。
-4. **记忆模型**：从聊天历史改为可 fork、分层取用、保留来源和有效状态的知识图。
+4. **记忆模型**：从聊天历史改为按完整来源分区、分层取用、保留来源和有效状态的知识图。
 5. **执行模型**：从“一 Agent 一 VM”改为逻辑 Agent 与短期 Execution Lease 分离。
 6. **合入模型**：从共享目录或最终 PR 合并，改为运行时内的隔离候选和显式采纳。
-7. **恢复模型**：图、记忆、VFS、Join 与工具副作用必须在崩溃后保持一致。
+7. **恢复模型**：图、记忆、VFS、Input 与工具副作用必须在已持久化的检查点边界保持一致。
 8. **观测模型**：逻辑 Agent、物理槽、文件增量、决定和验收必须能够端到端关联。
 
 这些改动横跨 Agent harness、状态模型、执行基础设施、文件系统、协作协议和计费系统。只增加更多 VM、worktree 或并行会话，无法获得同样的成本曲线。
@@ -185,7 +186,7 @@ Threadmill 不是先共享资源、再补隔离规则，而是由协调图先确
     ↓
 环境所有权确定
     ↓
-文件和记忆可以安全 fork
+文件和记忆按固定输入隔离继承
     ↓
 命令可以共享物理槽
     ↓
@@ -273,7 +274,7 @@ flowchart LR
 ```
 
 - **控制面**：Threadmill 托管团队、管理范围、协调图、决策、预算和审计。
-- **Agent Runtime**：运行 Manager、Planner、Executor、Verifier、Memory Graph 和 Join。
+- **Agent Runtime**：运行 Manager、Planner、Executor、Verifier、Memory Graph 和统一 Input。
 - **Runner 数据面**：按需物化环境并执行命令，可由 Threadmill 托管，也可部署在客户 VPC。
 - **企业集成**：连接 Git、CI、SSO、代码所有权、内部服务和发布门禁。
 
@@ -295,12 +296,12 @@ Threadmill 面向团队和企业销售：
 
 - 当前架构边界：[`architecture-governance.md`](architecture-governance.md)。
 - 完整性能方法与固定结果：[`threadmill-vs-pi-architecture-and-performance.md`](threadmill-vs-pi-architecture-and-performance.md)。
-- VFS 逻辑 Fork 与惰性物化：[`internal/vfs/store.go`](../internal/vfs/store.go#L343-L356)、[`internal/vfs/live.go`](../internal/vfs/live.go#L16-L45)。
+- VFS 环境创建与惰性物化：[`internal/vfs/store.go`](../internal/vfs/store.go#L343-L356)、[`internal/vfs/live.go`](../internal/vfs/live.go#L16-L45)。
 - 工具环境绑定：[`internal/tool/bind.go`](../internal/tool/bind.go#L21-L100)。
 - Memory Graph 节点、状态、来源和子图：[`internal/context/graph.go`](../internal/context/graph.go#L9-L72)。
-- Memory Graph 的环境 Fork 与增量合入：[`internal/context/store.go`](../internal/context/store.go#L182-L237)。
+- Memory Graph 的输入交集与差异处理：[`internal/context/input.go`](../internal/context/input.go)。
 - 全局命令调度：[`internal/exec/scheduler.go`](../internal/exec/scheduler.go#L224-L317)。
-- 显式候选应用：[`internal/vfs/join.go`](../internal/vfs/join.go#L14-L158)。
+- 显式文件输入应用：[`internal/vfs/input_changes.go`](../internal/vfs/input_changes.go#L14-L158)。
 - 云环境成本参考：[E2B Pricing](https://e2b.dev/pricing)、[Daytona Pricing](https://www.daytona.io/pricing)。
 
 性能数字来自固定的本地 Agent 运行时压测，不包含模型请求；成本和云端产品指标为基于该资源比例形成的目标模型。

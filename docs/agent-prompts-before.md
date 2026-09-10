@@ -1,5 +1,7 @@
 # Threadmill 修改前提示词
 
+> **历史材料（统一边迁移前）**：本页保留当时的设计、提示词或测试记录；root、spawn/join、任务树及旧输入协议不再作为当前规范。现行语义与实现边界见[统一边设计](unified-edge-design.md)，当前配置以 `threadmill.yaml` 为准。历史性能与测试结论仅适用于文中所列版本。
+
 > 以下文本逐字取自 2026-08-24 工作树中的 [`threadmill.yaml`](../threadmill.yaml)。
 
 ### 1. `prompts.default`

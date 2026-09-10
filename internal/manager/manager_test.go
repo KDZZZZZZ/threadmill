@@ -214,7 +214,7 @@ func TestOpenRestoresProjectGraph(t *testing.T) {
 				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 					ID:        "restore-graph",
 					Name:      "coordination_orchestrate",
-					Arguments: json.RawMessage(`{"action":"replace_pending","roots":[{"info":"persist me"}],"spawns":[]}`),
+					Arguments: json.RawMessage(`{"action":"replace_pending","tasks":[{"info":"persist me"}],"edges":[]}`),
 				}}}, nil
 			}
 			return agent.AssistantMessage{Content: "started"}, nil
@@ -269,7 +269,7 @@ func TestOpenResumesActiveProjectTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := graph.ReplacePending(ctx, coordination.PendingSubgraph{
-		Roots: []coordination.PendingRoot{{Info: "resume me"}},
+		Tasks: []coordination.PendingTask{{Info: "resume me"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -460,7 +460,7 @@ func TestManagerHidesBufferedRequestFromCurrentTurn(t *testing.T) {
 			return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 				ID:        "continue-first",
 				Name:      "coordination_orchestrate",
-				Arguments: json.RawMessage(`{"action":"replace_pending","roots":[],"spawns":[]}`),
+				Arguments: json.RawMessage(`{"action":"replace_pending","tasks":[],"edges":[]}`),
 			}}}, nil
 		}),
 	})
@@ -509,7 +509,7 @@ func TestOpenFinishesResumedManagerTurnBeforeStartingActiveTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := graph.ReplacePending(ctx, coordination.PendingSubgraph{
-		Roots: []coordination.PendingRoot{{Info: "start after manager recovery"}},
+		Tasks: []coordination.PendingTask{{Info: "start after manager recovery"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +575,7 @@ func TestOpenFinishesResumedManagerTurnBeforeStartingActiveTask(t *testing.T) {
 	}
 }
 
-func TestOpenRestoresDurableTaskFilesBeforeResumingVerifier(t *testing.T) {
+func TestOpenRestoresCompletedTaskAfterReportFailure(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -592,66 +592,81 @@ func TestOpenRestoresDurableTaskFilesBeforeResumingVerifier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := graph.ReplacePending(ctx, coordination.PendingSubgraph{
-		Roots: []coordination.PendingRoot{{Info: "resume verifier with task files"}},
-	}); err != nil {
+	snapshot, err := graph.ReplacePending(ctx, coordination.PendingSubgraph{
+		Tasks: []coordination.PendingTask{{Info: "retain completed task files for report retry"}},
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	task := graph.Snapshot().Tasks[0]
+	task := snapshot.Tasks[0]
 	progress, err := coordination.NewDirProgressStore(paths.ProgressDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := progress.Save(task.ID, coordination.TaskProgress{
-		Prepared: true,
-		Outputs: map[string]string{
-			task.Planner.ID:  "planned",
-			task.Executor.ID: "executor changed work.txt",
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	durableFiles, err := vfs.NewPersistentStore(project, paths.VFSDir)
+	graph.SetProgressStore(progress)
+	memory, err := ctxgraph.OpenStore(paths.MemoryFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := durableFiles.Fork("", task.Env.ID); err != nil {
+	files, err := vfs.NewPersistentStore(project, paths.VFSDir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := durableFiles.View(task.Env.ID).Write("work.txt", []byte("task")); err != nil {
-		t.Fatal(err)
+	file := loadRepoConfig(t)
+	stores := coordination.Stores{Memory: memory, Files: files}
+	assemble := coordination.Assemble(
+		stores,
+		stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
+			switch {
+			case strings.Contains(request.SystemPrompt, "你是记忆压缩器"):
+				return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
+			case strings.Contains(request.SystemPrompt, "你是 executor") && !hasToolResult(request.Messages):
+				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+					ID: "write-work", Name: "write",
+					Arguments: json.RawMessage(`{"path":"work.txt","content":"task"}`),
+				}}}, nil
+			default:
+				return agent.AssistantMessage{Content: "completed"}, nil
+			}
+		}),
+		file.Agents, nil, file.LLM.ContextWindow, nil,
+		agent.FileOverlay{
+			Tools: file.Tools, Prompts: file.Prompts, Curation: file.Memory.Curation,
+			NamedTools: graph.HelpTools(nil),
+		},
+	)
+	reportFailure := errors.New("report storage unavailable")
+	_, runErr := graph.RunWithReport(ctx, task.ID, task.Info, stores, assemble,
+		func(coordination.Task, string, error) error { return reportFailure },
+	)
+	if !errors.Is(runErr, reportFailure) {
+		t.Fatalf("RunWithReport() = %v, want report failure", runErr)
 	}
-	if err := durableFiles.Release(task.Env.ID); err != nil {
+	if err := files.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	var verifierRead string
 	mgr, err := Open(ctx, Options{
 		Root: project,
-		File: loadRepoConfig(t),
+		File: file,
 		Provider: stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
 			switch {
 			case strings.Contains(request.SystemPrompt, "你是 manager"):
-				return agent.AssistantMessage{Content: "reported"}, nil
+				if !hasToolResult(request.Messages) {
+					args, err := json.Marshal(map[string]string{"task_id": task.ID})
+					if err != nil {
+						return agent.AssistantMessage{}, err
+					}
+					return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+						ID: "publish-recovered", Name: "coordination_publishTask", Arguments: args,
+					}}}, nil
+				}
+				return agent.AssistantMessage{Content: "reported and published"}, nil
 			case strings.Contains(request.SystemPrompt, "你是记忆压缩器"):
 				return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
-			case strings.Contains(request.SystemPrompt, "你是 verifier"):
-				for _, message := range request.Messages {
-					if message.Role == agent.RoleTool {
-						verifierRead = message.Content
-					}
-				}
-				if verifierRead != "" {
-					return agent.AssistantMessage{Content: "结论: PASS"}, nil
-				}
-				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-					ID:        "read-work",
-					Name:      "read",
-					Arguments: json.RawMessage(`{"path":"work.txt"}`),
-				}}}, nil
 			default:
-				t.Fatalf("unexpected resumed role: %s", request.SystemPrompt)
-				return agent.AssistantMessage{}, nil
+				t.Error("report recovery replayed a completed task role")
+				return agent.AssistantMessage{}, errors.New("unexpected task replay")
 			}
 		}),
 	})
@@ -662,12 +677,16 @@ func TestOpenRestoresDurableTaskFilesBeforeResumingVerifier(t *testing.T) {
 	if err := mgr.WaitIdle(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(verifierRead, "task") {
-		t.Fatalf("verifier read = %q, want durable task contents", verifierRead)
+	if got := mgr.Snapshot().Tasks[0].Outcome; got != coordination.OutcomeDone {
+		t.Fatalf("recovered task outcome = %q, want done", got)
+	}
+	body, err := os.ReadFile(filepath.Join(project, "work.txt"))
+	if err != nil || string(body) != "task" {
+		t.Fatalf("published recovered file = %q, %v; want task", body, err)
 	}
 }
 
-func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
+func TestManagerRunsTaskAndWakesWithReport(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -677,7 +696,7 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 	var replies []string
 	var managerReportMemory string
 	var managerAfterGraphMemory string
-	var rootExecutorMemory string
+	var executorMemory string
 	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
 		sys := request.SystemPrompt
 		switch {
@@ -705,12 +724,14 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 			}
 			if userTurns == 1 && !hasToolResult(request.Messages) {
 				args, err := replacePendingArguments(coordination.PendingSubgraph{
-					Roots: []coordination.PendingRoot{{Info: "TASK INFO"}},
-					Spawns: []coordination.PendingSpawn{{
-						From: "task-1:planner",
-						Join: "task-1:executor",
-						Info: "CHILD INFO",
-					}},
+					Tasks: []coordination.PendingTask{
+						{ID: "task-1", Info: "TASK INFO"},
+						{ID: "task-2", Info: "CHILD INFO"},
+					},
+					Edges: []coordination.Edge{
+						{From: "task-1:1:planner", To: "task-2:1:planner"},
+						{From: "task-2:1:verifier", To: "task-1:1:executor"},
+					},
 				})
 				if err != nil {
 					return agent.AssistantMessage{}, err
@@ -726,20 +747,20 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 			if strings.Contains(lastUser(request.Messages), "CHILD INFO") {
 				return agent.AssistantMessage{Content: "child plan"}, nil
 			}
-			return agent.AssistantMessage{Content: "root plan"}, nil
+			return agent.AssistantMessage{Content: "task plan"}, nil
 		case strings.Contains(sys, "你是 executor"):
-			if response, ok := discardPendingJoin(request, "join:incoming:task-1:executor", "task-2"); ok {
+			if response, ok := discardPendingInput(request); ok {
 				return response, nil
 			}
 			mu.Lock()
-			if strings.Contains(lastUser(request.Messages), "[join pending]") {
-				rootExecutorMemory = stateBlocksText(request)
+			if !strings.Contains(lastUser(request.Messages), "child plan") {
+				executorMemory = stateBlocksText(request)
 			}
 			mu.Unlock()
 			if strings.Contains(lastUser(request.Messages), "child plan") {
 				return agent.AssistantMessage{Content: "child did"}, nil
 			}
-			return agent.AssistantMessage{Content: "root did"}, nil
+			return agent.AssistantMessage{Content: "task did"}, nil
 		default:
 			if strings.Contains(lastUser(request.Messages), "child did") {
 				return agent.AssistantMessage{Content: "CHILD REPORT"}, nil
@@ -770,7 +791,7 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 
 	snap := mgr.Snapshot()
 	if len(snap.Tasks) != 2 {
-		t.Fatalf("tasks = %d, want root and child", len(snap.Tasks))
+		t.Fatalf("tasks = %d, want task and child", len(snap.Tasks))
 	}
 	if snap.Tasks[0].Outcome != coordination.OutcomeDone {
 		t.Fatalf("outcome = %q, want done", snap.Tasks[0].Outcome)
@@ -800,11 +821,11 @@ func TestManagerRunsRootTaskAndWakesWithReport(t *testing.T) {
 			t.Fatalf("manager report memory = %q, want %q", managerReportMemory, want)
 		}
 	}
-	if strings.Contains(rootExecutorMemory, "CHILD REPORT") {
-		t.Fatalf("root executor prompt leaked candidate report: %q", rootExecutorMemory)
+	if strings.Contains(executorMemory, "CHILD REPORT") {
+		t.Fatalf("task executor prompt leaked candidate report: %q", executorMemory)
 	}
-	if !strings.Contains(rootExecutorMemory, "[User Message] USER MESSAGE") {
-		t.Fatalf("root executor prompt = %q, want original user request", rootExecutorMemory)
+	if !strings.Contains(executorMemory, "[User Message] USER MESSAGE") {
+		t.Fatalf("task executor prompt = %q, want original user request", executorMemory)
 	}
 	joined := strings.Join(replies, "\n")
 	if !strings.Contains(joined, "已建任务") || !strings.Contains(joined, "任务已完成") {
@@ -836,9 +857,9 @@ func TestManagerBuildsTaskPackageFromTaskInfoWithoutEagerRecall(t *testing.T) {
 			if !created {
 				created = true
 				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-					ID:        "create-root",
+					ID:        "create-task",
 					Name:      "coordination_orchestrate",
-					Arguments: json.RawMessage(`{"action":"replace_pending","roots":[{"info":"use NEED_TOKEN"}],"spawns":[]}`),
+					Arguments: json.RawMessage(`{"action":"replace_pending","tasks":[{"info":"use NEED_TOKEN"}],"edges":[]}`),
 				}}}, nil
 			}
 			return agent.AssistantMessage{Content: "started"}, nil
@@ -889,7 +910,7 @@ func TestManagerBuildsTaskPackageFromTaskInfoWithoutEagerRecall(t *testing.T) {
 	}
 }
 
-func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
+func TestManagerTaskRequestsHelpAndResumesAfterInputs(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -922,12 +943,22 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 				if !helpProvided {
 					helpProvided = true
 					requestID := strings.TrimSpace(strings.TrimPrefix(strings.SplitN(query, "\n", 2)[0], "[拆分请求]"))
+					pause, resume, err := helpEndpoints(query)
+					if err != nil {
+						return agent.AssistantMessage{}, err
+					}
 					args, err := json.Marshal(map[string]any{
 						"action":     "provide_help",
 						"request_id": requestID,
-						"spawns": []map[string]string{
-							{"from": "task-1:planner", "info": "gather evidence A"},
-							{"from": "task-1:planner", "info": "gather evidence B"},
+						"tasks": []coordination.PendingTask{
+							{ID: "task-2", Info: "gather evidence A"},
+							{ID: "task-3", Info: "gather evidence B"},
+						},
+						"edges": []coordination.Edge{
+							{From: pause, To: "task-2:1:planner"},
+							{From: pause, To: "task-3:1:planner"},
+							{From: "task-2:1:verifier", To: resume},
+							{From: "task-3:1:verifier", To: resume},
 						},
 					})
 					if err != nil {
@@ -944,13 +975,13 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 			case !created:
 				created = true
 				args, err := replacePendingArguments(coordination.PendingSubgraph{
-					Roots: []coordination.PendingRoot{{Info: "solve"}},
+					Tasks: []coordination.PendingTask{{Info: "solve"}},
 				})
 				if err != nil {
 					return agent.AssistantMessage{}, err
 				}
 				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-					ID:        "root-graph",
+					ID:        "task-graph",
 					Name:      "coordination_orchestrate",
 					Arguments: args,
 				}}}, nil
@@ -964,7 +995,7 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 			if strings.Contains(query, "gather evidence B") {
 				return agent.AssistantMessage{Content: "helper-plan-B"}, nil
 			}
-			return agent.AssistantMessage{Content: "root-plan"}, nil
+			return agent.AssistantMessage{Content: "task-plan"}, nil
 		case strings.Contains(sys, "你是 executor"):
 			if strings.Contains(query, "helper-plan-A") {
 				return agent.AssistantMessage{Content: "helper-did-A"}, nil
@@ -972,12 +1003,7 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 			if strings.Contains(query, "helper-plan-B") {
 				return agent.AssistantMessage{Content: "helper-did-B"}, nil
 			}
-			if response, ok := discardPendingJoin(
-				request,
-				"join:help:help/task-1:executor/need-help",
-				"task-2",
-				"task-3",
-			); ok {
+			if response, ok := discardPendingInput(request); ok {
 				return response, nil
 			}
 			if result := lastToolResult(request.Messages); result != "" {
@@ -986,7 +1012,7 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 				requesterMemory = stateBlocksText(request)
 				resumedBeforeHelp = helperFinished != 2
 				mu.Unlock()
-				return agent.AssistantMessage{Content: "root-did"}, nil
+				return agent.AssistantMessage{Content: "task-did"}, nil
 			}
 			return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 				ID:        "need-help",
@@ -1006,7 +1032,7 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 				mu.Unlock()
 				return agent.AssistantMessage{Content: "helper-result-B"}, nil
 			}
-			return agent.AssistantMessage{Content: "root-verified"}, nil
+			return agent.AssistantMessage{Content: "task-verified"}, nil
 		}
 	})
 
@@ -1027,7 +1053,7 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 
 	snap := mgr.Snapshot()
 	if len(snap.Tasks) != 3 {
-		t.Fatalf("tasks = %d, want root and two helpers", len(snap.Tasks))
+		t.Fatalf("tasks = %d, want task and two helpers", len(snap.Tasks))
 	}
 	for _, task := range snap.Tasks {
 		if task.Outcome != coordination.OutcomeDone {
@@ -1036,17 +1062,17 @@ func TestManagerTaskRequestsHelpAndResumesAfterJoinedTask(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if !strings.Contains(helpRequest, "task-1:executor") || !strings.Contains(helpRequest, "need evidence") {
+	if !strings.Contains(helpRequest, "task-1:1:executor") || !strings.Contains(helpRequest, "need evidence") {
 		t.Fatalf("help request = %q, want requester node and reason", helpRequest)
 	}
 	if resumedBeforeHelp {
 		t.Fatal("requester resumed before helper verifier finished")
 	}
-	if !strings.Contains(requesterResult, `"finished":true`) || !strings.Contains(requesterResult, "join:help:") {
-		t.Fatalf("requester tool result = %q, want finished join session", requesterResult)
+	if !strings.Contains(requesterResult, "[input ready]") || !strings.Contains(requesterResult, "input:") {
+		t.Fatalf("requester tool result = %q, want ready input session", requesterResult)
 	}
 	if strings.Contains(requesterMemory, "helper-result-A") || strings.Contains(requesterMemory, "helper-result-B") {
-		t.Fatalf("requester prompt leaked helper reports outside join: %q", requesterMemory)
+		t.Fatalf("requester prompt leaked helper reports outside input processing: %q", requesterMemory)
 	}
 	for _, want := range []string{"gather evidence A", "gather evidence B"} {
 		if !strings.Contains(managerHelpMemory, want) {
@@ -1065,7 +1091,7 @@ func TestManagerDeclinedHelpResumesRequester(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	rootCreated := false
+	taskCreated := false
 	invalidHelpAttempted := false
 	var requesterResult string
 	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
@@ -1080,12 +1106,18 @@ func TestManagerDeclinedHelpResumesRequester(t *testing.T) {
 				if !invalidHelpAttempted {
 					invalidHelpAttempted = true
 					requestID := strings.TrimSpace(strings.TrimPrefix(strings.SplitN(query, "\n", 2)[0], "[拆分请求]"))
+					_, resume, err := helpEndpoints(query)
+					if err != nil {
+						return agent.AssistantMessage{}, err
+					}
 					args, err := json.Marshal(map[string]any{
 						"action":     "provide_help",
 						"request_id": requestID,
-						"spawns": []map[string]string{{
-							"from": "task-1:executor", "info": "impossible self help",
-						}},
+						"tasks":      []coordination.PendingTask{{ID: "task-2", Info: "impossible self help"}},
+						"edges": []coordination.Edge{
+							{From: resume, To: "task-2:1:planner"},
+							{From: "task-2:1:verifier", To: resume},
+						},
 					})
 					if err != nil {
 						return agent.AssistantMessage{}, err
@@ -1099,16 +1131,16 @@ func TestManagerDeclinedHelpResumesRequester(t *testing.T) {
 				return agent.AssistantMessage{Content: "当前没有可行的帮助分支"}, nil
 			case strings.Contains(query, "[任务报告]"):
 				return agent.AssistantMessage{Content: "任务已完成"}, nil
-			case !rootCreated:
-				rootCreated = true
+			case !taskCreated:
+				taskCreated = true
 				args, err := replacePendingArguments(coordination.PendingSubgraph{
-					Roots: []coordination.PendingRoot{{Info: "solve"}},
+					Tasks: []coordination.PendingTask{{Info: "solve"}},
 				})
 				if err != nil {
 					return agent.AssistantMessage{}, err
 				}
 				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-					ID:        "root-graph",
+					ID:        "task-graph",
 					Name:      "coordination_orchestrate",
 					Arguments: args,
 				}}}, nil
@@ -1116,7 +1148,7 @@ func TestManagerDeclinedHelpResumesRequester(t *testing.T) {
 				return agent.AssistantMessage{Content: "已开始"}, nil
 			}
 		case strings.Contains(sys, "你是 planner"):
-			return agent.AssistantMessage{Content: "root-plan"}, nil
+			return agent.AssistantMessage{Content: "task-plan"}, nil
 		case strings.Contains(sys, "你是 executor"):
 			if result := lastToolResult(request.Messages); result != "" {
 				requesterResult = result
@@ -1168,7 +1200,7 @@ func TestManagerUserCanAddFutureBranchWhileTaskRuns(t *testing.T) {
 	var changedOnce sync.Once
 	var childOnce sync.Once
 	var mu sync.Mutex
-	rootCreated := false
+	taskCreated := false
 	dynamicSubmitted := false
 	provider := stubProvider(func(ctx context.Context, request agent.Request) (agent.AssistantMessage, error) {
 		sys := request.SystemPrompt
@@ -1182,12 +1214,12 @@ func TestManagerUserCanAddFutureBranchWhileTaskRuns(t *testing.T) {
 			switch {
 			case strings.Contains(query, "[任务报告]"):
 				return agent.AssistantMessage{Content: "done"}, nil
-			case query == "start" && !rootCreated:
-				rootCreated = true
+			case query == "start" && !taskCreated:
+				taskCreated = true
 				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-					ID:        "create-root",
+					ID:        "create-task",
 					Name:      "coordination_orchestrate",
-					Arguments: json.RawMessage(`{"action":"replace_pending","roots":[{"info":"root"}],"spawns":[]}`),
+					Arguments: json.RawMessage(`{"action":"replace_pending","tasks":[{"info":"task"}],"edges":[]}`),
 				}}}, nil
 			case query == "add future" && !dynamicSubmitted:
 				dynamicSubmitted = true
@@ -1196,12 +1228,11 @@ func TestManagerUserCanAddFutureBranchWhileTaskRuns(t *testing.T) {
 					Name: "coordination_orchestrate",
 					Arguments: json.RawMessage(`{
 						"action":"replace_pending",
-						"roots":[{"info":"root"}],
-						"spawns":[{
-							"from":"task-1:executor",
-							"join":"task-1:verifier",
-							"info":"late child"
-						}]
+						"tasks":[{"id":"task-1","info":"task"},{"id":"task-2","info":"late child"}],
+						"edges":[
+							{"from":"task-1:1:executor","to":"task-2:1:planner"},
+							{"from":"task-2:1:verifier","to":"task-1:1:verifier"}
+						]
 					}`),
 				}}}, nil
 			case query == "add future" && hasToolResult(request.Messages):
@@ -1218,14 +1249,14 @@ func TestManagerUserCanAddFutureBranchWhileTaskRuns(t *testing.T) {
 			plannerOnce.Do(func() { close(plannerStarted) })
 			select {
 			case <-plannerRelease:
-				return agent.AssistantMessage{Content: "root plan"}, nil
+				return agent.AssistantMessage{Content: "task plan"}, nil
 			case <-ctx.Done():
 				return agent.AssistantMessage{}, ctx.Err()
 			}
 		case strings.Contains(sys, "你是 executor"):
 			return agent.AssistantMessage{Content: "executed"}, nil
 		default:
-			if response, ok := discardPendingJoin(request, "join:incoming:task-1:verifier", "task-2"); ok {
+			if response, ok := discardPendingInput(request); ok {
 				return response, nil
 			}
 			return agent.AssistantMessage{Content: "verified"}, nil
@@ -1245,7 +1276,7 @@ func TestManagerUserCanAddFutureBranchWhileTaskRuns(t *testing.T) {
 	select {
 	case <-plannerStarted:
 	case <-ctx.Done():
-		t.Fatal("root planner did not start")
+		t.Fatal("task planner did not start")
 	}
 
 	mgr.Send("add future")
@@ -1255,7 +1286,7 @@ func TestManagerUserCanAddFutureBranchWhileTaskRuns(t *testing.T) {
 		t.Fatal("manager did not apply the running graph change")
 	}
 	if got := len(mgr.Snapshot().Tasks); got != 2 {
-		t.Fatalf("tasks after running change = %d, want root and late child", got)
+		t.Fatalf("tasks after running change = %d, want task and late child", got)
 	}
 	close(plannerRelease)
 	if err := mgr.WaitIdle(ctx); err != nil {
@@ -1375,35 +1406,63 @@ func lastToolResult(messages []agent.Message) string {
 	return ""
 }
 
-func discardPendingJoin(
-	request agent.Request,
-	sessionID string,
-	sourceIDs ...string,
-) (agent.AssistantMessage, bool) {
-	query := lastUser(request.Messages)
+func helpEndpoints(message string) (string, string, error) {
+	var pause, resume string
+	for _, line := range strings.Split(message, "\n") {
+		if value, ok := strings.CutPrefix(line, "Pause: "); ok {
+			pause = strings.TrimSpace(value)
+		}
+		if value, ok := strings.CutPrefix(line, "Resume: "); ok {
+			resume = strings.TrimSpace(value)
+		}
+	}
+	if pause == "" || resume == "" {
+		return "", "", errors.New("help notification has no pause and resume endpoints")
+	}
+	return pause, resume, nil
+}
+
+func discardPendingInput(request agent.Request) (agent.AssistantMessage, bool) {
 	result := lastToolResult(request.Messages)
-	switch {
-	case strings.Contains(query, "[join pending]") && result == "",
-		strings.Contains(result, "[join pending]"):
-		args, _ := json.Marshal(map[string]any{
-			"action":     "discard",
-			"session_id": sessionID,
-			"source_ids": sourceIDs,
-			"reason":     "test candidate handled",
-		})
-		return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-			ID: "discard-join", Name: "join", Arguments: args,
-		}}}, true
-	case strings.Contains(result, `"discarded"`):
-		args, _ := json.Marshal(map[string]any{
-			"action": "finish", "session_id": sessionID, "reason": "test candidates handled",
-		})
-		return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-			ID: "finish-join", Name: "join", Arguments: args,
-		}}}, true
-	default:
+	if strings.Contains(result, `"ready"`) {
 		return agent.AssistantMessage{}, false
 	}
+	notice := lastUser(request.Messages)
+	for i := len(request.Messages) - 1; i >= 0; i-- {
+		if strings.Contains(request.Messages[i].Content, "[input pending]") {
+			notice = request.Messages[i].Content
+			break
+		}
+	}
+	start := strings.Index(notice, "[input pending]")
+	if start < 0 {
+		return agent.AssistantMessage{}, false
+	}
+	var sessionID, sources string
+	for _, field := range strings.Fields(notice[start:]) {
+		if value, ok := strings.CutPrefix(field, "session_id="); ok {
+			sessionID = value
+		}
+		if value, ok := strings.CutPrefix(field, "sources="); ok {
+			sources, _, _ = strings.Cut(value, "。")
+		}
+	}
+	if sessionID == "" || sources == "" {
+		return agent.AssistantMessage{}, false
+	}
+	action := "discard"
+	args := map[string]any{
+		"action": action, "session_id": sessionID,
+		"source_ids": strings.Split(sources, ","), "reason": "test input handled",
+	}
+	if strings.Contains(result, `"discarded"`) {
+		action = "finish"
+		args = map[string]any{"action": action, "session_id": sessionID, "reason": "test input handled"}
+	}
+	arguments, _ := json.Marshal(args)
+	return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+		ID: action + "-" + sessionID, Name: "input", Arguments: arguments,
+	}}}, true
 }
 
 func TestFormatReport(t *testing.T) {
@@ -1438,7 +1497,7 @@ func TestFormatReport(t *testing.T) {
 	}
 }
 
-func TestManagerHoldsQueuedRootUntilReleased(t *testing.T) {
+func TestManagerHoldsTaskUntilReleased(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1462,7 +1521,10 @@ func TestManagerHoldsQueuedRootUntilReleased(t *testing.T) {
 				callID = "release"
 			}
 			args, err := replacePendingArguments(coordination.PendingSubgraph{
-				Roots: []coordination.PendingRoot{{Info: "HELD INFO", RunPolicy: policy}},
+				Tasks: []coordination.PendingTask{
+					{ID: "task-1", Info: "HELD INFO", RunPolicy: policy},
+					{ID: "task-2", Info: "RUNNABLE INFO"},
+				},
 			})
 			if err != nil {
 				return agent.AssistantMessage{}, err
@@ -1474,7 +1536,9 @@ func TestManagerHoldsQueuedRootUntilReleased(t *testing.T) {
 			}}}, nil
 		case strings.Contains(sys, "你是 planner"):
 			mu.Lock()
-			plannerCalled = true
+			if strings.Contains(query, "HELD INFO") {
+				plannerCalled = true
+			}
 			mu.Unlock()
 			return agent.AssistantMessage{Content: "plan"}, nil
 		case strings.Contains(sys, "你是 executor"):
@@ -1499,8 +1563,8 @@ func TestManagerHoldsQueuedRootUntilReleased(t *testing.T) {
 		t.Fatalf("WaitIdle() error = %v", err)
 	}
 	snap := mgr.Snapshot()
-	if len(snap.Tasks) != 1 || snap.Tasks[0].Outcome != coordination.OutcomeActive {
-		t.Fatalf("tasks = %#v, want one active root", snap.Tasks)
+	if len(snap.Tasks) != 2 || snap.Tasks[0].Outcome != coordination.OutcomeActive || snap.Tasks[1].Outcome != coordination.OutcomeDone {
+		t.Fatalf("tasks = %#v, want held task active and independent task done", snap.Tasks)
 	}
 	if snap.Tasks[0].RunPolicy != coordination.RunPolicyHeld {
 		t.Fatalf("run policy = %q, want %q", snap.Tasks[0].RunPolicy, coordination.RunPolicyHeld)
@@ -1509,7 +1573,7 @@ func TestManagerHoldsQueuedRootUntilReleased(t *testing.T) {
 	started := plannerCalled
 	mu.Unlock()
 	if started {
-		t.Fatal("held root started; want it to stay queued until released")
+		t.Fatal("held task started; want it to stay queued until released")
 	}
 
 	mgr.Send("RELEASE")
@@ -1523,6 +1587,6 @@ func TestManagerHoldsQueuedRootUntilReleased(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if !plannerCalled {
-		t.Fatal("released root never ran")
+		t.Fatal("released task never ran")
 	}
 }

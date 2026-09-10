@@ -149,7 +149,7 @@ func buildOrganizeUserPrompt(
 	b.WriteString("\n可选归属子图：\n")
 	writeSubgraphCatalog(&b, graph, allSubgraphIDs(graph))
 	b.WriteString("\n已有记忆（即 Agent 当前可见节点）：\n")
-	existing := graph.NodesInSubgraphs(subgraphIDs)
+	existing := graph.CurrentNodesInSubgraphs(subgraphIDs)
 	if len(existing) == 0 {
 		b.WriteString("（无）\n")
 	}

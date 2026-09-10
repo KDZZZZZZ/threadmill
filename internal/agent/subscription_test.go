@@ -33,7 +33,6 @@ type subscriptionFixture struct {
 
 func newSubscriptionFixture(t *testing.T, organizerModel modelFunc) subscriptionFixture {
 	t.Helper()
-	resetDefaultStore(t)
 
 	organizer, err := NewSubgraphOrganizer(Config{Provider: organizerModel})
 	if err != nil {

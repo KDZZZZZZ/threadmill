@@ -7,180 +7,127 @@ import (
 	"sync"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
+	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 )
 
 const maxAutomaticRoleRecoveries = 2
 
 var (
-	// ErrUnknownTask 表示要执行的 task 不在图中。
 	ErrUnknownTask = errors.New("coordination: unknown task")
-	// ErrNilAssemble 表示没有提供组装 agent 的函数。
 	ErrNilAssemble = errors.New("coordination: nil assemble")
-	// ErrNilAsker 表示某个角色没有可调用的 Asker。
-	ErrNilAsker = errors.New("coordination: nil asker")
-	// ErrNilStore 表示缺少按环境隔离的记忆存储。
-	ErrNilStore = errors.New("coordination: nil store")
-	// ErrRoleStalled 表示角色的持久回合在自动续接后仍遇到可恢复故障，需交给 manager 改变恢复策略。
-	ErrRoleStalled          = errors.New("coordination: role stalled")
-	errTaskReportProjection = errors.New("coordination: task report projection failed")
+	ErrNilAsker    = errors.New("coordination: nil asker")
+	ErrNilStore    = errors.New("coordination: nil store")
+	ErrRoleStalled = errors.New("coordination: role stalled")
+	ErrTaskHeld    = errors.New("coordination: task is held")
 )
 
-// Run 由图调度一次从 taskID 出发的执行，返回该 task 的 verifier 输出。
-//
-// 每个角色节点顺序是 fork → join → Ask → spawn：
-//   - fork：目标角色先准备自己的文件与执行环境。
-//   - join：Ask 前等 IncomingJoins 的子 task 结束，把候选注册给目标角色；
-//     候选不会自动改文件，目标角色通过 join 工具检查并显式采纳或丢弃。
-//   - Ask：目标角色处理全部 join session 后继续跑 ReAct。
-//     ProgressStore 已有输出则跳过。
-//   - spawn：Ask 之后 Fork 子环境，用本角色输出当子输入，拉起即走，不等待。
-//
-// 同一 task 的 planner → executor → verifier 由 runTask 的 for 循环保证。
-// 入口 Run 成功后扔掉整棵子树的进度。
-func (g *Graph) Run(
-	ctx context.Context,
-	taskID string,
-	input string,
-	stores Stores,
-	assemble AssembleFunc,
-) (string, error) {
-	return g.run(ctx, taskID, input, stores, assemble, nil)
-}
-
-// RunWithReport 在写入任务终态前提交根 task 报告；报告失败时保留 active 状态和进度供重试。
-func (g *Graph) RunWithReport(
-	ctx context.Context,
-	taskID string,
-	input string,
-	stores Stores,
-	assemble AssembleFunc,
-	report func(Task, string, error) error,
-) (string, error) {
-	return g.run(ctx, taskID, input, stores, assemble, report)
-}
-
-func (g *Graph) run(
-	ctx context.Context,
-	taskID string,
-	input string,
-	stores Stores,
-	assemble AssembleFunc,
-	report func(Task, string, error) error,
-) (string, error) {
+// SetRunContext gives automatically started prerequisites the session lifetime.
+// Canceling a consumer never cancels another task that is producing its input.
+func (g *Graph) SetRunContext(ctx context.Context) {
 	if ctx == nil {
 		panic("nil context")
 	}
+	g.mu.Lock()
+	g.runContext = ctx
+	g.mu.Unlock()
+}
+
+// CancelTask stops only this task's current activation.
+func (g *Graph) CancelTask(taskID string) {
+	g.mu.Lock()
+	r := g.runners[taskID]
+	g.mu.Unlock()
+	if r != nil {
+		r.cancel()
+	}
+}
+
+// WaitRuns waits for actual executions, including prerequisites started by an edge.
+// Call after canceling the session and stopping new submissions.
+func (g *Graph) WaitRuns() { g.runWG.Wait() }
+
+func (g *Graph) Run(ctx context.Context, taskID, input string, stores Stores, assemble AssembleFunc) (string, error) {
+	return g.RunWithReport(ctx, taskID, input, stores, assemble, nil)
+}
+
+// RunWithReport shares an activation with concurrent callers. Report delivery is
+// separate from execution and must succeed before the task leaves active state.
+func (g *Graph) RunWithReport(ctx context.Context, taskID, input string, stores Stores, assemble AssembleFunc, report func(Task, string, error) error) (string, error) {
+	r, owner, err := g.start(ctx, taskID, input, stores, assemble, report)
+	if err != nil {
+		return "", err
+	}
+	registered := owner || report == nil || r.addReport(report)
+	if owner || report != nil {
+		<-r.done
+	} else {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-r.done:
+		}
+	}
+	if !registered {
+		if err := r.deliverReport(report, r.result.output, r.result.err); err != nil {
+			return "", errors.Join(r.result.err, err, g.setTaskActive(taskID, r.task.Activation))
+		}
+	}
+	return r.result.output, r.result.err
+}
+
+func (g *Graph) start(ctx context.Context, taskID, input string, stores Stores, assemble AssembleFunc, report func(Task, string, error) error) (*runner, bool, error) {
+	if ctx == nil {
+		panic("nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	if assemble == nil {
-		return "", ErrNilAssemble
+		return nil, false, ErrNilAssemble
 	}
 	if stores.Memory == nil {
-		return "", ErrNilStore
+		return nil, false, ErrNilStore
 	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	g.mu.Lock()
-	if g.executing {
+	if r := g.runners[taskID]; r != nil {
 		g.mu.Unlock()
-		return "", ErrGraphBusy
+
+		return r, false, nil
 	}
-	progress := g.progress
-	help := g.help
-	join := g.join
+	task, ok := g.taskByIDLocked(taskID)
+	if !ok {
+		g.mu.Unlock()
+		return nil, false, fmt.Errorf("%w: %q", ErrUnknownTask, taskID)
+	}
+	if task.Outcome == OutcomeClosed {
+		g.mu.Unlock()
+		return nil, false, fmt.Errorf("coordination: task %s is closed", taskID)
+	}
+	if task.RunPolicy == RunPolicyHeld {
+		g.mu.Unlock()
+		return nil, false, fmt.Errorf("%w: %s", ErrTaskHeld, taskID)
+	}
+	if g.progress == nil {
+		g.progress = &memoryProgressStore{}
+	}
+	runCtx, cancel := context.WithCancel(ctx)
 	r := &runner{
-		graph:       g,
-		stores:      stores,
-		assemble:    assemble,
-		progress:    progress,
-		cancel:      cancel,
-		childDone:   make(map[string]chan taskResult),
-		nodeDone:    make(map[string]chan struct{}),
-		nodeOutput:  make(map[string]string),
-		started:     map[string]struct{}{taskID: {}},
-		nodeStarted: make(map[string]struct{}),
-		join:        join,
-	}
-	g.executing = true
-	g.running = r
-	g.mu.Unlock()
-	defer func() {
-		g.mu.Lock()
-		g.executing = false
-		g.running = nil
-		g.mu.Unlock()
-	}()
-	if help != nil {
-		help.bind(r)
-		defer help.bind(nil)
-	}
-	if join != nil {
-		join.bind(r)
-		defer join.bind(nil)
-	}
-	out, err := r.runTask(ctx, taskID, input)
-	if err != nil {
-		r.fail(err)
-	}
-	r.wg.Wait()
-	if r.err != nil && !errors.Is(err, r.err) {
-		err = errors.Join(err, r.err)
+		graph: g, task: task, stores: stores, assemble: assemble, progress: g.progress,
+		ctx: runCtx, cancel: cancel, done: make(chan struct{}), changed: make(chan struct{}),
+		nodeStarted: make(map[string]struct{}), state: TaskProgress{Version: progressVersion},
 	}
 	if report != nil {
-		task, ok := g.Task(taskID)
-		if !ok {
-			return "", fmt.Errorf("%w: %q", ErrUnknownTask, taskID)
-		}
-		task.Outcome = outcomeForError(err)
-		if reportErr := report(task, out, err); reportErr != nil {
-			return "", errors.Join(err, reportErr)
-		}
+		r.reports = append(r.reports, report)
 	}
-	if errors.Is(err, errTaskReportProjection) {
-		return "", err
+	r.inputs = &inputCoordinator{graph: g, runner: r}
+	if g.runners == nil {
+		g.runners = make(map[string]*runner)
 	}
-	if persistErr := g.recordOutcome(taskID, err); persistErr != nil {
-		return "", errors.Join(err, persistErr)
-	}
-	if err != nil {
-		return "", err
-	}
-	if err := r.discardTree(taskID); err != nil {
-		return "", err
-	}
-	return out, nil
-}
-
-func outcomeForError(err error) string {
-	switch {
-	case err == nil:
-		return OutcomeDone
-	case canceledOnly(err):
-		return OutcomeCanceled
-	default:
-		return OutcomeFailed
-	}
-}
-
-func canceledOnly(err error) bool {
-	if err == nil {
-		return false
-	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		children := joined.Unwrap()
-		if len(children) == 0 {
-			return errors.Is(err, context.Canceled)
-		}
-		for _, child := range children {
-			if !canceledOnly(child) {
-				return false
-			}
-		}
-		return true
-	}
-	if wrapped, ok := err.(interface{ Unwrap() error }); ok && wrapped.Unwrap() != nil {
-		return canceledOnly(wrapped.Unwrap())
-	}
-	return errors.Is(err, context.Canceled)
+	g.runners[taskID] = r
+	g.runWG.Add(1)
+	g.mu.Unlock()
+	go r.execute(input)
+	return r, true, nil
 }
 
 type taskResult struct {
@@ -188,205 +135,435 @@ type taskResult struct {
 	err    error
 }
 
-// runner 是单次 Run 的调度状态；Graph 仅在执行期间引用它来保护已开始切片。
 type runner struct {
 	graph       *Graph
+	task        Task
 	stores      Stores
 	assemble    AssembleFunc
 	progress    ProgressStore
+	ctx         context.Context
 	cancel      context.CancelFunc
-	wg          sync.WaitGroup
+	done        chan struct{}
+	result      taskResult
 	mu          sync.Mutex
-	err         error
-	childDone   map[string]chan taskResult
-	nodeDone    map[string]chan struct{}
-	nodeOutput  map[string]string
-	started     map[string]struct{}
+	changed     chan struct{}
 	nodeStarted map[string]struct{}
-	join        *joinCoordinator
+	state       TaskProgress
+	inputs      *inputCoordinator
+	roles       Roles
+	exportMu    sync.Mutex
+	reportMu    sync.Mutex
+	reports     []func(Task, string, error) error
+	reported    bool
 }
 
-// runTask 调度一个 task：先 fork 环境、再组装三个 agent，然后按 sequence 逐个 runRole。
-func (r *runner) runTask(ctx context.Context, taskID, input string) (output string, err error) {
-	if err := ctx.Err(); err != nil {
+func (r *runner) execute(input string) {
+	defer r.graph.runWG.Done()
+	defer r.cancel()
+	output, executionErr := r.runTask(input)
+	// Execution survives failed report delivery. Only the activation's own error
+	// determines its outcome; failure elsewhere never propagates through creation.
+	var reportErr error
+	for i := 0; ; i++ {
+		r.reportMu.Lock()
+		if i == len(r.reports) {
+			r.reported = true
+			r.reportMu.Unlock()
+			break
+		}
+		report := r.reports[i]
+		r.reportMu.Unlock()
+		reportErr = errors.Join(reportErr, r.deliverReport(report, output, executionErr))
+	}
+	err := errors.Join(executionErr, reportErr)
+	if reportErr == nil {
+		err = errors.Join(err, r.graph.recordOutcome(r.task.ID, executionErr))
+	}
+	r.result = taskResult{output: output, err: err}
+	r.graph.mu.Lock()
+	delete(r.graph.runners, r.task.ID)
+	close(r.done)
+	r.graph.mu.Unlock()
+}
+
+func (r *runner) addReport(report func(Task, string, error) error) bool {
+	r.reportMu.Lock()
+	defer r.reportMu.Unlock()
+	if r.reported {
+		return false
+	}
+	r.reports = append(r.reports, report)
+	return true
+}
+
+func (r *runner) deliverReport(report func(Task, string, error) error, output string, err error) error {
+	task := r.task
+	task.Outcome = taskOutcome(task, err)
+	return report(task, output, err)
+}
+
+func (r *runner) runTask(input string) (output string, err error) {
+	if r.progress != nil {
+		state, ok, loadErr := r.progress.Load(r.task.Env.ID)
+		if loadErr != nil {
+			return "", loadErr
+		}
+		if ok {
+			r.state = state
+		}
+	}
+	if r.state.Pending != nil {
+		if err := r.completeExport(*r.state.Pending); err != nil {
+			return "", err
+		}
+	}
+	if output, ok := r.graph.Output(r.task.Verifier.ID); ok {
+		return output.Report, nil
+	}
+	if err := r.ctx.Err(); err != nil {
 		return "", err
 	}
-	task, ok := r.graph.Task(taskID)
-	if !ok {
-		return "", fmt.Errorf("%w: %q", ErrUnknownTask, taskID)
+	roles, err := r.assemble(r.task)
+	if err != nil {
+		return "", err
 	}
+	r.roles = roles
 	defer func() {
-		if r.stores.Exec != nil {
-			err = errors.Join(err, r.stores.Exec.Reap(task.Env.ID))
+		for _, workspace := range []string{r.task.Env.ID, r.task.Env.ID + ":" + RolePlanner, r.task.Env.ID + ":" + RoleVerifier} {
+			if r.stores.Exec != nil {
+				err = errors.Join(err, r.stores.Exec.Reap(workspace))
+			}
+			if r.stores.Files != nil {
+				err = errors.Join(err, r.stores.Files.Release(workspace))
+			}
 		}
-		if r.stores.Files == nil {
-			return
-		}
-		releaseErr := r.stores.Files.Release(task.Env.ID)
-		archiveErr := r.stores.Files.Archive(task.Env.ID, taskSnapshotEnvID(task))
-		err = errors.Join(err, releaseErr, archiveErr)
 	}()
-
-	parentID := task.Env.ParentID
-	if parentID == "" {
-		parentID = ManagerEnvID
-	}
-	if err := r.forkTaskEnvironment(task, parentID); err != nil {
-		return "", err
-	}
-	if task.SpawnedFrom == "" && task.Env.ParentID != "" {
-		if err := r.discardRootFiles(task.Env.ParentID); err != nil {
-			return "", err
-		}
-	}
-	if task.Env.ParentID == "" {
-		if err := r.stores.Memory.DropSubgraph(task.Env.ID, ManagerMemorySubgraphID); err != nil {
-			return "", err
-		}
-	}
-	outputs, merged, prepared, err := r.loadProgress(taskID)
-	if err != nil {
-		return "", err
-	}
-	for id, saved := range outputs {
-		r.markNodeOutput(id, saved)
-	}
-
-	roles, err := r.assemble(task)
-	if err != nil {
-		return "", err
-	}
-	if !prepared && roles.Prepare != nil {
-		if err := roles.Prepare(ctx); err != nil {
-			return "", err
-		}
-		if err := r.saveProgress(taskID, outputs, merged, true); err != nil {
-			return "", err
-		}
-	}
-
 	output = input
-	sequence := task.Sequence()
-	for i, node := range sequence {
-		if err := ctx.Err(); err != nil {
-			return "", errors.Join(err, r.drainJoins(ctx, task, sequence[i:], outputs, merged))
+	for _, node := range r.task.Sequence() {
+		if err := r.ctx.Err(); err != nil {
+			return "", err
 		}
-		output, err = r.runRole(ctx, node, roles, output, outputs, merged)
+		if saved, ok := r.graph.Output(node.ID); ok {
+			output = saved.Report
+			continue
+		}
+		output, err = r.runRole(node, output)
 		if err != nil {
-			r.fail(err)
-			return "", errors.Join(err, r.drainJoins(ctx, task, sequence[i+1:], outputs, merged))
+			return "", err
 		}
 	}
 	return output, nil
 }
 
-func (r *runner) forkTaskEnvironment(task Task, parentID string) error {
-	if task.SpawnedFrom != "" || task.Env.ParentID == "" || r.stores.Files == nil {
-		return r.stores.Fork(parentID, task.Env.ID)
-	}
-	if err := r.stores.Memory.Fork(parentID, task.Env.ID); err != nil {
-		return err
-	}
-	return r.stores.Files.Handoff(parentID, task.Env.ID)
-}
-
-func (r *runner) drainJoins(ctx context.Context, task Task, nodes []Node, outputs map[string]string, merged map[string]bool) error {
-	var joinedErr error
-	for _, node := range nodes {
-		err := r.drainIncoming(ctx, node, task, outputs, merged)
-		joinedErr = errors.Join(joinedErr, err)
-	}
-	return joinedErr
-}
-
-// runRole 执行图上的一个角色节点：fork → join → Ask → spawn。
-func (r *runner) runRole(ctx context.Context, node Node, roles Roles, input string, outputs map[string]string, merged map[string]bool) (string, error) {
+func (r *runner) runRole(node Node, input string) (string, error) {
 	r.markNodeStarted(node.ID)
-	asker := roles.asker(node.Role)
+	asker := r.roles.asker(node.Role)
 	if asker == nil {
 		return "", fmt.Errorf("%w: %s", ErrNilAsker, node.Role)
 	}
-	task, ok := r.graph.Task(node.TaskID)
-	if !ok {
-		return "", fmt.Errorf("%w: %q", ErrUnknownTask, node.TaskID)
-	}
-
-	output, completed := outputs[node.ID]
-	scope := roleScope{workspaceID: task.Env.ID}
-	var err error
-	if roles.scope != nil {
-		scope, err = roles.scope(node.Role)
-		if err != nil {
-			return "", err
-		}
-	}
-	if !completed && scope.bind != nil {
-		if err := scope.bind(); err != nil {
-			return "", err
-		}
-	}
-
-	input, joined, err := r.joinIncoming(ctx, joinRequest{
-		node:     node,
-		task:     task,
-		targetID: scope.workspaceID,
-		required: roles.scope != nil,
-		input:    input,
-		outputs:  outputs,
-		merged:   merged,
-	})
+	sources, err := r.collectInputs(r.ctx, node)
 	if err != nil {
-		if scope.cleanup != nil {
-			err = errors.Join(err, scope.cleanup(false))
-		}
 		return "", err
 	}
-
-	if !completed {
-		output, err = askRole(ctx, asker, input)
+	ready, err := r.prepareInput(r.ctx, node, sources)
+	if err != nil {
+		return "", err
+	}
+	workspace := roleWorkspaceID(r.task, node.ID)
+	if r.roles.bind == nil {
+		workspace = r.task.Env.ID
+	}
+	ready = r.latestRoleInput(node.ID, ready)
+	if err := r.installInput(&ready, workspace); err != nil {
+		return "", err
+	}
+	if r.roles.bind != nil {
+		if err := r.roles.bind(node.Role, r.task.Env.ID, workspace); err != nil {
+			return "", err
+		}
+	}
+	if len(sources) > 1 {
+		input = "输入已准备，请依据当前文件与任务记忆继续。"
+	} else if len(sources) == 1 && sources[0].Report != "" {
+		input = sources[0].Report
+	}
+	output, err := askRole(r.ctx, asker, taskInput(r.task.Info, input))
+	if err != nil {
+		return "", err
+	}
+	if r.stores.Exec != nil {
+		if err := r.stores.Exec.Reap(workspace); err != nil {
+			return "", err
+		}
+	}
+	filesID := workspace
+	memory := r.stores.Memory.Load(r.task.Env.ID)
+	if node.Role != RoleExecutor && r.roles.bind != nil {
+		ready = r.latestRoleInput(node.ID, ready)
+		filesID = ready.FilesRef
+		memory, err = r.qualifyDisposableMemory(node, workspace, ready, memory)
 		if err != nil {
-			if errors.Is(err, ErrRoleStalled) {
-				err = fmt.Errorf("%s (%s): %w", node.ID, node.Role, err)
-			}
-			if scope.cleanup != nil {
-				err = errors.Join(err, scope.cleanup(false))
-			}
-			return "", err
-		}
-		if r.join != nil {
-			if err := r.join.requireFinished(node.ID); err != nil {
-				if scope.cleanup != nil {
-					err = errors.Join(err, scope.cleanup(false))
-				}
-				return "", err
-			}
-		}
-		if len(joined.items) > 0 {
-			merged[node.ID] = true
-		}
-		outputs[node.ID] = output
-		if err := r.saveProgress(node.TaskID, outputs, merged, true); err != nil {
-			if scope.cleanup != nil {
-				err = errors.Join(err, scope.cleanup(false))
-			}
 			return "", err
 		}
 	}
-	if scope.cleanup != nil {
-		if err := scope.cleanup(true); err != nil {
-			return "", err
-		}
+	if err := r.export(node, filesID, memory, output); err != nil {
+		return "", err
 	}
-	r.markNodeOutput(node.ID, output)
-
-	spawned := r.graph.SpawnedTasks(node.ID)
-	for _, child := range spawned {
-		childInput := spawnInput(child.Info, output)
-		if err := r.startChild(ctx, child, childInput); err != nil {
+	if r.stores.Files != nil && node.Role != RoleExecutor && r.roles.bind != nil {
+		if err := r.stores.DiscardFiles(workspace); err != nil {
 			return "", err
 		}
 	}
 	return output, nil
+}
+
+func (r *runner) export(node Node, filesID string, memory ctxgraph.Graph, report string) error {
+	r.exportMu.Lock()
+	defer r.exportMu.Unlock()
+	if _, ok := r.graph.Output(node.ID); ok {
+		return nil
+	}
+	r.mu.Lock()
+	pending := cloneTaskProgress(r.state).Pending
+	r.mu.Unlock()
+	if pending != nil {
+		return r.completeExport(*pending)
+	}
+	output := Output{Node: node, FilesRef: "no-files:" + node.ID, MemoryRef: node.ID + ":memory", Report: report}
+	if r.stores.Files != nil {
+		output.FilesRef = node.ID + ":files"
+		// An unjournaled archive is an orphan, never a published source. Replacing
+		// it is safe; once journaled, retries keep this exact pair.
+		if err := r.stores.Files.Archive(filesID, output.FilesRef); err != nil {
+			return err
+		}
+	}
+	export := ExportProgress{Output: output, Memory: memory.Clone()}
+	if err := r.updateProgress(func(state *TaskProgress) { state.Pending = &export }); err != nil {
+		return err
+	}
+	return r.completeExport(export)
+}
+
+func (r *runner) completeExport(export ExportProgress) error {
+	if r.stores.Files != nil {
+		if err := r.stores.Files.Restore(export.Output.FilesRef); err != nil {
+			return err
+		}
+	}
+	if err := r.stores.Memory.SaveSnapshot(export.Output.MemoryRef, export.Memory); err != nil {
+		return err
+	}
+	if err := r.graph.commitOutput(export.Output); err != nil {
+		return err
+	}
+	if err := r.updateProgress(func(state *TaskProgress) { state.Pending = nil }); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	close(r.changed)
+	r.changed = make(chan struct{})
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *runner) collectInputs(ctx context.Context, node Node) ([]Output, error) {
+	incoming := r.graph.Incoming(node.ID)
+	if batch, exists := r.inputState(node.ID); exists {
+		incoming = nil
+		for _, source := range batch.Sources {
+			output, ok := r.graph.Output(source.ID)
+			if !ok || output.FilesRef != source.FilesRef || output.MemoryRef != source.MemoryRef {
+				return nil, fmt.Errorf("input: committed source %s is missing or changed", source.ID)
+			}
+			incoming = append(incoming, output.Node)
+		}
+	}
+	// Start the entire frontier before waiting on its ordered results. Otherwise
+	// the first unfinished source would serialize all the remaining sources.
+	for _, source := range incoming {
+		if _, ready := r.graph.Output(source.ID); ready || source.TaskID == r.task.ID {
+			continue
+		}
+		if _, err := r.startSource(ctx, source); err != nil && !errors.Is(err, ErrTaskHeld) {
+			return nil, err
+		}
+	}
+	outputs := make([]Output, 0, len(incoming))
+	for _, source := range incoming {
+		output, err := r.waitOutput(ctx, source)
+		if err != nil {
+			return nil, err
+		}
+		outputs = append(outputs, output)
+	}
+	return outputs, nil
+}
+
+func (r *runner) startSource(ctx context.Context, node Node) (*runner, error) {
+	r.graph.mu.Lock()
+	ownerCtx := r.graph.runContext
+	r.graph.mu.Unlock()
+	if ownerCtx == nil {
+		ownerCtx = ctx
+	}
+	source, _, err := r.graph.start(ownerCtx, node.TaskID, "", r.stores, r.assemble, nil)
+	return source, err
+}
+
+func (r *runner) waitOutput(ctx context.Context, node Node) (Output, error) {
+	for {
+		if output, ok := r.graph.Output(node.ID); ok {
+			return output, nil
+		}
+		if node.TaskID == r.task.ID {
+			return Output{}, fmt.Errorf("coordination: source %s has no committed output", node.ID)
+		}
+		r.graph.mu.Lock()
+		task, exists := r.graph.taskByIDLocked(node.TaskID)
+		changedGraph := r.graph.changed
+		r.graph.mu.Unlock()
+		if exists && task.RunPolicy == RunPolicyHeld && task.Outcome != OutcomeClosed {
+			select {
+			case <-ctx.Done():
+				return Output{}, ctx.Err()
+			case <-changedGraph:
+				continue
+			}
+		}
+		source, err := r.startSource(ctx, node)
+		if errors.Is(err, ErrTaskHeld) {
+			continue
+		}
+		if err != nil {
+			return Output{}, err
+		}
+		source.mu.Lock()
+		changed := source.changed
+		source.mu.Unlock()
+		if output, ok := r.graph.Output(node.ID); ok {
+			return output, nil
+		}
+		select {
+		case <-ctx.Done():
+			return Output{}, ctx.Err()
+		case <-changed:
+		case <-source.done:
+			if output, ok := r.graph.Output(node.ID); ok {
+				return output, nil
+			}
+			return Output{}, fmt.Errorf("coordination: source %s did not produce an output: %w", node.ID, source.result.err)
+		}
+	}
+}
+
+func (g *Graph) runnerForNode(nodeID string) *runner {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	node, ok := g.nodeByIDLocked(nodeID)
+	if !ok {
+		return nil
+	}
+	return g.runners[node.TaskID]
+}
+
+func (r *runner) markNodeStarted(nodeID string) {
+	r.mu.Lock()
+	r.nodeStarted[nodeID] = struct{}{}
+	r.mu.Unlock()
+}
+
+func (r *runner) executionSnapshot() (map[string]struct{}, map[string]struct{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	nodes := make(map[string]struct{}, len(r.nodeStarted))
+	for id := range r.nodeStarted {
+		nodes[id] = struct{}{}
+	}
+	return map[string]struct{}{r.task.ID: {}}, nodes
+}
+
+func (r *runner) updateProgress(update func(*TaskProgress)) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	next := cloneTaskProgress(r.state)
+	update(&next)
+	if r.progress != nil {
+		if err := r.progress.Save(r.task.Env.ID, next); err != nil {
+			return fmt.Errorf("saving activation progress: %w", err)
+		}
+	}
+	r.state = next
+	return nil
+}
+
+func cloneTaskProgress(state TaskProgress) TaskProgress {
+	state.Inputs = cloneInputProgresses(state.Inputs)
+	if state.Pending != nil {
+		pending := *state.Pending
+		pending.Memory = pending.Memory.Clone()
+		state.Pending = &pending
+	}
+	return state
+}
+
+func (g *Graph) recordOutcome(taskID string, err error) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	before := g.stateLocked()
+	for i := range g.tasks {
+		if g.tasks[i].ID == taskID && g.tasks[i].Outcome != OutcomeClosed {
+			g.tasks[i].Outcome = taskOutcome(g.tasks[i], err)
+		}
+	}
+	return g.saveOrRestoreLocked(before)
+}
+
+func (g *Graph) setTaskActive(taskID string, activation uint64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	before := g.stateLocked()
+	for i := range g.tasks {
+		if g.tasks[i].ID == taskID && g.tasks[i].Activation == activation && g.tasks[i].Outcome != OutcomeClosed {
+			g.tasks[i].Outcome = OutcomeActive
+		}
+	}
+	return g.saveOrRestoreLocked(before)
+}
+
+func taskOutcome(task Task, err error) string {
+	if err == nil && task.Persistent {
+		return OutcomeIdle
+	}
+	return outcomeForError(err)
+}
+
+func outcomeForError(err error) string {
+	if err == nil {
+		return OutcomeDone
+	}
+	if canceledOnly(err) {
+		return OutcomeCanceled
+	}
+	return OutcomeFailed
+}
+
+func canceledOnly(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, child := range joined.Unwrap() {
+			if !canceledOnly(child) {
+				return false
+			}
+		}
+		return len(joined.Unwrap()) > 0
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok && wrapped.Unwrap() != nil {
+		return canceledOnly(wrapped.Unwrap())
+	}
+	return errors.Is(err, context.Canceled)
 }
 
 func askRole(ctx context.Context, asker Asker, input string) (string, error) {
@@ -396,589 +573,27 @@ func askRole(ctx context.Context, asker Asker, input string) (string, error) {
 			return output, err
 		}
 		if recoveries >= maxAutomaticRoleRecoveries {
-			return "", fmt.Errorf(
-				"%w after %d automatic recoveries: %w",
-				ErrRoleStalled,
-				recoveries,
-				err,
-			)
+			return "", fmt.Errorf("%w after %d automatic recoveries: %w", ErrRoleStalled, recoveries, err)
 		}
 	}
 }
 
-type joinedFiles struct {
-	items []joinedTask
-}
-
-type joinRequest struct {
-	node     Node
-	task     Task
-	targetID string
-	required bool
-	input    string
-	outputs  map[string]string
-	merged   map[string]bool
-}
-
-func (r *runner) markNodeStarted(nodeID string) {
-	r.mu.Lock()
-	if r.nodeStarted == nil {
-		r.nodeStarted = make(map[string]struct{})
+func taskInput(info, upstream string) string {
+	if info == "" {
+		return upstream
 	}
-	r.nodeStarted[nodeID] = struct{}{}
-	r.mu.Unlock()
-}
-
-func (r *runner) executionSnapshot() (map[string]struct{}, map[string]struct{}) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	tasks := make(map[string]struct{}, len(r.started))
-	for id := range r.started {
-		tasks[id] = struct{}{}
+	if upstream == "" {
+		return info
 	}
-	nodes := make(map[string]struct{}, len(r.nodeStarted))
-	for id := range r.nodeStarted {
-		nodes[id] = struct{}{}
-	}
-	return tasks, nodes
-}
-
-func (r *runner) runHelp(ctx context.Context, task Task, nodeID, requestID string, children []helpChild) (string, error) {
-	if result, ok, err := r.restoredHelpResult(task, nodeID, requestID, children); err != nil {
-		return "", err
-	} else if ok {
-		return result, nil
-	}
-	for _, child := range children {
-		upstream, err := r.waitNodeOutput(ctx, child.from)
-		if err != nil {
-			return "", err
-		}
-		if err := r.startChild(ctx, child.task, spawnInput(child.task.Info, upstream)); err != nil {
-			return "", err
-		}
-	}
-	tasks := make([]Task, 0, len(children))
-	for _, child := range children {
-		tasks = append(tasks, child.task)
-	}
-	joined, err := r.joinTaskReports(ctx, task, tasks, false)
-	if err != nil {
-		return "", err
-	}
-	if r.join == nil {
-		return "", fmt.Errorf("coordination: join tool is unavailable")
-	}
-	session, err := r.join.open(
-		task.ID,
-		nodeID,
-		roleWorkspaceID(task, nodeID),
-		"join:help:"+requestID,
-		joined,
-	)
-	if err != nil {
-		return "", err
-	}
-	if err := r.markHelpJoined(task.ID, requestID); err != nil {
-		return "", err
-	}
-	return joinNotice(session), nil
-}
-
-func (r *runner) restoredHelpResult(task Task, nodeID, requestID string, children []helpChild) (string, bool, error) {
-	if r.progress == nil {
-		return "", false, nil
-	}
-	progress, ok, err := r.progress.Load(task.ID)
-	if err != nil {
-		return "", false, fmt.Errorf("loading task progress: %w", err)
-	}
-	if !ok || !hasProgressID(progress.Merged, helpProgressID(requestID)) {
-		return "", false, nil
-	}
-	joined := make([]joinedTask, 0, len(children))
-	for _, child := range children {
-		progress, ok, err := r.progress.Load(child.task.ID)
-		if err != nil {
-			return "", false, fmt.Errorf("loading help task progress: %w", err)
-		}
-		if !ok {
-			return "", false, fmt.Errorf("loading help task progress: %s is missing", child.task.ID)
-		}
-		joined = append(joined, joinedTask{
-			task: child.task,
-			out:  progress.Outputs[child.task.Verifier.ID],
-		})
-	}
-	if r.join == nil {
-		return "", false, fmt.Errorf("coordination: join tool is unavailable")
-	}
-	session, err := r.join.open(
-		task.ID,
-		nodeID,
-		roleWorkspaceID(task, nodeID),
-		"join:help:"+requestID,
-		joined,
-	)
-	if err != nil {
-		return "", false, err
-	}
-	return joinNotice(session), true, nil
-}
-
-func (r *runner) markHelpJoined(taskID, requestID string) error {
-	if r.progress == nil {
-		return nil
-	}
-	progress, _, err := r.progress.Load(taskID)
-	if err != nil {
-		return fmt.Errorf("loading task progress: %w", err)
-	}
-	marker := helpProgressID(requestID)
-	if hasProgressID(progress.Merged, marker) {
-		return nil
-	}
-	progress.Merged = append(progress.Merged, marker)
-	if err := r.progress.Save(taskID, progress); err != nil {
-		return fmt.Errorf("saving task progress: %w", err)
-	}
-	return nil
-}
-
-func helpProgressID(requestID string) string {
-	return "help:" + requestID
-}
-
-func (r *runner) startChild(ctx context.Context, child Task, input string) error {
-	r.mu.Lock()
-	if _, ok := r.started[child.ID]; ok {
-		r.mu.Unlock()
-		return nil
-	}
-	r.started[child.ID] = struct{}{}
-	r.mu.Unlock()
-	if err := r.stores.Fork(child.Env.ParentID, child.Env.ID); err != nil {
-		return err
-	}
-
-	done := r.childCh(child.ID)
-	r.wg.Add(1)
-	go func() {
-		defer r.wg.Done()
-		out, err := r.runTask(ctx, child.ID, input)
-		done <- taskResult{output: out, err: err}
-		if err != nil {
-			r.fail(err)
-		}
-	}()
-	return nil
-}
-
-func (r *runner) markNodeOutput(nodeID, output string) {
-	r.mu.Lock()
-	if _, exists := r.nodeOutput[nodeID]; exists {
-		r.mu.Unlock()
-		return
-	}
-	r.nodeOutput[nodeID] = output
-	done := r.nodeDone[nodeID]
-	if done != nil {
-		close(done)
-	}
-	r.mu.Unlock()
-}
-
-func (r *runner) waitNodeOutput(ctx context.Context, nodeID string) (string, error) {
-	r.mu.Lock()
-	if output, ok := r.nodeOutput[nodeID]; ok {
-		r.mu.Unlock()
-		return output, nil
-	}
-	done := r.nodeDone[nodeID]
-	if done == nil {
-		done = make(chan struct{})
-		r.nodeDone[nodeID] = done
-	}
-	r.mu.Unlock()
-
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case <-done:
-		r.mu.Lock()
-		output := r.nodeOutput[nodeID]
-		r.mu.Unlock()
-		return output, nil
-	}
-}
-
-func (r *runner) joinIncoming(ctx context.Context, req joinRequest) (string, joinedFiles, error) {
-	children := r.incomingChildren(req.node)
-	if len(children) == 0 {
-		return req.input, joinedFiles{}, nil
-	}
-
-	already := req.merged[req.node.ID]
-	var (
-		items []joinedTask
-		err   error
-	)
-	items, err = r.joinTaskReports(ctx, req.task, children, already)
-	joined := joinedFiles{items: items}
-	if err != nil {
-		return "", joined, err
-	}
-
-	if !already {
-		if r.join == nil {
-			if req.required {
-				return "", joined, fmt.Errorf("coordination: join tool is unavailable")
-			}
-			// Minimal custom Askers used by graph-level callers have no tool
-			// binding. They may observe scheduling, but never receive or apply
-			// candidate artifacts.
-			if err := r.discardJoinedFiles(items); err != nil {
-				return "", joined, err
-			}
-			req.merged[req.node.ID] = true
-			if err := r.saveProgress(req.node.TaskID, req.outputs, req.merged, true); err != nil {
-				return "", joined, err
-			}
-			return req.input, joined, nil
-		}
-		session, err := r.join.open(
-			req.node.TaskID,
-			req.node.ID,
-			req.targetID,
-			"join:incoming:"+req.node.ID,
-			items,
-		)
-		if err != nil {
-			return "", joined, err
-		}
-		if !session.Finished {
-			req.input += "\n\n" + joinNotice(session)
-		}
-	}
-	return req.input, joined, nil
-}
-
-func (r *runner) incomingChildren(node Node) []Task {
-	preds := r.graph.IncomingJoins(node.ID)
-	children := make([]Task, 0, len(preds))
-	for _, pred := range preds {
-		if r.graph.isHelpChildJoin(node.ID, pred.TaskID) {
-			continue
-		}
-		if child, ok := r.graph.Task(pred.TaskID); ok {
-			children = append(children, child)
-		}
-	}
-	return children
-}
-
-func (r *runner) drainIncoming(
-	ctx context.Context,
-	node Node,
-	task Task,
-	outputs map[string]string,
-	merged map[string]bool,
-) error {
-	children := r.incomingChildren(node)
-	if len(children) == 0 {
-		return nil
-	}
-	already := merged[node.ID]
-	joined, err := r.joinTaskReports(ctx, task, children, already)
-	if err != nil {
-		return err
-	}
-	if already {
-		return nil
-	}
-	if err := r.discardJoinedFiles(joined); err != nil {
-		return err
-	}
-	merged[node.ID] = true
-	return r.saveProgress(node.TaskID, outputs, merged, true)
-}
-
-// joinTaskReports merges child memory and reports while leaving candidate files
-// isolated for explicit role-level adoption through the join tool.
-func (r *runner) joinTaskReports(ctx context.Context, parent Task, children []Task, already bool) ([]joinedTask, error) {
-	joined := make([]joinedTask, 0, len(children))
-	var joinedErr error
-	for _, child := range children {
-		out := r.savedTaskOutput(child.ID)
-		if !already {
-			var err error
-			out, err = r.waitTask(ctx, child.ID)
-			if err != nil {
-				reportErr := r.projectCandidateTaskReport(parent, child, fmt.Sprintf("任务未完成：%v", err))
-				joinedErr = errors.Join(joinedErr, err, reportErr)
-				continue
-			}
-			if err := r.stores.Memory.Merge(child.Env.ID, parent.Env.ID); err != nil {
-				joinedErr = errors.Join(joinedErr, err)
-			}
-		}
-		if err := r.projectCandidateTaskReport(parent, child, out); err != nil {
-			joinedErr = errors.Join(joinedErr, err)
-		}
-		joined = append(joined, joinedTask{task: child, out: out})
-	}
-	return joined, joinedErr
-}
-
-func (r *runner) discardJoinedFiles(joined []joinedTask) error {
-	var err error
-	for _, item := range joined {
-		err = errors.Join(err, r.stores.DiscardFiles(item.task.Env.ID))
-	}
-	return err
-}
-
-func (r *runner) discardTaskFiles(envID string) error {
-	var err error
-	for _, suffix := range []string{
-		"", ":" + RolePlanner,
-		":" + RoleVerifier,
-	} {
-		err = errors.Join(err, r.stores.DiscardFiles(envID+suffix))
-	}
-	return err
-}
-
-func (r *runner) discardRootFiles(envID string) error {
-	rootID := ""
-	for _, task := range r.graph.Snapshot().Tasks {
-		if task.Env.ID == envID {
-			rootID = task.ID
-			break
-		}
-	}
-	if rootID == "" {
-		return r.discardTaskFiles(envID)
-	}
-	var err error
-	for _, taskID := range r.graph.taskTree(rootID) {
-		task, ok := r.graph.Task(taskID)
-		if ok {
-			err = errors.Join(err, r.discardTaskFiles(task.Env.ID))
-		}
-	}
-	return err
-}
-
-type joinedTask struct {
-	task Task
-	out  string
-}
-
-func (r *runner) projectCandidateTaskReport(_ Task, child Task, output string) error {
-	if err := r.stores.ProjectCandidateTaskReport(child, output); err != nil {
-		return fmt.Errorf("%w for task %s: %w", errTaskReportProjection, child.ID, err)
-	}
-	return nil
+	return info + "\n\n" + upstream
 }
 
 func roleWorkspaceID(task Task, nodeID string) string {
-	switch nodeID {
-	case task.Planner.ID:
+	if nodeID == task.Planner.ID {
 		return task.Env.ID + ":" + RolePlanner
-	case task.Verifier.ID:
+	}
+	if nodeID == task.Verifier.ID {
 		return task.Env.ID + ":" + RoleVerifier
-	default:
-		return task.Env.ID
 	}
-}
-
-func (g *Graph) recordOutcome(rootID string, err error) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	before := g.stateLocked()
-	tree := g.spawnedSubtreeLocked(rootID)
-	for id := range tree {
-		g.setOutcomeLocked(id, outcomeForError(err))
-	}
-	helps := g.helps[:0]
-	for _, help := range g.helps {
-		if node, ok := g.nodeByIDLocked(help.NodeID); ok {
-			if _, remove := tree[node.TaskID]; remove {
-				continue
-			}
-		}
-		helps = append(helps, help)
-	}
-	g.helps = helps
-	return g.saveOrRestoreLocked(before)
-}
-
-func (g *Graph) setOutcomeLocked(id, outcome string) {
-	for i := range g.tasks {
-		if g.tasks[i].ID == id {
-			g.tasks[i].Outcome = outcome
-			return
-		}
-	}
-}
-
-func spawnInput(info, upstream string) string {
-	switch {
-	case info == "":
-		return upstream
-	case upstream == "":
-		return info
-	default:
-		return info + "\n\n" + upstream
-	}
-}
-
-func (r *runner) childCh(id string) chan taskResult {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	ch, ok := r.childDone[id]
-	if !ok {
-		ch = make(chan taskResult, 1)
-		r.childDone[id] = ch
-	}
-	return ch
-}
-
-func (r *runner) waitTask(ctx context.Context, taskID string) (string, error) {
-	done := r.childCh(taskID)
-	select {
-	case res := <-done:
-		if res.err != nil {
-			return "", res.err
-		}
-		return res.output, nil
-	case <-ctx.Done():
-		r.mu.Lock()
-		_, started := r.started[taskID]
-		r.mu.Unlock()
-		if started {
-			res := <-done
-			if res.err != nil {
-				return "", res.err
-			}
-			return res.output, nil
-		}
-		select {
-		case res := <-done:
-			if res.err != nil {
-				return "", res.err
-			}
-			return res.output, nil
-		default:
-			return "", ctx.Err()
-		}
-	}
-}
-
-func (r *runner) savedTaskOutput(taskID string) string {
-	task, ok := r.graph.Task(taskID)
-	if !ok || r.progress == nil {
-		return ""
-	}
-	progress, ok, err := r.progress.Load(taskID)
-	if err != nil || !ok {
-		return ""
-	}
-	return progress.Outputs[task.Verifier.ID]
-}
-
-func (r *runner) fail(err error) {
-	if err == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.err != nil {
-		return
-	}
-	r.err = err
-	r.cancel()
-}
-
-func (r *runner) loadProgress(taskID string) (map[string]string, map[string]bool, bool, error) {
-	outputs := make(map[string]string)
-	merged := make(map[string]bool)
-	if r.progress == nil {
-		return outputs, merged, false, nil
-	}
-	progress, ok, err := r.progress.Load(taskID)
-	if err != nil || !ok {
-		return outputs, merged, false, err
-	}
-	for id, output := range progress.Outputs {
-		outputs[id] = output
-	}
-	for _, id := range progress.Merged {
-		merged[id] = true
-	}
-	return outputs, merged, progress.Prepared, nil
-}
-
-func (r *runner) saveProgress(
-	taskID string,
-	outputs map[string]string,
-	merged map[string]bool,
-	prepared bool,
-) error {
-	if r.progress == nil {
-		return nil
-	}
-	current, ok, err := r.progress.Load(taskID)
-	if err != nil {
-		return fmt.Errorf("loading task progress: %w", err)
-	}
-	if ok {
-		for _, id := range current.Merged {
-			merged[id] = true
-		}
-	}
-	copied := make(map[string]string, len(outputs))
-	for id, output := range outputs {
-		copied[id] = output
-	}
-	mergedIDs := make([]string, 0, len(merged))
-	for id, ok := range merged {
-		if ok {
-			mergedIDs = append(mergedIDs, id)
-		}
-	}
-	progress := TaskProgress{
-		Outputs: copied, Merged: mergedIDs, Prepared: prepared,
-	}
-	if ok {
-		progress.Joins = current.Joins
-	}
-	if err := r.progress.Save(taskID, progress); err != nil {
-		return fmt.Errorf("saving task progress: %w", err)
-	}
-	return nil
-}
-
-func hasProgressID(items []string, want string) bool {
-	for _, item := range items {
-		if item == want {
-			return true
-		}
-	}
-	return false
-}
-
-func (r *runner) discardTree(rootID string) error {
-	var err error
-	ids := r.graph.taskTree(rootID)
-	if r.progress != nil {
-		for _, id := range ids {
-			err = errors.Join(err, r.progress.Delete(id))
-		}
-	}
-	if r.join != nil {
-		r.join.forget(ids)
-	}
-	return err
+	return task.Env.ID
 }

@@ -14,8 +14,6 @@ import (
 )
 
 func TestNewSubgraphOrganizerRegistersMemoryTools(t *testing.T) {
-	resetDefaultStore(t)
-
 	var request Request
 	organizer, err := NewSubgraphOrganizer(Config{
 		Provider: ignoreOrganize(func(_ context.Context, got Request) (AssistantMessage, error) {
@@ -56,9 +54,7 @@ func TestNewSubgraphOrganizerRegistersMemoryTools(t *testing.T) {
 	}
 }
 
-func TestMemoryToolsUseAgentCopyNotGlobal(t *testing.T) {
-	resetDefaultStore(t)
-
+func TestMemoryToolsReadBoundEnvironment(t *testing.T) {
 	loop, err := NewSubgraphOrganizer(Config{
 		AgentID: "agent-a",
 		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
@@ -77,16 +73,15 @@ func TestMemoryToolsUseAgentCopyNotGlobal(t *testing.T) {
 			SubgraphIDs: []string{"sg-a"},
 		}},
 	})
-	ctxgraph.Update(ctxgraph.Copy{
-		AgentID: "other",
-		Graph: ctxgraph.Graph{
-			Nodes: []ctxgraph.Node{{
-				ID:          "n-global",
-				Statement:   "from global",
-				SubgraphIDs: []string{"sg-a"},
-			}},
-		},
-	})
+	if err := store.Save("env-other", ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{{
+			ID:          "n-other",
+			Statement:   "from another environment",
+			SubgraphIDs: []string{"sg-a"},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	tool, ok := loop.tools["memory_nodes_in"]
 	if !ok {
@@ -110,13 +105,11 @@ func TestMemoryToolsUseAgentCopyNotGlobal(t *testing.T) {
 		t.Fatalf("decode output %q: %v", out.Content, err)
 	}
 	if len(got.Nodes) != 1 || got.Nodes[0].ID != "n-copy" {
-		t.Fatalf("nodes = %#v, want [n-copy] from the agent copy", got.Nodes)
+		t.Fatalf("nodes = %#v, want [n-copy] from the bound environment", got.Nodes)
 	}
 }
 
 func TestOrganizeSubgraphToolAsksOrganizer(t *testing.T) {
-	resetDefaultStore(t)
-
 	var query string
 	collector := event.NewCollector()
 	events := event.NewBus(collector.Handle)
@@ -253,8 +246,6 @@ func TestRoleAgentsUseMemoryHooksAndRolePrompt(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resetDefaultStore(t)
-
 			var request Request
 			loop, err := tt.newLoop(Config{
 				Provider: ignoreOrganize(func(_ context.Context, got Request) (AssistantMessage, error) {
@@ -346,7 +337,6 @@ func TestRoleAgentsUseMemoryHooksAndRolePrompt(t *testing.T) {
 }
 
 func TestNewPlannerBindAllowsAsk(t *testing.T) {
-	resetDefaultStore(t)
 	loop, err := NewPlanner(Config{
 		Provider: ignoreOrganize(func(context.Context, Request) (AssistantMessage, error) {
 			return AssistantMessage{Content: "done"}, nil
@@ -369,7 +359,6 @@ func TestNewPlannerBindAllowsAsk(t *testing.T) {
 }
 
 func TestNewPlannerKeepsConfiguredAgentID(t *testing.T) {
-	resetDefaultStore(t)
 	loop, err := NewPlanner(Config{
 		AgentID: "custom-planner",
 		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
@@ -385,8 +374,6 @@ func TestNewPlannerKeepsConfiguredAgentID(t *testing.T) {
 }
 
 func TestNewTeamRegistersFileTools(t *testing.T) {
-	resetDefaultStore(t)
-
 	team, err := NewTeam(
 		modelFunc(func(context.Context, Request) (AssistantMessage, error) {
 			return AssistantMessage{Content: "done"}, nil
@@ -430,8 +417,6 @@ func TestNewTeamRegistersFileTools(t *testing.T) {
 }
 
 func TestNewTeamDoesNotInjectRolePrompt(t *testing.T) {
-	resetDefaultStore(t)
-
 	var request Request
 	team, err := NewTeam(
 		modelFunc(func(_ context.Context, got Request) (AssistantMessage, error) {
@@ -454,8 +439,6 @@ func TestNewTeamDoesNotInjectRolePrompt(t *testing.T) {
 }
 
 func TestNewTeamUsesYamlDefaultPromptWhenRolePromptEmpty(t *testing.T) {
-	resetDefaultStore(t)
-
 	var request Request
 	team, err := NewTeam(
 		modelFunc(func(_ context.Context, got Request) (AssistantMessage, error) {
@@ -479,8 +462,6 @@ func TestNewTeamUsesYamlDefaultPromptWhenRolePromptEmpty(t *testing.T) {
 }
 
 func TestNewTeamUsesFileAgentsAndSharesOrganizer(t *testing.T) {
-	resetDefaultStore(t)
-
 	var request Request
 	model := ignoreOrganize(func(_ context.Context, got Request) (AssistantMessage, error) {
 		request = got
@@ -593,8 +574,6 @@ func TestNewTeamUsesFileAgentsAndSharesOrganizer(t *testing.T) {
 }
 
 func TestTeamBindUsesYamlPluginsAgainstEnvStore(t *testing.T) {
-	resetDefaultStore(t)
-
 	store := ctxgraph.NewStore()
 	store.Save("env-1", ctxgraph.Graph{
 		Subgraphs: []ctxgraph.Subgraph{{ID: "bound"}},
@@ -606,17 +585,17 @@ func TestTeamBindUsesYamlPluginsAgainstEnvStore(t *testing.T) {
 			SubgraphIDs: []string{"sg-a"},
 		}},
 	})
-	ctxgraph.Update(ctxgraph.Copy{
-		Graph: ctxgraph.Graph{
-			Nodes: []ctxgraph.Node{{
-				ID:          "n1",
-				Kind:        ctxgraph.NodeKindFact,
-				Statement:   "global fact",
-				Status:      ctxgraph.NodeStatusAccepted,
-				SubgraphIDs: []string{"sg-a"},
-			}},
-		},
-	})
+	if err := store.Save("env-other", ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{{
+			ID:          "n1",
+			Kind:        ctxgraph.NodeKindFact,
+			Statement:   "other environment fact",
+			Status:      ctxgraph.NodeStatusAccepted,
+			SubgraphIDs: []string{"sg-a"},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	var request Request
 	team, err := NewTeam(
@@ -664,14 +643,14 @@ func TestTeamBindUsesYamlPluginsAgainstEnvStore(t *testing.T) {
 	if !strings.Contains(blockText(request, "memory"), "local fact") {
 		t.Fatalf("planner request missing env memory: %#v", request.Messages)
 	}
-	if strings.Contains(blockText(request, "memory"), "global fact") {
-		t.Fatalf("planner request used global memory: %#v", request.Messages)
+	if strings.Contains(blockText(request, "memory"), "other environment fact") {
+		t.Fatalf("planner request used another environment's memory: %#v", request.Messages)
 	}
 	if !hasRequestTool(request.Tools, organizeSubgraphToolName) {
 		t.Fatal("yaml organize_subgraph missing")
 	}
-	if nodes := ctxgraph.Clone("check").Graph.NodesInSubgraphs([]string{"bound"}); len(nodes) != 0 {
-		t.Fatalf("write leaked to global graph: %#v", nodes)
+	if nodes := store.Load("env-other").NodesInSubgraphs([]string{"bound"}); len(nodes) != 0 {
+		t.Fatalf("write leaked to another environment: %#v", nodes)
 	}
 	if nodes := store.Load("env-1").NodesInSubgraphs([]string{"bound"}); len(nodes) != 1 || nodes[0].ID != "n1" {
 		t.Fatal("write did not stay in env-1")
@@ -689,7 +668,7 @@ func TestFileAgentsRejectsManagerGraphToolsOnPlanner(t *testing.T) {
 	}
 }
 
-func TestFileAgentsRejectsJoinOutsideTaskRoles(t *testing.T) {
+func TestFileAgentsRejectsInputOutsideTaskRoles(t *testing.T) {
 	t.Parallel()
 
 	for _, role := range []string{"manager", "subgraph_organizer"} {
@@ -697,9 +676,9 @@ func TestFileAgentsRejectsJoinOutsideTaskRoles(t *testing.T) {
 		t.Run(role, func(t *testing.T) {
 			agents := FileAgents{}
 			if role == "manager" {
-				agents.Manager.Tools = []string{coordJoinToolName}
+				agents.Manager.Tools = []string{coordInputToolName}
 			} else {
-				agents.SubgraphOrganizer.Tools = []string{coordJoinToolName}
+				agents.SubgraphOrganizer.Tools = []string{coordInputToolName}
 			}
 			if err := agents.Validate(); err == nil || !strings.Contains(err.Error(), "task-role-only") {
 				t.Fatalf("Validate() error = %v, want task-role-only", err)
@@ -708,9 +687,24 @@ func TestFileAgentsRejectsJoinOutsideTaskRoles(t *testing.T) {
 	}
 }
 
-func TestNewManagerInstallsGraphTools(t *testing.T) {
-	resetDefaultStore(t)
+func TestFileAgentsValidatesUnifiedInputTool(t *testing.T) {
+	for _, name := range []string{"input", "join"} {
+		agents := FileAgents{
+			Planner:  FileAgent{Tools: []string{name}},
+			Executor: FileAgent{Tools: []string{name}},
+			Verifier: FileAgent{Tools: []string{name}},
+		}
+		err := agents.Validate()
+		if name == "input" && err != nil {
+			t.Errorf("Validate(input): %v", err)
+		}
+		if name == "join" && (err == nil || !strings.Contains(err.Error(), "unknown")) {
+			t.Errorf("Validate(join) = %v, want removed tool rejection", err)
+		}
+	}
+}
 
+func TestNewManagerInstallsGraphTools(t *testing.T) {
 	var request Request
 	graphTool := &testTool{
 		definition: agenttool.Definition{
@@ -760,8 +754,6 @@ func TestNewManagerInstallsGraphTools(t *testing.T) {
 }
 
 func TestNewTeamDoesNotInstallGraphTools(t *testing.T) {
-	resetDefaultStore(t)
-
 	var request Request
 	team, err := NewTeam(
 		modelFunc(func(_ context.Context, got Request) (AssistantMessage, error) {
@@ -797,8 +789,6 @@ func TestNewTeamDoesNotInstallGraphTools(t *testing.T) {
 }
 
 func TestNewManagerRequiresNamedGraphTools(t *testing.T) {
-	resetDefaultStore(t)
-
 	_, err := NewManager(
 		modelFunc(func(context.Context, Request) (AssistantMessage, error) {
 			return AssistantMessage{Content: "done"}, nil
@@ -815,8 +805,6 @@ func TestNewManagerRequiresNamedGraphTools(t *testing.T) {
 }
 
 func TestNewTeamAppliesYamlToolDescription(t *testing.T) {
-	resetDefaultStore(t)
-
 	var request Request
 	team, err := NewTeam(
 		modelFunc(func(_ context.Context, got Request) (AssistantMessage, error) {
@@ -854,8 +842,6 @@ func TestNewTeamAppliesYamlToolDescription(t *testing.T) {
 }
 
 func TestNewTeamAppliesYamlDropContextReminder(t *testing.T) {
-	resetDefaultStore(t)
-
 	var suffix string
 	team, err := NewTeam(
 		modelFunc(func(_ context.Context, request Request) (AssistantMessage, error) {
@@ -890,8 +876,6 @@ func TestNewTeamAppliesYamlDropContextReminder(t *testing.T) {
 }
 
 func TestNewTeamAppliesYamlOrganizeQuery(t *testing.T) {
-	resetDefaultStore(t)
-
 	var query string
 	team, err := NewTeam(
 		ignoreOrganize(func(_ context.Context, request Request) (AssistantMessage, error) {
@@ -935,8 +919,6 @@ func TestNewTeamAppliesYamlOrganizeQuery(t *testing.T) {
 }
 
 func TestNewTeamDoesNotInjectOrganizeQuery(t *testing.T) {
-	resetDefaultStore(t)
-
 	var query string
 	team, err := NewTeam(
 		ignoreOrganize(func(_ context.Context, request Request) (AssistantMessage, error) {

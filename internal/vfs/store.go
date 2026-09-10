@@ -50,15 +50,17 @@ type DirEnt struct {
 }
 
 type blob struct {
-	data       []byte
-	tombstone  bool
-	executable bool
+	data      []byte
+	tombstone bool
+	mode      fs.FileMode
 }
 
 type layer struct {
-	parentID string
-	files    map[string]blob
-	baseline []map[string]blob // Fork 瞬间从父到根的 overlay 快照；nil 表示不是 Fork 出来的
+	baseID        string
+	files         map[string]blob
+	baseSnapshot  []map[string]blob // Environment creation snapshot from the base environment.
+	input         *inputRecord
+	completeInput bool // Every direct entry is an explicit value, including absence.
 }
 
 type materializeCall struct {
@@ -73,7 +75,7 @@ type Options struct {
 	OverlayLimit int
 }
 
-// Store 按环境保存 overlay。Fork 拍父 overlay 快照作基线，不复制 host 树。
+// Store 按环境保存 overlay；环境创建只保存 base snapshot，不复制 host 树。
 type Store struct {
 	mu sync.Mutex // ponytail: one store mutex, per-env locks if throughput matters
 	// floorDir is the immutable tree every environment reads through and the
@@ -93,9 +95,6 @@ type Store struct {
 	overlaySlots  chan struct{}
 	mountMu       sync.Mutex
 	mounts        map[string]*overlayMount
-
-	epochMu sync.Mutex
-	epoch   string // 基线仓一次性 stat 纪元，见 fingerprint.go
 
 	// publishedPaths tracks display paths added by earlier publications when the
 	// store has no live root to persist them to; see publish.go.
@@ -132,7 +131,6 @@ type Store struct {
 	absorbActive             int
 	absorbPeakActive         int
 	absorbWaitDuration       time.Duration
-	handoffs                 uint64
 	publishAttempts          uint64
 	publishCommits           uint64
 	publishErrors            uint64
@@ -180,7 +178,6 @@ type Stats struct {
 	AbsorbActive             int           `json:"absorb_active"`
 	AbsorbPeakActive         int           `json:"absorb_peak_active"`
 	AbsorbWaitDuration       time.Duration `json:"absorb_wait_duration"`
-	Handoffs                 uint64        `json:"handoffs"`
 	PublishAttempts          uint64        `json:"publish_attempts"`
 	PublishCommits           uint64        `json:"publish_commits"`
 	PublishErrors            uint64        `json:"publish_errors"`
@@ -330,7 +327,6 @@ func (s *Store) Stats() Stats {
 		AbsorbActive:             s.absorbActive,
 		AbsorbPeakActive:         s.absorbPeakActive,
 		AbsorbWaitDuration:       s.absorbWaitDuration,
-		Handoffs:                 s.handoffs,
 		PublishAttempts:          s.publishAttempts,
 		PublishCommits:           s.publishCommits,
 		PublishErrors:            s.publishErrors,
@@ -355,153 +351,51 @@ func (s *Store) Stats() Stats {
 	return stats
 }
 
-// Fork 先把 parent 的 live 收进 overlay，再给 child 挂上当时从父到根的 overlay 快照作基线。
-// 子环境已存在时不覆盖，也不改基线。parent 未物化则 Absorb 是空操作。
+// CreateEnvironment 先吸收 base 的 live，再给新环境挂上当时的 overlay snapshot。
+// 环境已存在时不覆盖，也不改基线。base 未物化则 Absorb 是空操作。
 // 物化是惰性的：只有命令执行或显式 Materialize 才把可见树落到 live 目录。
-func (s *Store) Fork(parentID, childID string) error {
-	if childID == "" {
+func (s *Store) CreateEnvironment(baseID, envID string) error {
+	if envID == "" {
 		return nil
 	}
 	s.mu.Lock()
-	if _, exists := s.envs[childID]; exists {
+	if _, exists := s.envs[envID]; exists {
 		s.mu.Unlock()
 		return nil
 	}
 	s.mu.Unlock()
-	if err := s.Absorb(parentID); err != nil {
+	if err := s.Absorb(baseID); err != nil {
 		return err
 	}
-	if live, ok, err := s.persistedLive(childID); err != nil {
+	if live, ok, err := s.persistedLive(envID); err != nil {
 		return err
 	} else if ok {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if _, exists := s.envs[childID]; exists {
+		if _, exists := s.envs[envID]; exists {
 			return nil
 		}
-		s.envs[childID] = &layer{
-			parentID: parentID,
-			files:    make(map[string]blob),
-			baseline: s.snapshotOverlays(parentID),
+		s.envs[envID] = &layer{
+			baseID:       baseID,
+			files:        make(map[string]blob),
+			baseSnapshot: s.snapshotOverlays(baseID),
 		}
-		s.lives[childID] = live
+		s.lives[envID] = live
 		return nil
 	}
 	s.mu.Lock()
-	if _, exists := s.envs[childID]; exists {
+	if _, exists := s.envs[envID]; exists {
 		s.mu.Unlock()
 		return nil
 	}
-	s.envs[childID] = &layer{
-		parentID: parentID,
-		files:    make(map[string]blob),
-		baseline: s.snapshotOverlays(parentID),
+	s.envs[envID] = &layer{
+		baseID:       baseID,
+		files:        make(map[string]blob),
+		baseSnapshot: s.snapshotOverlays(baseID),
 	}
 	s.mu.Unlock()
-	// 惰性物化：Fork 只建 overlay，不拷贝基线树。live 目录在第一次需要时
-	// （首条命令、join 准备等）由 Materialize 按需创建；纯认知型环境永不落盘。
-	return nil
-}
-
-// Handoff forks parent into child by moving an existing materialized workspace.
-// It is for a single successor after parent has stopped running; when no live
-// workspace exists it falls back to an ordinary logical fork.
-func (s *Store) Handoff(parentID, childID string) error {
-	if childID == "" || childID == parentID {
-		return nil
-	}
-
-	s.mu.Lock()
-	if _, exists := s.envs[childID]; exists {
-		s.mu.Unlock()
-		return nil
-	}
-	if live, ok, err := s.persistedLive(childID); err != nil {
-		s.mu.Unlock()
-		return err
-	} else if ok {
-		s.envs[childID] = &layer{
-			parentID: parentID,
-			files:    make(map[string]blob),
-			baseline: s.snapshotOverlays(parentID),
-		}
-		delete(s.lives, parentID)
-		s.lives[childID] = live
-		delete(s.liveBaselines, parentID)
-		s.mu.Unlock()
-		return nil
-	}
-
-	live := s.lives[parentID]
-	if live == "" {
-		var ok bool
-		var err error
-		live, ok, err = s.persistedLive(parentID)
-		if err != nil {
-			s.mu.Unlock()
-			return err
-		}
-		if !ok {
-			s.mu.Unlock()
-			return s.Fork(parentID, childID)
-		}
-	}
-
-	childLive := live
-	if s.liveRoot != "" {
-		childLive = s.persistentLivePath(childID)
-		if s.overlayStateExists(parentID) {
-			if err := s.closeOverlay(parentID); err != nil {
-				s.mu.Unlock()
-				return err
-			}
-			parentState := s.overlayStatePath(parentID)
-			childState := s.overlayStatePath(childID)
-			if err := os.Rename(parentState, childState); err != nil {
-				_, _, restoreErr := s.persistedLive(parentID)
-				s.mu.Unlock()
-				return errors.Join(
-					fmt.Errorf("vfs: handoff overlay state: %w", err),
-					restoreErr,
-				)
-			}
-			if err := os.Rename(live, childLive); err != nil {
-				rollbackErr := os.Rename(childState, parentState)
-				_, _, restoreErr := s.persistedLive(parentID)
-				s.mu.Unlock()
-				return errors.Join(
-					fmt.Errorf("vfs: handoff overlay mountpoint: %w", err),
-					rollbackErr,
-					restoreErr,
-				)
-			}
-			remounted, ok, err := s.persistedLive(childID)
-			if err != nil || !ok {
-				s.mu.Unlock()
-				return errors.Join(
-					fmt.Errorf("vfs: remount handed-off overlay"),
-					err,
-				)
-			}
-			childLive = remounted
-		} else if err := os.Rename(live, childLive); err != nil {
-			s.mu.Unlock()
-			return fmt.Errorf("vfs: handoff persistent environment: %w", err)
-		}
-	}
-	s.envs[childID] = &layer{
-		parentID: parentID,
-		files:    make(map[string]blob),
-		baseline: s.snapshotOverlays(parentID),
-	}
-	delete(s.lives, parentID)
-	s.lives[childID] = childLive
-	if baseline, ok := s.liveBaselines[parentID]; ok {
-		s.liveBaselines[childID] = baseline
-	}
-	delete(s.liveBaselines, parentID)
-	s.handoffs++
-	s.mu.Unlock()
+	// 惰性物化：CreateEnvironment 只建 overlay，不拷贝基线树。live 目录在第一次需要时
+	// （首条命令、input 准备等）由 Materialize 按需创建；纯认知型环境永不落盘。
 	return nil
 }
 
@@ -536,7 +430,7 @@ type pending struct {
 	b    blob
 }
 
-func (s *Store) mergePlanLocked(from, into string) ([]pending, []string) {
+func (s *Store) inputPlanLocked(from, into string) ([]pending, []string) {
 	fromLayer := s.envs[from]
 	if fromLayer == nil {
 		return nil, nil
@@ -553,7 +447,7 @@ func (s *Store) mergePlanLocked(from, into string) ([]pending, []string) {
 		conflictSet[path] = struct{}{}
 	}
 	for _, path := range paths {
-		if childFiles[path].tombstone {
+		if childFiles[path].tombstone || childFiles[path].mode.IsDir() {
 			continue
 		}
 		prefix := path + "/"
@@ -569,20 +463,22 @@ func (s *Store) mergePlanLocked(from, into string) ([]pending, []string) {
 	for _, path := range paths {
 		theirsBlob := childFiles[path]
 		theirs := overlayContent(theirsBlob)
-		base := s.mergeBase(fromLayer, fromLayer.parentID, path)
+		base := s.baseContent(fromLayer, fromLayer.baseID, path)
 		ours := s.lookupContent(into, path)
-		sameAncestor := contentEqual(theirs, base) || contentEqual(ours, theirs)
+		unchanged := !fromLayer.completeInput && contentEqual(theirs, base)
+		sameAncestor := unchanged || contentEqual(ours, theirs)
 		pathConflict := false
 		if !sameAncestor && !contentEqual(ours, base) {
 			addConflict(path)
 			pathConflict = true
 		}
 		needApply := !sameAncestor
-		for _, q := range s.knownDescendants(into, fromLayer.baseline, path) {
+		for _, q := range s.knownDescendants(into, fromLayer.baseSnapshot, path) {
 			tq := s.lookupContent(from, q)
-			bq := s.mergeBase(fromLayer, fromLayer.parentID, q)
+			bq := s.baseContent(fromLayer, fromLayer.baseID, q)
 			oq := s.lookupContent(into, q)
-			if contentEqual(tq, bq) || contentEqual(oq, tq) {
+			unchanged := !fromLayer.completeInput && contentEqual(tq, bq)
+			if unchanged || contentEqual(oq, tq) {
 				continue
 			}
 			if !contentEqual(oq, bq) {
@@ -659,20 +555,20 @@ func pathsOverlap(a, b string) bool {
 }
 
 type content struct {
-	exists     bool
-	tombstone  bool
-	executable bool
-	data       []byte
-	maskFrom   string
-	maskFile   bool
+	exists    bool
+	tombstone bool
+	mode      fs.FileMode
+	data      []byte
+	maskFrom  string
+	maskFile  bool
 }
 
 func overlayContent(b blob) content {
 	return content{
-		exists:     true,
-		tombstone:  b.tombstone,
-		executable: b.executable,
-		data:       b.data,
+		exists:    true,
+		tombstone: b.tombstone,
+		mode:      b.mode,
+		data:      b.data,
 	}
 }
 
@@ -680,16 +576,16 @@ func maskedContent(prefix string, b blob) content {
 	c := content{exists: true, tombstone: true, maskFrom: prefix, maskFile: !b.tombstone}
 	if !b.tombstone {
 		c.data = cloneBytes(b.data)
-		c.executable = b.executable
+		c.mode = b.mode
 	}
 	return c
 }
 
-func (s *Store) mergeBase(fromLayer *layer, parentID, rel string) content {
-	if fromLayer != nil && fromLayer.baseline != nil {
-		return s.lookupFrozen(fromLayer.baseline, rel)
+func (s *Store) baseContent(fromLayer *layer, baseID, rel string) content {
+	if fromLayer != nil && fromLayer.baseSnapshot != nil {
+		return s.lookupFrozen(fromLayer.baseSnapshot, rel)
 	}
-	return s.lookupContent(parentID, rel)
+	return s.lookupContent(baseID, rel)
 }
 
 func (s *Store) snapshotOverlays(envID string) []map[string]blob {
@@ -701,12 +597,12 @@ func (s *Store) snapshotOverlays(envID string) []map[string]blob {
 		return []map[string]blob{}
 	}
 	out := []map[string]blob{cloneFiles(l.files)}
-	if l.baseline != nil {
-		for _, m := range l.baseline {
+	if l.baseSnapshot != nil {
+		for _, m := range l.baseSnapshot {
 			out = append(out, cloneFiles(m))
 		}
-	} else if l.parentID != "" {
-		out = append(out, s.snapshotOverlays(l.parentID)...)
+	} else if l.baseID != "" {
+		out = append(out, s.snapshotOverlays(l.baseID)...)
 	}
 	return out
 }
@@ -716,12 +612,12 @@ func (s *Store) overlayMaps(envID string) []map[string]blob {
 	if !ok {
 		return nil
 	}
-	out := make([]map[string]blob, 0, 1+len(l.baseline))
+	out := make([]map[string]blob, 0, 1+len(l.baseSnapshot))
 	out = append(out, l.files)
-	if l.baseline != nil {
-		out = append(out, l.baseline...)
-	} else if l.parentID != "" {
-		out = append(out, s.overlayMaps(l.parentID)...)
+	if l.baseSnapshot != nil {
+		out = append(out, l.baseSnapshot...)
+	} else if l.baseID != "" {
+		out = append(out, s.overlayMaps(l.baseID)...)
 	}
 	return out
 }
@@ -748,24 +644,27 @@ func (s *Store) lookupHost(rel string) content {
 		return content{}
 	}
 	info, err := os.Stat(host)
-	if err != nil || info.IsDir() || info.Mode().Type() != 0 {
+	if err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
 		return content{}
+	}
+	if info.IsDir() {
+		return content{exists: true, mode: fs.ModeDir | info.Mode().Perm()}
 	}
 	data, err := os.ReadFile(host)
 	if err != nil {
 		return content{}
 	}
 	return content{
-		exists:     true,
-		executable: info.Mode().Perm()&0o111 != 0,
-		data:       data,
+		exists: true,
+		mode:   info.Mode().Perm(),
+		data:   data,
 	}
 }
 
 func (s *Store) liveFileAncestor(envID, rel string) bool {
 	for _, prefix := range ancestorPrefixes(rel) {
 		c := s.lookupContent(envID, prefix)
-		if c.exists && !c.tombstone && c.maskFrom == "" {
+		if c.exists && !c.tombstone && !c.mode.IsDir() && c.maskFrom == "" {
 			return true
 		}
 	}
@@ -801,6 +700,9 @@ func applyBlob(dst *layer, path string, b blob) {
 	} else {
 		dst.files[path] = cloneBlob(b)
 	}
+	if b.mode.IsDir() && !b.tombstone {
+		return
+	}
 	prefix := path + "/"
 	for k := range dst.files {
 		if strings.HasPrefix(k, prefix) {
@@ -815,7 +717,7 @@ func contentEqual(a, b content) bool {
 			return false
 		}
 		if a.maskFile {
-			return a.executable == b.executable && bytes.Equal(a.data, b.data)
+			return a.mode == b.mode && bytes.Equal(a.data, b.data)
 		}
 		return true
 	}
@@ -831,7 +733,7 @@ func contentEqual(a, b content) bool {
 	if a.tombstone {
 		return true
 	}
-	return a.executable == b.executable && bytes.Equal(a.data, b.data)
+	return a.mode == b.mode && bytes.Equal(a.data, b.data)
 }
 
 func exactHidden(c content) bool {
@@ -842,7 +744,7 @@ func cloneBlob(b blob) blob {
 	if b.tombstone {
 		return blob{tombstone: true}
 	}
-	return blob{data: cloneBytes(b.data), executable: b.executable}
+	return blob{data: cloneBytes(b.data), mode: b.mode}
 }
 
 func cloneFiles(src map[string]blob) map[string]blob {
@@ -883,14 +785,17 @@ func (v *View) Read(path string) ([]byte, error) {
 	v.store.mu.Lock()
 	defer v.store.mu.Unlock()
 
-	if data, tombstone, found := v.store.lookupBlob(v.envID, rel); found {
-		if tombstone {
+	if b, found := v.store.lookupBlobValue(v.envID, rel); found {
+		if b.mode.IsDir() {
+			return nil, fmt.Errorf("vfs: %s: is a directory", rel)
+		}
+		if b.tombstone {
 			if v.store.hasOverlayChildren(v.envID, rel) {
 				return nil, fmt.Errorf("vfs: %s: is a directory", rel)
 			}
 			return nil, notFound(rel)
 		}
-		return cloneBytes(data), nil
+		return cloneBytes(b.data), nil
 	}
 	if v.store.hasOverlayChildren(v.envID, rel) {
 		return nil, fmt.Errorf("vfs: %s: is a directory", rel)
@@ -928,12 +833,13 @@ func (v *View) Write(path string, data []byte) error {
 	v.store.mu.Lock()
 	defer v.store.mu.Unlock()
 	current := v.store.lookupContent(v.envID, rel)
+	mode := fs.FileMode(0o640)
+	if current.exists && !current.tombstone && !current.mode.IsDir() && current.maskFrom == "" {
+		mode = current.mode
+	}
 	v.store.ensure(v.envID).files[rel] = blob{
 		data: cloneBytes(data),
-		executable: current.exists &&
-			!current.tombstone &&
-			current.maskFrom == "" &&
-			current.executable,
+		mode: mode,
 	}
 	return nil
 }
@@ -1000,8 +906,8 @@ func (v *View) List(path string) ([]DirEnt, error) {
 	v.store.mu.Lock()
 	defer v.store.mu.Unlock()
 
-	if _, tombstone, found := v.store.lookupBlob(v.envID, rel); found {
-		if tombstone {
+	if b, found := v.store.lookupBlobValue(v.envID, rel); found {
+		if b.tombstone {
 			if !v.store.hasOverlayChildren(v.envID, rel) {
 				return nil, notFound(rel)
 			}
@@ -1009,11 +915,14 @@ func (v *View) List(path string) ([]DirEnt, error) {
 			v.store.applyOverlayList(v.envID, rel, ents)
 			return sortedDirents(ents), nil
 		}
-		return nil, fmt.Errorf("vfs: %s: not a directory", rel)
+		if !b.mode.IsDir() {
+			return nil, fmt.Errorf("vfs: %s: not a directory", rel)
+		}
 	}
 
 	ents := map[string]DirEnt{}
-	exists := false
+	state := v.store.lookupContent(v.envID, rel)
+	exists := state.exists && state.mode.IsDir()
 
 	host, err := v.store.resolveHost(rel)
 	switch {
@@ -1077,14 +986,9 @@ func (s *Store) lookupBlobValue(envID, rel string) (blob, bool) {
 	return blob{}, false
 }
 
-func layerMasks(l *layer, rel string) bool {
-	_, ok := filesMask(l.files, rel)
-	return ok
-}
-
 func filesMask(files map[string]blob, rel string) (content, bool) {
 	for _, prefix := range ancestorPrefixes(rel) {
-		if b, ok := files[prefix]; ok {
+		if b, ok := files[prefix]; ok && !b.mode.IsDir() {
 			return maskedContent(prefix, b), true
 		}
 	}
@@ -1104,6 +1008,9 @@ func ancestorPrefixes(rel string) []string {
 }
 
 func (s *Store) lookupStat(envID, rel string) (FileInfo, bool, error) {
+	if b, found := s.lookupBlobValue(envID, rel); found && b.mode.IsDir() {
+		return FileInfo{Name: filepath.Base(rel), IsDir: true}, true, nil
+	}
 	if data, tombstone, found := s.lookupBlob(envID, rel); found {
 		if tombstone {
 			if rel != "." && s.hasOverlayChildren(envID, rel) {
@@ -1133,7 +1040,7 @@ func (s *Store) applyOverlayList(envID, rel string, ents map[string]DirEnt) {
 	maps := s.overlayMaps(envID)
 	for i := len(maps) - 1; i >= 0; i-- {
 		files := maps[i]
-		if _, ok := files[rel]; ok {
+		if b, ok := files[rel]; ok && !b.mode.IsDir() {
 			for name := range ents {
 				delete(ents, name)
 			}
@@ -1158,7 +1065,7 @@ func applyLayerList(files map[string]blob, rel string, ents map[string]DirEnt, t
 			}
 			continue
 		}
-		ents[name] = DirEnt{Name: name, IsDir: isDir}
+		ents[name] = DirEnt{Name: name, IsDir: isDir || b.mode.IsDir()}
 	}
 }
 

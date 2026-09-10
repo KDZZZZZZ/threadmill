@@ -1,6 +1,6 @@
 // Command tmfleet 用 mock provider 驱动完整的 coordination→Assemble→task→role
-// 编排链路做压测：不调用真实模型，度量编排层（图调度、记忆 fork/merge、
-// 进度/checkpoint 落盘、事件总线、钩子）在 N 个并行 spawn 下的扩展性。
+// 编排链路做压测：不调用真实模型，度量编排层（图调度、记忆输入合成、
+// 进度/checkpoint 落盘、事件总线、钩子）在 N 个并行 task 下的扩展性。
 package main
 
 import (
@@ -27,7 +27,7 @@ import (
 )
 
 func main() {
-	spawns := flag.Int("spawns", 100, "并行 spawn 任务数")
+	tasks := flag.Int("tasks", 100, "并行 task 数")
 	delay := flag.Duration("model-delay", 100*time.Millisecond, "每次 mock 模型调用的延迟")
 	slots := flag.Int("slots", 32, "执行槽位")
 	files := flag.Int("files", 1000, "基线仓文件数")
@@ -41,13 +41,13 @@ func main() {
 	}
 	defer os.RemoveAll(dir)
 
-	if err := run(*spawns, *delay, *slots, *files, *timeout, dir); err != nil {
+	if err := run(*tasks, *delay, *slots, *files, *timeout, dir); err != nil {
 		fmt.Fprintln(os.Stderr, "tmfleet:", err)
 		os.Exit(1)
 	}
 }
 
-func run(spawns int, delay time.Duration, slots, files int, timeout time.Duration, dir string) error {
+func run(taskCount int, delay time.Duration, slots, files int, timeout time.Duration, dir string) error {
 	// 内置默认配置（提示词、角色装配）。
 	cfg, err := provider.LoadRuntimeConfig(dir, "")
 	if err != nil {
@@ -62,6 +62,7 @@ func run(spawns int, delay time.Duration, slots, files int, timeout time.Duratio
 	if err != nil {
 		return err
 	}
+	defer filesStore.Close()
 	sched := exec.New(exec.Config{
 		Slots:           slots,
 		Timeout:         30 * time.Second,
@@ -84,10 +85,14 @@ func run(spawns int, delay time.Duration, slots, files int, timeout time.Duratio
 		return err
 	}
 
-	root := graph.AddTask()
-	for i := range spawns {
-		if _, err := graph.Spawn(root.Planner.ID, root.Verifier.ID); err != nil {
-			return fmt.Errorf("spawn %d: %w", i, err)
+	target := graph.AddTask()
+	for i := range taskCount {
+		task := graph.AddTask()
+		if err := graph.Connect(target.Planner.ID, task.Planner.ID); err != nil {
+			return fmt.Errorf("connect task %d input: %w", i, err)
+		}
+		if err := graph.Connect(task.Verifier.ID, target.Verifier.ID); err != nil {
+			return fmt.Errorf("connect task %d output: %w", i, err)
 		}
 	}
 
@@ -106,14 +111,18 @@ func run(spawns int, delay time.Duration, slots, files int, timeout time.Duratio
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+	graph.SetRunContext(ctx)
+	defer func() {
+		cancel()
+		graph.WaitRuns()
+	}()
 	started := time.Now()
-	out, err := graph.Run(ctx, root.ID, "fleet 压测根任务：验证编排层在并行 spawn 下的扩展性", stores, assemble)
+	out, err := graph.Run(ctx, target.ID, "fleet 压测目标：验证编排层在并行 task 下的扩展性", stores, assemble)
 	wall := time.Since(started)
 
-	fmt.Printf("tmfleet: spawns=%d delay=%s wall=%s err=%v\n", spawns, delay, wall.Truncate(time.Millisecond), err)
+	fmt.Printf("tmfleet: tasks=%d delay=%s wall=%s err=%v\n", taskCount, delay, wall.Truncate(time.Millisecond), err)
 	if strings.TrimSpace(out) != "" {
-		fmt.Printf("root verifier tail: %s\n", tail(out, 200))
+		fmt.Printf("target verifier tail: %s\n", tail(out, 200))
 	}
 	mock.report()
 	cacheStats.report()

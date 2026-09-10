@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -151,11 +152,11 @@ const (
 )
 
 type publishStep struct {
-	path       string
-	action     publishAction
-	data       []byte
-	executable bool
-	existed    bool
+	path    string
+	action  publishAction
+	data    []byte
+	mode    fs.FileMode
+	existed bool
 }
 
 // planPublish decides what each candidate path needs, reading but not writing.
@@ -204,20 +205,20 @@ func (s *Store) planPublish(
 			}
 			continue
 		}
-		data, err := publishContent(want)
+		data, err := snapshotContent(want)
 		if err != nil {
 			return nil, err
 		}
 		if have.exists && have.regular &&
-			have.executable == want.executable && bytes.Equal(have.data, data) {
+			have.mode == want.mode && bytes.Equal(have.data, data) {
 			continue
 		}
 		steps = append(steps, publishStep{
-			path:       path,
-			action:     publishWrite,
-			data:       data,
-			executable: want.executable,
-			existed:    have.exists,
+			path:    path,
+			action:  publishWrite,
+			data:    data,
+			mode:    want.mode,
+			existed: have.exists,
 		})
 	}
 	// Directories go last and deepest first, so a directory is only reclaimed
@@ -296,7 +297,7 @@ func (s *Store) applyPublish(
 		}
 		switch step.action {
 		case publishWrite:
-			if err := writeDisplayFile(target, step.data, step.executable); err != nil {
+			if err := writeDisplayFile(target, step.data, step.mode); err != nil {
 				return receipt, err
 			}
 			published[step.path] = struct{}{}
@@ -336,18 +337,7 @@ func (s *Store) applyPublish(
 	return receipt, nil
 }
 
-// floorHasPath reports whether the read floor shows path as a regular file, and
-// therefore whether it was part of the project the session adopted.
-func (s *Store) floorHasPath(path string) bool {
-	host, err := s.resolveHost(path)
-	if err != nil {
-		return false
-	}
-	info, err := os.Stat(host)
-	return err == nil && info.Mode().IsRegular()
-}
-
-func publishContent(want fileSnapshot) ([]byte, error) {
+func snapshotContent(want fileSnapshot) ([]byte, error) {
 	if want.source == "" {
 		return want.data, nil
 	}
@@ -359,10 +349,10 @@ func publishContent(want fileSnapshot) ([]byte, error) {
 }
 
 type displayFile struct {
-	exists     bool
-	regular    bool
-	executable bool
-	data       []byte
+	exists  bool
+	regular bool
+	mode    fs.FileMode
+	data    []byte
 }
 
 func readDisplayFile(target string) (displayFile, error) {
@@ -381,16 +371,16 @@ func readDisplayFile(target string) (displayFile, error) {
 		return displayFile{}, fmt.Errorf("vfs: publish read %q: %w", target, err)
 	}
 	return displayFile{
-		exists:     true,
-		regular:    true,
-		executable: info.Mode().Perm()&0o111 != 0,
-		data:       data,
+		exists:  true,
+		regular: true,
+		mode:    info.Mode().Perm(),
+		data:    data,
 	}, nil
 }
 
 // writeDisplayFile installs data at target through a sibling temporary file, so
 // a reader never observes a partially written path.
-func writeDisplayFile(target string, data []byte, executable bool) error {
+func writeDisplayFile(target string, data []byte, mode fs.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return fmt.Errorf("vfs: publish create parent of %q: %w", target, err)
 	}
@@ -398,10 +388,6 @@ func writeDisplayFile(target string, data []byte, executable bool) error {
 		if err := os.RemoveAll(target); err != nil {
 			return fmt.Errorf("vfs: publish clear %q: %w", target, err)
 		}
-	}
-	perm := os.FileMode(0o644)
-	if executable {
-		perm = 0o755
 	}
 	temp, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".tm-")
 	if err != nil {
@@ -418,7 +404,7 @@ func writeDisplayFile(target string, data []byte, executable bool) error {
 	if err := temp.Close(); err != nil {
 		return errors.Join(fmt.Errorf("vfs: publish close %q: %w", target, err), os.Remove(name))
 	}
-	if err := os.Chmod(name, perm); err != nil {
+	if err := os.Chmod(name, mode); err != nil {
 		return errors.Join(fmt.Errorf("vfs: publish chmod %q: %w", target, err), os.Remove(name))
 	}
 	if err := os.Rename(name, target); err != nil {
@@ -584,9 +570,6 @@ func (s *Store) invalidateFloorCache() {
 	s.baseDirs = nil
 	s.baseFilesErr = nil
 	s.mu.Unlock()
-	s.epochMu.Lock()
-	s.epoch = ""
-	s.epochMu.Unlock()
 }
 
 // copyPublishedPath copies a single displaced entry into the replaced directory.
@@ -642,5 +625,5 @@ func (s *Store) recordDisplayState() error {
 	if err != nil {
 		return err
 	}
-	return writeFloorMeta(filepath.Join(s.liveRoot, floorMetaName), digest)
+	return writeFloorMeta(filepath.Join(s.liveRoot, floorMetaName), digest, s.floorDir)
 }

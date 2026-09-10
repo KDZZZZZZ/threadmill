@@ -3,10 +3,11 @@ package coordination
 import "testing"
 
 func BenchmarkSnapshot500Tasks(b *testing.B) {
-	graph := newGraph()
-	root := graph.AddTask()
+	graph := New()
+	source := graph.AddTask()
 	for range 499 {
-		if _, err := graph.Spawn(root.Planner.ID, root.Verifier.ID); err != nil {
+		consumer := graph.AddTask()
+		if err := graph.Connect(source.Planner.ID, consumer.Planner.ID); err != nil {
 			b.Fatal(err)
 		}
 	}

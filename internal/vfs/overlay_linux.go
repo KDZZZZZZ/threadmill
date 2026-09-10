@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,15 +37,17 @@ type overlayMount struct {
 	driver      *overlayDriver
 	mountpoint  string
 	upperdir    string
+	lowerdir    string
 	cleanupRoot string
 	release     func()
 }
 
 type overlaySeedFile struct {
-	Path       string `json:"path"`
-	Data       []byte `json:"data,omitempty"`
-	Tombstone  bool   `json:"tombstone,omitempty"`
-	Executable bool   `json:"executable,omitempty"`
+	Path       string       `json:"path"`
+	Data       []byte       `json:"data,omitempty"`
+	Tombstone  bool         `json:"tombstone,omitempty"`
+	Executable bool         `json:"executable,omitempty"`
+	Mode       *fs.FileMode `json:"mode,omitempty"`
 }
 
 func detectOverlayDriver() *overlayDriver {
@@ -227,11 +230,17 @@ func (s *Store) restoreOverlay(envID string) (string, bool, error) {
 		return "", false, fmt.Errorf("vfs: restore overlay mountpoint: %w", err)
 	}
 	state := s.overlayStatePath(envID)
+	lower, err := s.overlayFloor(state)
+	if err != nil {
+		s.releaseOverlay()
+		return "", false, err
+	}
 	if overlayMounted(live) {
 		mount := &overlayMount{
 			driver:     s.overlay,
 			mountpoint: live,
 			upperdir:   filepath.Join(state, "upper"),
+			lowerdir:   lower,
 			release:    s.releaseOverlay,
 		}
 		if err := completeOverlaySeed(live, state); err != nil {
@@ -241,7 +250,7 @@ func (s *Store) restoreOverlay(envID string) (string, bool, error) {
 		return live, true, nil
 	}
 	mount, err := s.overlay.mount(
-		s.floorDir,
+		lower,
 		filepath.Join(state, "upper"),
 		filepath.Join(state, "work"),
 		live,
@@ -251,6 +260,7 @@ func (s *Store) restoreOverlay(envID string) (string, bool, error) {
 		return "", false, err
 	}
 	mount.release = s.releaseOverlay
+	mount.lowerdir = lower
 	if err := completeOverlaySeed(live, state); err != nil {
 		return "", false, errors.Join(err, mount.close())
 	}
@@ -313,6 +323,9 @@ func (s *Store) createOverlay(
 		_ = os.RemoveAll(temporary)
 		return "", false, err
 	}
+	if err := os.WriteFile(filepath.Join(temporary, "lower"), []byte(base), 0o600); err != nil {
+		return "", false, errors.Join(err, os.RemoveAll(temporary))
+	}
 	if err := os.Rename(temporary, state); err != nil {
 		_ = os.RemoveAll(temporary)
 		if _, statErr := os.Stat(state); statErr != nil {
@@ -350,12 +363,32 @@ func (s *Store) createOverlay(
 		return "", false, err
 	}
 	mount.release = s.releaseOverlay
+	mount.lowerdir = base
 	held = false
 	if err := completeOverlaySeed(live, state); err != nil {
 		return "", false, errors.Join(err, mount.close())
 	}
 	s.registerOverlay(envID, mount)
 	return live, true, nil
+}
+
+func (s *Store) overlayFloor(state string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(state, "lower"))
+	if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("vfs: read overlay floor: %w", err)
+	}
+	floor := string(data)
+	if os.IsNotExist(err) {
+		floor = filepath.Join(s.liveRoot, floorDirName)
+	}
+	root, err := confinedRoot(floor)
+	if err != nil {
+		return "", fmt.Errorf("vfs: open overlay floor: %w", err)
+	}
+	if escapesRoot(s.liveRoot, root) {
+		return "", fmt.Errorf("vfs: overlay floor: %w", ErrInvalidPath)
+	}
+	return root, nil
 }
 
 var (
@@ -406,11 +439,12 @@ func (s *Store) mountOverlayState(
 func writeOverlaySeed(state string, blobs []overlayFile) error {
 	seed := make([]overlaySeedFile, 0, len(blobs))
 	for _, item := range blobs {
+		mode := item.b.mode
 		seed = append(seed, overlaySeedFile{
-			Path:       item.path,
-			Data:       item.b.data,
-			Tombstone:  item.b.tombstone,
-			Executable: item.b.executable,
+			Path:      item.path,
+			Data:      item.b.data,
+			Tombstone: item.b.tombstone,
+			Mode:      &mode,
 		})
 	}
 	data, err := json.Marshal(seed)
@@ -437,10 +471,16 @@ func completeOverlaySeed(live, state string) error {
 		return fmt.Errorf("vfs: decode overlay seed: %w", err)
 	}
 	for _, item := range seed {
+		mode := fs.FileMode(0o640)
+		if item.Mode != nil {
+			mode = *item.Mode
+		} else if item.Executable {
+			mode = 0o750
+		}
 		if err := applyLive(live, item.Path, blob{
-			data:       item.Data,
-			tombstone:  item.Tombstone,
-			executable: item.Executable,
+			data:      item.Data,
+			tombstone: item.Tombstone,
+			mode:      mode,
 		}); err != nil {
 			return fmt.Errorf("vfs: apply overlay seed: %w", err)
 		}

@@ -1,5 +1,7 @@
 # 模型上下文块清单与稳定性排序
 
+> **历史材料（统一边迁移前）**：本页保留当时的设计、提示词或测试记录；root、spawn/join、任务树及旧输入协议不再作为当前规范。现行语义与实现边界见[统一边设计](unified-edge-design.md)，当前配置以 `threadmill.yaml` 为准。历史性能与测试结论仅适用于文中所列版本。
+
 本文按当前默认 `threadmill.yaml` 和运行时代码，列出每个 Agent 可能发送给模型的上下文块，并按相邻请求之间的字节稳定性排序。本文的“块”对应 `agent.Request` 的 `SystemPrompt`（C0 角色提示）、`Messages`（C4/C5）、`StateBlocks`（C3，按 ID 覆盖的状态块）、`Suffix`（C6 条件性尾部）、`Tools` 以及隐藏 compact 请求中的逻辑边界。
 
 ## 稳定性等级
@@ -99,7 +101,7 @@ C0–C6 是**变化率分级**，不是 wire 顺序处方。「越稳定越靠�
 2. **Loop 订阅选择器**：固定订阅与动态订阅的子图 ID；它决定哪些节点会被投影到正常请求。
 3. **Messages 里的详情副本**：`memory_*` 查询、展开结果和工具结果。它们是对话历史，不等于图上的节点。
 
-生产协调路径使用按环境隔离的 [`context.Store`](../internal/context/store.go)。代码还保留了单独的 [`context.GlobalView`](../internal/context/global.go) 兼容路径；只有显式绑定该视图的 Agent 才会读写全局图，不能把它和 task 的 Store 版本混作同一缓存域。
+生产协调路径使用按环境隔离的 [`context.Store`](../internal/context/store.go)。迁移前的 `context.GlobalView` 全局兼容路径已在统一边清理中删除；当前测试也使用各自的私有状态，不再依赖全局记忆单例。
 
 对配置了 `inject_subscribed_memory` 的正常模型请求，每次 `AssembleRequest` 都会重新读取当前图快照，再计算（没有该 hook 的 organizer 不走这条自动注入路径）：
 
@@ -154,7 +156,7 @@ Phase 3 起该投影带 memo：`Loop.subscribedMemoryBlock` 以 `(EnvView.Revisi
 | overflow compact | assistant 返回的 `Usage.TotalTokens >= max(1, 3/4*context_window)`，且角色配置了 `compact_on_overflow` | compact 模型把旧 Messages **追加**成新节点和边；旧节点不会被自动 update/delete | compact 节点的 `subgraph_ids` 只从非 `system`/非 `package` 子图中选择，也可以留空；订阅关系只用于生成 `derives_from_subgraph` 边，不等于正式归属。所以 compact 成功不保证新节点出现在 manager 的 `system-manager` 或 task package 固定投影中。下一次 generate 才看到它们。 |
 | turn-end compact | 角色配置了 `commit_tail_on_turn_end` 且本轮正常完成 | 把剩余历史（`keep=0`）追加为节点，并把 Messages 换成尾部 | 当前默认 manager、verifier 有该 hook；planner、executor 只有 overflow hook；organizer 没有自动 compact。manager/verifier 一轮可能先 overflow compact、后 turn-end compact。 |
 | compact 后深度整理 | compact 后总节点数达到 `deep_audit_max_nodes`（默认 64）或单次新增达到 `deep_audit_min_added`（默认 32），且 organizer 空闲 | organizer 可用 `memory_apply` 更新、标记、合并归属或删除节点 | 这是尽力而为；整理失败不回滚已经提交的 compact，整理过程中已成功的批次仍可能保留。 |
-| child join 回 parent | `joinIncoming` 等 child 完成后调用 `Store.Merge(child, parent)` | **additive-only 不变量**：合入只允许 ① 新增节点、子图和边；② 同 ID 同 statement 节点的 `SubgraphIDs` 归属并集（附着不算修改内容）。冲突 ID 重映射后作为新节点加入 | 除归属并集外，parent 已有节点的 `statement`/`kind`/`status`/`source_refs`/`creator_agent_id`/`superseded_by` 永不被 child 改写，parent 已有子图的元数据（含 `admission`/`scope`）也不被覆盖，child 的删除不传播——child 想推翻 parent 的结论只能新增节点，由整理 Agent 在 parent 侧裁决。child 的动态订阅同样不传播。merge 在目标角色下一次 Ask 前执行，所以目标只有已订阅相关子图时才看到合入节点。锁定测试见 [`internal/context/merge_test.go`](../internal/context/merge_test.go)。 |
+| 迁移前的 child join（已删除） | `joinIncoming` 等 child 完成后调用 `Store.Merge(child, parent)` | **additive-only 不变量**：合入只允许 ① 新增节点、子图和边；② 同 ID 同 statement 节点的 `SubgraphIDs` 归属并集（附着不算修改内容）。冲突 ID 重映射后作为新节点加入 | 除归属并集外，parent 已有节点的 `statement`/`kind`/`status`/`source_refs`/`creator_agent_id`/`superseded_by` 永不被 child 改写，parent 已有子图的元数据（含 `admission`/`scope`）也不被覆盖，child 的删除不传播——child 想推翻 parent 的结论只能新增节点，由整理 Agent 在 parent 侧裁决。child 的动态订阅同样不传播。merge 在目标角色下一次 Ask 前执行，所以目标只有已订阅相关子图时才看到合入节点。锁定测试见 [迁移前的 merge_test.go](https://github.com/KDZZZZZZ/threadmill/blob/dbcd2a092d6a1bb76471c8fdcb672454afaf35ac/internal/context/merge_test.go)。 |
 | 普通 EnvView commit | compact、memory 工具或外部代码调用 `Memory.Commit` / `Store.Save` | 取决于提交图的字段 | `Store.Save` 会保留当前 `system`/`package` 子图及其 runtime-managed 节点，避免普通旧快照把它们静默删除或改写；`AppendNode`、`EnsureSubgraph`、`DropSubgraph`、`Merge` 是运行时的显式管理路径。 |
 
 底层 `Graph` 变换的精确语义在 [`internal/context/graph.go`](../internal/context/graph.go)、[`internal/context/graph_changes.go`](../internal/context/graph_changes.go) 和 [`internal/context/graph_transform.go`](../internal/context/graph_transform.go)；manager/task 的运行时触发点分别在 [`internal/coordination/stores.go`](../internal/coordination/stores.go)、[`internal/coordination/assemble.go`](../internal/coordination/assemble.go) 和 [`internal/coordination/run.go`](../internal/coordination/run.go)。

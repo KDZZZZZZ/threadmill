@@ -2,8 +2,8 @@ package coordination
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
@@ -28,12 +28,12 @@ func ManagerMemorySubgraph() ctxgraph.Subgraph {
 	}
 }
 
-// TaskPackageSubgraph 是 task 的初始记忆与所有 join 报告组成的固定启动包。
+// TaskPackageSubgraph 是 task 的初始记忆与输入整理结果组成的固定启动包。
 func TaskPackageSubgraph(taskID string) ctxgraph.Subgraph {
 	return ctxgraph.Subgraph{
 		ID:      taskID + "-package",
 		Name:    "task startup package",
-		Summary: "执行任务所需的最小初始记忆与所有 join 报告",
+		Summary: "执行任务所需的最小初始记忆与输入整理结果",
 		Kind:    ctxgraph.SubgraphKindPackage,
 	}
 }
@@ -42,7 +42,7 @@ func taskSourcesSubgraph() ctxgraph.Subgraph {
 	return ctxgraph.Subgraph{
 		ID:      taskSourcesSubgraphID,
 		Name:    "task source requests",
-		Summary: "root task 创建时对应的原始用户请求",
+		Summary: "task 创建时对应的原始用户请求",
 		Kind:    ctxgraph.SubgraphKindSystem,
 	}
 }
@@ -54,17 +54,12 @@ type Asker interface {
 
 // Roles 是一个 task 装配出的 planner、executor、verifier。
 type Roles struct {
-	Planner  Asker
-	Executor Asker
-	Verifier Asker
-	scope    func(string) (roleScope, error)
-	Prepare  func(context.Context) error
-}
-
-type roleScope struct {
-	workspaceID string
-	bind        func() error
-	cleanup     func(bool) error
+	Planner        Asker
+	Executor       Asker
+	Verifier       Asker
+	ResolveInput   func(context.Context, Node, InputProgress) error
+	OrganizeMemory func(context.Context, agent.InputMemoryRequest) (ctxgraph.Graph, error)
+	bind           func(role, memoryID, workspaceID string) error
 }
 
 // AssembleFunc 按 task 组装三个角色。
@@ -86,119 +81,107 @@ func Assemble(
 		if stores.Memory == nil {
 			return Roles{}, ErrNilStore
 		}
-		managerSources := stores.Memory.Load(ManagerEnvID).NodesInSubgraphs(
-			[]string{taskSourcesSubgraphID},
-		)
-		inheritedSources := stores.Memory.Load(task.Env.ID).NodesInSubgraphs(
-			[]string{taskSourcesSubgraphID},
-		)
-		if len(inheritedSources) > 0 {
-			if err := stores.Memory.DropSubgraph(task.Env.ID, taskSourcesSubgraphID); err != nil {
-				return Roles{}, err
-			}
+		team, err := agent.NewTeam(provider, contextWindow, agents, extra, overlay...)
+		if err != nil {
+			return Roles{}, err
 		}
+		team.BindCheckpoints(checkpoints, strings.TrimSuffix(task.Planner.ID, ":"+RolePlanner))
 		pack := TaskPackageSubgraph(task.ID)
-		if err := stores.Memory.EnsureSubgraph(task.Env.ID, pack); err != nil {
-			return Roles{}, err
-		}
-		if task.SpawnedFrom == "" {
-			for _, source := range managerSources {
-				if source.ID != taskUserInputNodeID(task.ID) {
-					continue
-				}
-				if err := stores.Memory.AppendNode(task.Env.ID, pack, source); err != nil {
-					return Roles{}, err
-				}
-				break
-			}
-		}
-		if task.Info != "" {
-			if err := stores.Memory.AppendNode(task.Env.ID, pack, taskInfoNode(task)); err != nil {
-				return Roles{}, err
-			}
-		}
-		e, err := openEnv(stores, task.Env.ID)
-		if err != nil {
-			return Roles{}, err
-		}
-		team, err := agent.NewTeam(
-			provider,
-			contextWindow,
-			agents,
-			extra,
-			overlay...,
-		)
-		if err != nil {
-			return Roles{}, err
-		}
-		team.BindCheckpoints(checkpoints, task.ID)
 		for _, loop := range []*agent.Loop{team.Planner, team.Executor, team.Verifier} {
 			loop.SetStableSubscribedSubgraphs([]string{pack.ID})
 		}
-		if err := team.Bind(e); err != nil {
-			return Roles{}, err
+		bind := func(role, memoryID, workspaceID string) error {
+			if err := prepareTaskPackage(stores, task, memoryID); err != nil {
+				return err
+			}
+			e, err := openRoleEnv(stores, memoryID, workspaceID)
+			if err != nil {
+				return err
+			}
+			loop := roleLoop(team, role)
+			if loop == nil {
+				return fmt.Errorf("%w: %s", ErrNilAsker, role)
+			}
+			return loop.Bind(e)
 		}
-		return Roles{
-			Planner:  team.Planner,
-			Executor: team.Executor,
-			Verifier: team.Verifier,
-			scope: func(role string) (roleScope, error) {
-				workspaceID := task.Env.ID
-				disposable := false
-				if stores.Files != nil {
-					switch role {
-					case RolePlanner, RoleVerifier:
-						workspaceID = task.Env.ID + ":" + role
-						disposable = true
-					case RoleExecutor:
-					default:
-						return roleScope{}, fmt.Errorf("%w: %s", ErrNilAsker, role)
-					}
-				}
-				return roleScope{
-					workspaceID: workspaceID,
-					bind: func() error {
-						if disposable {
-							if err := stores.Files.Fork(task.Env.ID, workspaceID); err != nil {
-								return err
-							}
-						}
-						e, err := openRoleEnv(stores, task.Env.ID, workspaceID)
-						if err != nil {
-							return err
-						}
-						loop := roleLoop(team, role)
-						if loop == nil {
-							return fmt.Errorf("%w: %s", ErrNilAsker, role)
-						}
-						if err := loop.Bind(e); err != nil {
-							if disposable {
-								err = errors.Join(err, stores.DiscardFiles(workspaceID))
-							}
-							return err
-						}
-						return nil
-					},
-					cleanup: func(completed bool) error {
-						if !completed {
-							var err error
-							if stores.Exec != nil {
-								err = stores.Exec.Reap(workspaceID)
-							}
-							if !disposable {
-								return err
-							}
-							return errors.Join(err, stores.Files.Release(workspaceID))
-						}
-						if disposable {
-							return stores.DiscardFiles(workspaceID)
-						}
-						return nil
-					},
-				}, nil
+		// Direct Assemble callers retain a usable team. Run binds again only after
+		// installing the ready pair, so assembly cannot inject candidate memory.
+		for _, role := range []string{RolePlanner, RoleExecutor, RoleVerifier} {
+			if err := bind(role, task.Env.ID, task.Env.ID); err != nil {
+				return Roles{}, err
+			}
+		}
+		organizer := agents.SubgraphOrganizer
+		roles := Roles{
+			Planner: team.Planner, Executor: team.Executor, Verifier: team.Verifier, bind: bind,
+			OrganizeMemory: func(ctx context.Context, request agent.InputMemoryRequest) (ctxgraph.Graph, error) {
+				return agent.OrganizeInputMemory(ctx, agent.Config{
+					AgentID: task.Env.ID + ":input-organizer", Provider: provider,
+					ContextWindow: contextWindow, MaxSteps: organizer.MaxSteps,
+					SystemPrompt: organizer.SystemPrompt,
+				}, request)
 			},
-		}, nil
+		}
+		var inputTool agenttool.Tool
+		for _, item := range extra {
+			if item.Definition().Name == inputToolName {
+				inputTool = item
+			}
+		}
+		for _, item := range overlay {
+			if item.NamedTools[inputToolName] != nil {
+				inputTool = item.NamedTools[inputToolName]
+			}
+		}
+		if inputTool != nil {
+			roles.ResolveInput = func(ctx context.Context, node Node, input InputProgress) error {
+				tools := append(agenttool.FileTools(), agenttool.Bash(), inputTool)
+				loop, err := agent.NewLoop(agent.Config{
+					AgentID: node.ID, Provider: provider, Tools: tools, ContextWindow: contextWindow,
+					MaxSteps:     agents.Executor.MaxSteps,
+					SystemPrompt: "只处理本次固定来源的文件差异。共同文件已经直接使用。用 input 查看和选择差异，必要时编辑、验证当前草稿；为未采纳的候选注明原因，完成后调用 input finish。不得执行原任务、整理记忆或把候选报告当作当前事实。文件处理完成后立即结束。",
+				})
+				if err != nil {
+					return err
+				}
+				e, err := openRoleEnv(stores, input.ID+":scratch", input.TargetID)
+				if err != nil {
+					return err
+				}
+				if err := loop.Bind(e); err != nil {
+					return err
+				}
+				_, err = askRole(ctx, loop, taskInput(task.Info, inputNotice(input)))
+				return err
+			}
+		}
+		return roles, nil
 	}
+}
+
+func prepareTaskPackage(stores Stores, task Task, memoryID string) error {
+	pack := TaskPackageSubgraph(task.ID)
+	if err := stores.Memory.DropSubgraph(memoryID, ManagerMemorySubgraphID); err != nil {
+		return err
+	}
+	if err := stores.Memory.DropSubgraph(memoryID, taskSourcesSubgraphID); err != nil {
+		return err
+	}
+	if err := stores.Memory.EnsureSubgraph(memoryID, pack); err != nil {
+		return err
+	}
+	for _, source := range stores.Memory.Load(ManagerEnvID).NodesInSubgraphs([]string{taskSourcesSubgraphID}) {
+		if source.ID == taskUserInputNodeID(task.ID) {
+			if err := stores.Memory.AppendNode(memoryID, pack, source); err != nil {
+				return err
+			}
+			break
+		}
+	}
+	if task.Info != "" {
+		return stores.Memory.AppendNode(memoryID, pack, taskInfoNode(task))
+	}
+	return nil
 }
 
 // NewManagerLoop 装配长命的经理 Agent，装上本图的协调图工具，并绑到独立的 manager 环境。

@@ -17,7 +17,6 @@ import (
 func TestAssembleRequestInjectsUnionMemoryFromSubscribedSubgraphs(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	resetDefaultStore(t)
 
 	var request Request
 	model := ignoreOrganize(func(_ context.Context, got Request) (AssistantMessage, error) {
@@ -108,7 +107,6 @@ func blockText(request Request, id string) string {
 func TestAssembleRequestUsesCurrentSubgraphSubscriptions(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	resetDefaultStore(t)
 
 	var loop *Loop
 	memories := make([]string, 0, 2)
@@ -184,7 +182,6 @@ func TestAssembleRequestUsesCurrentSubgraphSubscriptions(t *testing.T) {
 func TestAssembleRequestReadsLiveSubscribedSubgraphContent(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	resetDefaultStore(t)
 
 	store := ctxgraph.NewStore()
 	store.Save("env-1", ctxgraph.Graph{
@@ -267,10 +264,9 @@ func TestAssembleRequestReadsLiveSubscribedSubgraphContent(t *testing.T) {
 	}
 }
 
-func TestLoopsShareDefaultMemoryGraph(t *testing.T) {
+func TestLoopRunReadsBoundMemory(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	resetDefaultStore(t)
 
 	var memory string
 	reader, err := NewLoop(Config{
@@ -313,9 +309,7 @@ func TestLoopsShareDefaultMemoryGraph(t *testing.T) {
 	}
 }
 
-func TestIndependentAgentCopyIsUnique(t *testing.T) {
-	resetDefaultStore(t)
-
+func TestBoundAgentEnvironmentsStayIsolated(t *testing.T) {
 	loopA, err := NewLoop(Config{
 		AgentID: "agent-a",
 		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
@@ -366,18 +360,9 @@ func bindEnvGraph(t *testing.T, loop *Loop, store *ctxgraph.Store, envID string,
 	}
 }
 
-func resetDefaultStore(t *testing.T) {
-	t.Helper()
-	ctxgraph.Update(ctxgraph.Copy{})
-	t.Cleanup(func() {
-		ctxgraph.Update(ctxgraph.Copy{})
-	})
-}
-
 func TestInjectSubscribedMemoryReusesUnchangedProjection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	resetDefaultStore(t)
 
 	injections := 0
 	memorySeen := make([]string, 0, 2)
@@ -482,12 +467,11 @@ func TestInjectSubscribedMemoryReusesUnchangedProjection(t *testing.T) {
 	}
 }
 
-// TestSubscribedMemoryBlockInvalidatesOnBind 锁定跨环境隔离：Fork 出的子环境与父环境
-// 图 revision 相同（Graph.Clone 保留 Revision），若 memo 不随 Bind 失效，
+// TestSubscribedMemoryBlockInvalidatesOnBind 锁定跨环境隔离：快照恢复出的环境可以与当前环境
+// 图 revision 相同，若 memo 不随 Bind 失效，
 // 订阅列表未变时会把上一个环境的记忆文本泄漏给新环境。
 func TestSubscribedMemoryBlockInvalidatesOnBind(t *testing.T) {
 	ctx := context.Background()
-	resetDefaultStore(t)
 
 	loop, err := NewLoop(Config{Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
 		return AssistantMessage{Content: "done"}, nil
@@ -499,8 +483,9 @@ func TestSubscribedMemoryBlockInvalidatesOnBind(t *testing.T) {
 
 	store := ctxgraph.NewStore()
 	graph := ctxgraph.Graph{
-		Revision: 7,
-		Nodes:    []ctxgraph.Node{{ID: "a", Statement: "parent secret", SubgraphIDs: []string{"sg"}}},
+		Revision:  7,
+		Subgraphs: []ctxgraph.Subgraph{{ID: "sg"}},
+		Nodes:     []ctxgraph.Node{{ID: "a", Statement: "parent secret", SubgraphIDs: []string{"sg"}}},
 	}
 	bindEnvGraph(t, loop, store, "env-parent", graph)
 	loop.SetSubscribedSubgraphs([]string{"sg"})
@@ -513,13 +498,18 @@ func TestSubscribedMemoryBlockInvalidatesOnBind(t *testing.T) {
 		t.Fatalf("parent memory block = %q, want %q", first, want)
 	}
 
-	// Fork 保留 revision，子环境节点不同但 revision 相同、订阅列表未变。
-	if err := store.Fork("env-parent", "env-child"); err != nil {
-		t.Fatal(err)
-	}
+	// 快照保留 revision，目标环境节点不同但 revision 相同、订阅列表未变。
 	child := graph.Clone()
 	child.Nodes = []ctxgraph.Node{{ID: "b", Statement: "child fact", SubgraphIDs: []string{"sg"}}}
-	bindEnvGraph(t, loop, store, "env-child", child)
+	if err := store.SaveSnapshot("ready", child); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Restore("env-child", "ready"); err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.Bind(env.Open("env-child", store.View("env-child"))); err != nil {
+		t.Fatal(err)
+	}
 
 	second, err := loop.subscribedMemoryBlock(ctx)
 	if err != nil {

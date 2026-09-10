@@ -14,22 +14,21 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
-const joinToolName = "join"
+const inputToolName = "input"
 
-type joinCoordinator struct {
+type inputCoordinator struct {
 	graph *Graph
 
-	mu       sync.Mutex
-	runner   *runner
-	sessions map[string][]JoinProgress
+	mu     sync.Mutex
+	runner *runner
 }
 
-type joinTool struct{ join *joinCoordinator }
+type inputTool struct{ graph *Graph }
 
-func (t joinTool) Definition() agenttool.Definition {
+func (t inputTool) Definition() agenttool.Definition {
 	return agenttool.Definition{
-		Name:        joinToolName,
-		Description: "检查并处理 join 候选。候选不会自动改动当前工作区；可查看输出/改动/文件，按路径安全采纳或显式覆盖，也可丢弃。完成当前角色前必须逐个处理候选并 finish。",
+		Name:        inputToolName,
+		Description: "处理固定输入批次的文件差异。共同文件已直接使用；检查来源、按路径采纳或丢弃差异，finish 结束文件阶段，然后运行时整理记忆。",
 		InputSchema: json.RawMessage(`{
 			"type":"object",
 			"properties":{
@@ -52,21 +51,26 @@ func (t joinTool) Definition() agenttool.Definition {
 	}
 }
 
-func (t joinTool) Execute(ctx context.Context, call agenttool.Call) (agenttool.Output, error) {
+func (t inputTool) Execute(ctx context.Context, call agenttool.Call) (agenttool.Output, error) {
 	if err := ctx.Err(); err != nil {
 		return agenttool.Output{}, err
 	}
-	if t.join == nil {
-		return agenttool.Output{}, fmt.Errorf("%s: unavailable", joinToolName)
+	if t.graph == nil {
+		return agenttool.Output{}, fmt.Errorf("%s: unavailable", inputToolName)
 	}
-	var args joinArgs
+	var args inputArgs
 	if err := decodeGraphArgs(call.Arguments, &args); err != nil {
 		return agenttool.Output{}, err
 	}
 	if args.Offset < 0 || args.Limit < 0 || args.Limit > 1000 {
-		return agenttool.Output{}, fmt.Errorf("%s: invalid pagination", joinToolName)
+		return agenttool.Output{}, fmt.Errorf("%s: invalid pagination", inputToolName)
 	}
-	result, err := t.join.execute(
+	run := t.graph.runnerForNode(agenttool.AgentID(ctx))
+	if run == nil {
+		return agenttool.Output{}, fmt.Errorf("%s: caller is not running", inputToolName)
+	}
+	coordinator := run.inputs
+	result, err := coordinator.execute(
 		agenttool.AgentID(ctx),
 		agenttool.EnvFromContext(ctx),
 		args,
@@ -76,12 +80,12 @@ func (t joinTool) Execute(ctx context.Context, call agenttool.Call) (agenttool.O
 	}
 	data, err := json.Marshal(result)
 	if err != nil {
-		return agenttool.Output{}, fmt.Errorf("%s: encode result: %w", joinToolName, err)
+		return agenttool.Output{}, fmt.Errorf("%s: encode result: %w", inputToolName, err)
 	}
 	return agenttool.Output{Content: string(data), Details: data}, nil
 }
 
-type joinArgs struct {
+type inputArgs struct {
 	Action    string   `json:"action"`
 	SessionID string   `json:"session_id"`
 	SourceID  string   `json:"source_id"`
@@ -96,63 +100,13 @@ type joinArgs struct {
 	Limit     int      `json:"limit"`
 }
 
-func (j *joinCoordinator) bind(r *runner) {
-	j.mu.Lock()
-	j.runner = r
-	j.mu.Unlock()
-}
-
-func (j *joinCoordinator) forget(taskIDs []string) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	for _, taskID := range taskIDs {
-		delete(j.sessions, taskID)
-	}
-}
-
-func (j *joinCoordinator) open(
-	taskID, nodeID, targetID, sessionID string,
-	items []joinedTask,
-) (JoinProgress, error) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-
-	sessions, err := j.loadLocked(taskID)
-	if err != nil {
-		return JoinProgress{}, err
-	}
-	for _, session := range sessions {
-		if session.ID == sessionID {
-			return session, nil
-		}
-	}
-	session := JoinProgress{
-		ID:       sessionID,
-		NodeID:   nodeID,
-		TargetID: targetID,
-		Sources:  make([]JoinSourceProgress, 0, len(items)),
-	}
-	for _, item := range items {
-		session.Sources = append(session.Sources, JoinSourceProgress{
-			TaskID: item.task.ID,
-			EnvID:  item.task.Env.ID,
-			Output: item.out,
-		})
-	}
-	sessions = append(sessions, session)
-	if err := j.saveLocked(taskID, sessions); err != nil {
-		return JoinProgress{}, err
-	}
-	return session, nil
-}
-
-func (j *joinCoordinator) execute(nodeID, targetID string, args joinArgs) (any, error) {
+func (j *inputCoordinator) execute(nodeID, targetID string, args inputArgs) (any, error) {
 	if strings.TrimSpace(nodeID) == "" {
-		return nil, fmt.Errorf("%s: caller agent is unknown", joinToolName)
+		return nil, fmt.Errorf("%s: caller agent is unknown", inputToolName)
 	}
 	taskID, ok := j.taskID(nodeID)
 	if !ok {
-		return nil, fmt.Errorf("%s: caller node %q is unknown", joinToolName, nodeID)
+		return nil, fmt.Errorf("%s: caller node %q is unknown", inputToolName, nodeID)
 	}
 
 	j.mu.Lock()
@@ -164,25 +118,22 @@ func (j *joinCoordinator) execute(nodeID, targetID string, args joinArgs) (any, 
 	if args.Action == "list" {
 		return j.listLocked(sessions, nodeID, targetID, args), nil
 	}
-	index, err := selectJoinSession(sessions, nodeID, targetID, strings.TrimSpace(args.SessionID))
+	index, err := selectInputSession(sessions, nodeID, targetID, strings.TrimSpace(args.SessionID))
 	if err != nil {
 		return nil, err
 	}
 	if index < 0 {
-		return nil, fmt.Errorf("%s: unknown session %q", joinToolName, args.SessionID)
+		return nil, fmt.Errorf("%s: unknown session %q", inputToolName, args.SessionID)
 	}
 	session := &sessions[index]
 	if session.NodeID != nodeID || session.TargetID != targetID {
-		return nil, fmt.Errorf("%s: session %q does not belong to this role workspace", joinToolName, session.ID)
+		return nil, fmt.Errorf("%s: session %q does not belong to this role workspace", inputToolName, session.ID)
 	}
-	if session.Finished {
+	if inputFinished(*session) {
 		if args.Action == "finish" {
-			if err := j.releaseLocked(*session); err != nil {
-				return nil, err
-			}
-			return map[string]any{"session_id": session.ID, "finished": true, "task_id": taskID}, nil
+			return map[string]any{"session_id": session.ID, "files_finished": true, "task_id": taskID}, nil
 		}
-		return nil, fmt.Errorf("%s: session %q is already finished", joinToolName, session.ID)
+		return nil, fmt.Errorf("%s: session %q is already finished", inputToolName, session.ID)
 	}
 
 	var result any
@@ -196,7 +147,7 @@ func (j *joinCoordinator) execute(nodeID, targetID string, args joinArgs) (any, 
 	case "finish":
 		result, err = j.finishLocked(taskID, session, args)
 	default:
-		err = fmt.Errorf("%s: unknown action %q", joinToolName, args.Action)
+		err = fmt.Errorf("%s: unknown action %q", inputToolName, args.Action)
 	}
 	if err != nil {
 		return nil, err
@@ -206,18 +157,13 @@ func (j *joinCoordinator) execute(nodeID, targetID string, args joinArgs) (any, 
 			return nil, err
 		}
 	}
-	if args.Action == "finish" {
-		if err := j.releaseLocked(*session); err != nil {
-			return nil, err
-		}
-	}
 	return result, nil
 }
 
-func (j *joinCoordinator) listLocked(
-	sessions []JoinProgress,
+func (j *inputCoordinator) listLocked(
+	sessions []InputProgress,
 	nodeID, targetID string,
-	args joinArgs,
+	args inputArgs,
 ) any {
 	type source struct {
 		ID      string `json:"id"`
@@ -238,7 +184,7 @@ func (j *joinCoordinator) listLocked(
 			continue
 		}
 		status := "pending"
-		if session.Finished {
+		if inputFinished(session) {
 			status = "finished"
 		}
 		start, end, next := pageRange(len(session.Sources), args.Offset, args.Limit, 100)
@@ -248,8 +194,8 @@ func (j *joinCoordinator) listLocked(
 		}
 		for _, candidate := range session.Sources[start:end] {
 			item.Sources = append(item.Sources, source{
-				ID:      candidate.TaskID,
-				Status:  joinSourceStatus(candidate),
+				ID:      candidate.ID,
+				Status:  inputSourceStatus(candidate),
 				Preview: preview(candidate.Output, 300),
 			})
 		}
@@ -258,7 +204,7 @@ func (j *joinCoordinator) listLocked(
 	return result
 }
 
-func (j *joinCoordinator) inspectLocked(session JoinProgress, args joinArgs) (any, error) {
+func (j *inputCoordinator) inspectLocked(session InputProgress, args inputArgs) (any, error) {
 	view := args.View
 	if view == "" {
 		view = "summary"
@@ -266,7 +212,7 @@ func (j *joinCoordinator) inspectLocked(session JoinProgress, args joinArgs) (an
 	if view == "compare" {
 		return j.compareLocked(session, args)
 	}
-	source, err := joinSource(&session, strings.TrimSpace(args.SourceID))
+	source, err := inputSource(&session, strings.TrimSpace(args.SourceID))
 	if err != nil {
 		return nil, err
 	}
@@ -277,54 +223,54 @@ func (j *joinCoordinator) inspectLocked(session JoinProgress, args joinArgs) (an
 	switch view {
 	case "summary":
 		return map[string]any{
-			"source_id":      source.TaskID,
-			"status":         joinSourceStatus(*source),
+			"source_id":      source.ID,
+			"status":         inputSourceStatus(*source),
 			"output_preview": preview(source.Output, 1000),
 			"changed_paths":  len(changes),
 		}, nil
 	case "output":
 		output, next := pageText(source.Output, args.Offset, args.Limit)
-		return map[string]any{"source_id": source.TaskID, "output": output, "next_offset": next}, nil
+		return map[string]any{"source_id": source.ID, "output": output, "next_offset": next}, nil
 	case "diff":
 		page, next := pageChanges(changes, args.Offset, args.Limit)
-		return map[string]any{"source_id": source.TaskID, "changes": page, "next_offset": next}, nil
+		return map[string]any{"source_id": source.ID, "changes": page, "next_offset": next}, nil
 	case "file":
 		path := strings.TrimSpace(args.Path)
 		if path == "" {
-			return nil, fmt.Errorf("%s: path is required for file inspection", joinToolName)
+			return nil, fmt.Errorf("%s: path is required for file inspection", inputToolName)
 		}
-		if !hasJoinChange(changes, path) {
-			return nil, fmt.Errorf("%s: path %q is not a candidate change", joinToolName, path)
+		if !hasInputChange(changes, path) {
+			return nil, fmt.Errorf("%s: path %q is not a candidate change", inputToolName, path)
 		}
 		if j.runner == nil || j.runner.stores.Files == nil {
-			return nil, fmt.Errorf("%s: file store is unavailable", joinToolName)
+			return nil, fmt.Errorf("%s: file store is unavailable", inputToolName)
 		}
 		data, readErr := j.runner.stores.Files.View(source.EnvID).Read(path)
 		if errors.Is(readErr, fs.ErrNotExist) {
-			return map[string]any{"source_id": source.TaskID, "path": path, "deleted": true}, nil
+			return map[string]any{"source_id": source.ID, "path": path, "deleted": true}, nil
 		}
 		if readErr != nil {
 			return nil, readErr
 		}
 		content, next := pageText(string(data), args.Offset, args.Limit)
 		return map[string]any{
-			"source_id":   source.TaskID,
+			"source_id":   source.ID,
 			"path":        path,
 			"content":     content,
 			"next_offset": next,
 		}, nil
 	default:
-		return nil, fmt.Errorf("%s: unknown inspect view %q", joinToolName, view)
+		return nil, fmt.Errorf("%s: unknown inspect view %q", inputToolName, view)
 	}
 }
 
-func (j *joinCoordinator) compareLocked(session JoinProgress, args joinArgs) (any, error) {
+func (j *inputCoordinator) compareLocked(session InputProgress, args inputArgs) (any, error) {
 	path := strings.TrimSpace(args.Path)
 	if path == "" {
-		return nil, fmt.Errorf("%s: path is required for compare", joinToolName)
+		return nil, fmt.Errorf("%s: path is required for compare", inputToolName)
 	}
 	if j.runner == nil || j.runner.stores.Files == nil {
-		return nil, fmt.Errorf("%s: file store is unavailable", joinToolName)
+		return nil, fmt.Errorf("%s: file store is unavailable", inputToolName)
 	}
 	changed := false
 	for _, source := range session.Sources {
@@ -332,18 +278,18 @@ func (j *joinCoordinator) compareLocked(session JoinProgress, args joinArgs) (an
 		if err != nil {
 			return nil, err
 		}
-		changed = changed || hasJoinChange(changes, path)
+		changed = changed || hasInputChange(changes, path)
 	}
 	if !changed {
-		return nil, fmt.Errorf("%s: path %q is not changed by this session", joinToolName, path)
+		return nil, fmt.Errorf("%s: path %q is not changed by this session", inputToolName, path)
 	}
 	result := map[string]any{
 		"path":   path,
-		"target": readJoinFile(j.runner.stores.Files, session.TargetID, path, args.Offset, args.Limit),
+		"target": readInputFile(j.runner.stores.Files, session.TargetID, path, args.Offset, args.Limit),
 	}
 	sources := make(map[string]any, len(session.Sources))
 	for _, source := range session.Sources {
-		sources[source.TaskID] = readJoinFile(
+		sources[source.ID] = readInputFile(
 			j.runner.stores.Files,
 			source.EnvID,
 			path,
@@ -355,8 +301,8 @@ func (j *joinCoordinator) compareLocked(session JoinProgress, args joinArgs) (an
 	return result, nil
 }
 
-func (j *joinCoordinator) applyLocked(session *JoinProgress, args joinArgs) (any, error) {
-	source, err := joinSource(session, strings.TrimSpace(args.SourceID))
+func (j *inputCoordinator) applyLocked(session *InputProgress, args inputArgs) (any, error) {
+	source, err := inputSource(session, strings.TrimSpace(args.SourceID))
 	if err != nil {
 		return nil, err
 	}
@@ -365,21 +311,21 @@ func (j *joinCoordinator) applyLocked(session *JoinProgress, args joinArgs) (any
 		strategy = "safe"
 	}
 	if strategy != "safe" && strategy != "replace" {
-		return nil, fmt.Errorf("%s: unknown apply strategy %q", joinToolName, strategy)
+		return nil, fmt.Errorf("%s: unknown apply strategy %q", inputToolName, strategy)
 	}
 	if args.All == (len(args.Paths) > 0) {
-		return nil, fmt.Errorf("%s: apply requires exactly one of paths or all=true", joinToolName)
+		return nil, fmt.Errorf("%s: apply requires exactly one of paths or all=true", inputToolName)
 	}
 	if strategy == "replace" && strings.TrimSpace(args.Reason) == "" {
-		return nil, fmt.Errorf("%s: replace requires reason", joinToolName)
+		return nil, fmt.Errorf("%s: replace requires reason", inputToolName)
 	}
 	paths := args.Paths
 	if args.All {
 		paths = nil
 	}
-	var result vfs.JoinApplyResult
+	var result vfs.InputApplyResult
 	if j.runner != nil && j.runner.stores.Files != nil {
-		result, err = j.runner.stores.Files.ApplyJoin(
+		result, err = j.runner.stores.Files.ApplyInput(
 			source.EnvID,
 			session.TargetID,
 			paths,
@@ -390,7 +336,7 @@ func (j *joinCoordinator) applyLocked(session *JoinProgress, args joinArgs) (any
 		}
 		if len(result.Conflicts) > 0 {
 			return map[string]any{
-				"source_id": source.TaskID,
+				"source_id": source.ID,
 				"strategy":  strategy,
 				"applied":   []string{},
 				"conflicts": result.Conflicts,
@@ -403,27 +349,27 @@ func (j *joinCoordinator) applyLocked(session *JoinProgress, args joinArgs) (any
 	if err != nil {
 		return nil, err
 	}
-	source.AppliedAll = joinChangesCovered(changes, source.AppliedPaths)
+	source.AppliedAll = inputChangesCovered(changes, source.AppliedPaths)
 	return map[string]any{
-		"source_id": source.TaskID,
+		"source_id": source.ID,
 		"strategy":  strategy,
 		"applied":   result.Applied,
-		"status":    joinSourceStatus(*source),
+		"status":    inputSourceStatus(*source),
 	}, nil
 }
 
-func (j *joinCoordinator) discardLocked(session *JoinProgress, args joinArgs) (any, error) {
+func (j *inputCoordinator) discardLocked(session *InputProgress, args inputArgs) (any, error) {
 	if len(args.SourceIDs) == 0 && strings.TrimSpace(args.SourceID) != "" {
 		args.SourceIDs = []string{args.SourceID}
 	}
 	if len(args.SourceIDs) == 0 {
-		return nil, fmt.Errorf("%s: source_ids is required", joinToolName)
+		return nil, fmt.Errorf("%s: source_ids is required", inputToolName)
 	}
 	if strings.TrimSpace(args.Reason) == "" {
-		return nil, fmt.Errorf("%s: discard requires reason", joinToolName)
+		return nil, fmt.Errorf("%s: discard requires reason", inputToolName)
 	}
 	for _, sourceID := range args.SourceIDs {
-		source, err := joinSource(session, strings.TrimSpace(sourceID))
+		source, err := inputSource(session, strings.TrimSpace(sourceID))
 		if err != nil {
 			return nil, err
 		}
@@ -433,110 +379,52 @@ func (j *joinCoordinator) discardLocked(session *JoinProgress, args joinArgs) (a
 	return map[string]any{"discarded": args.SourceIDs}, nil
 }
 
-func (j *joinCoordinator) finishLocked(taskID string, session *JoinProgress, args joinArgs) (any, error) {
+func (j *inputCoordinator) finishLocked(taskID string, session *InputProgress, args inputArgs) (any, error) {
 	if strings.TrimSpace(args.Reason) == "" {
-		return nil, fmt.Errorf("%s: finish requires reason", joinToolName)
+		return nil, fmt.Errorf("%s: finish requires reason", inputToolName)
 	}
 	undecided := make([]string, 0)
 	for _, source := range session.Sources {
 		if !source.AppliedAll && !source.Discarded {
-			undecided = append(undecided, source.TaskID)
+			undecided = append(undecided, source.ID)
 		}
 	}
 	if len(undecided) > 0 {
-		return nil, fmt.Errorf("%s: undecided sources: %s", joinToolName, strings.Join(undecided, ", "))
+		return nil, fmt.Errorf("%s: undecided sources: %s", inputToolName, strings.Join(undecided, ", "))
 	}
-	session.Finished = true
+	session.Phase = "files_resolved"
 	session.Reason = strings.TrimSpace(args.Reason)
-	return map[string]any{"session_id": session.ID, "finished": true, "task_id": taskID}, nil
+	return map[string]any{"session_id": session.ID, "files_finished": true, "task_id": taskID}, nil
 }
 
-func (j *joinCoordinator) releaseLocked(session JoinProgress) error {
-	if j.runner == nil {
-		return nil
-	}
-	var releaseErr error
-	for _, source := range session.Sources {
-		if err := j.runner.stores.DiscardFiles(source.EnvID); err != nil {
-			releaseErr = errors.Join(
-				releaseErr,
-				fmt.Errorf("%s: release candidate %s: %w", joinToolName, source.TaskID, err),
-			)
-		}
-	}
-	return releaseErr
+func inputFinished(session InputProgress) bool {
+	return session.Phase == "files_resolved" || session.Phase == "memory" || session.Phase == "ready"
 }
 
-func (j *joinCoordinator) requireFinished(nodeID string) error {
-	taskID, ok := j.taskID(nodeID)
-	if !ok {
-		return nil
+func (j *inputCoordinator) loadLocked(taskID string) ([]InputProgress, error) {
+	if j.runner == nil || j.runner.task.ID != taskID {
+		return nil, fmt.Errorf("input: unknown activation")
 	}
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	sessions, err := j.loadLocked(taskID)
-	if err != nil {
-		return err
-	}
-	var pending []string
-	for _, session := range sessions {
-		if session.NodeID == nodeID && !session.Finished {
-			pending = append(pending, session.ID)
-		}
-	}
-	if len(pending) > 0 {
-		return fmt.Errorf("coordination: role %s returned with unfinished join sessions: %s", nodeID, strings.Join(pending, ", "))
-	}
-	return nil
+	j.runner.mu.Lock()
+	defer j.runner.mu.Unlock()
+	return cloneInputProgresses(j.runner.state.Inputs), nil
 }
 
-func (j *joinCoordinator) loadLocked(taskID string) ([]JoinProgress, error) {
-	if sessions, ok := j.sessions[taskID]; ok {
-		return cloneJoinProgresses(sessions), nil
+func (j *inputCoordinator) saveLocked(taskID string, sessions []InputProgress) error {
+	if j.runner == nil || j.runner.task.ID != taskID {
+		return fmt.Errorf("input: unknown activation")
 	}
-	var sessions []JoinProgress
-	if j.runner != nil && j.runner.progress != nil {
-		progress, ok, err := j.runner.progress.Load(taskID)
-		if err != nil {
-			return nil, fmt.Errorf("loading join progress: %w", err)
-		}
-		if ok {
-			sessions = progress.Joins
-		}
-	}
-	j.sessions[taskID] = cloneJoinProgresses(sessions)
-	return cloneJoinProgresses(sessions), nil
+	return j.runner.updateProgress(func(state *TaskProgress) { state.Inputs = cloneInputProgresses(sessions) })
 }
 
-func (j *joinCoordinator) saveLocked(taskID string, sessions []JoinProgress) error {
-	cloned := cloneJoinProgresses(sessions)
-	if j.runner != nil && j.runner.progress != nil {
-		progress, _, err := j.runner.progress.Load(taskID)
-		if err != nil {
-			return fmt.Errorf("loading join progress: %w", err)
-		}
-		progress.Joins = cloned
-		for _, session := range sessions {
-			if session.Finished && strings.HasPrefix(session.ID, "join:incoming:") && !hasProgressID(progress.Merged, session.NodeID) {
-				progress.Merged = append(progress.Merged, session.NodeID)
-			}
-		}
-		if err := j.runner.progress.Save(taskID, progress); err != nil {
-			return fmt.Errorf("saving join progress: %w", err)
-		}
-	}
-	j.sessions[taskID] = cloned
-	return nil
-}
-
-func (j *joinCoordinator) changesLocked(envID string) ([]vfs.JoinChange, error) {
+func (j *inputCoordinator) changesLocked(envID string) ([]vfs.InputChange, error) {
 	if j.runner == nil || j.runner.stores.Files == nil {
-		return []vfs.JoinChange{}, nil
+		return []vfs.InputChange{}, nil
 	}
-	return j.runner.stores.Files.JoinChanges(envID)
+	return j.runner.stores.Files.InputChanges(envID)
 }
 
-func (j *joinCoordinator) taskID(nodeID string) (string, bool) {
+func (j *inputCoordinator) taskID(nodeID string) (string, bool) {
 	if j.graph == nil {
 		return "", false
 	}
@@ -546,41 +434,41 @@ func (j *joinCoordinator) taskID(nodeID string) (string, bool) {
 	return node.TaskID, ok
 }
 
-func selectJoinSession(
-	sessions []JoinProgress,
+func selectInputSession(
+	sessions []InputProgress,
 	nodeID, targetID, sessionID string,
 ) (int, error) {
 	if sessionID != "" {
-		return slices.IndexFunc(sessions, func(session JoinProgress) bool {
+		return slices.IndexFunc(sessions, func(session InputProgress) bool {
 			return session.ID == sessionID
 		}), nil
 	}
 	index := -1
 	for i, session := range sessions {
-		if session.NodeID != nodeID || session.TargetID != targetID || session.Finished {
+		if session.NodeID != nodeID || session.TargetID != targetID || inputFinished(session) {
 			continue
 		}
 		if index >= 0 {
-			return -1, fmt.Errorf("%s: session_id is required when multiple sessions are pending", joinToolName)
+			return -1, fmt.Errorf("%s: session_id is required when multiple sessions are pending", inputToolName)
 		}
 		index = i
 	}
 	if index < 0 {
-		return -1, fmt.Errorf("%s: no pending session", joinToolName)
+		return -1, fmt.Errorf("%s: no pending session", inputToolName)
 	}
 	return index, nil
 }
 
-func joinSource(session *JoinProgress, sourceID string) (*JoinSourceProgress, error) {
+func inputSource(session *InputProgress, sourceID string) (*InputSourceProgress, error) {
 	for i := range session.Sources {
-		if session.Sources[i].TaskID == sourceID {
+		if session.Sources[i].ID == sourceID {
 			return &session.Sources[i], nil
 		}
 	}
-	return nil, fmt.Errorf("%s: unknown source %q", joinToolName, sourceID)
+	return nil, fmt.Errorf("%s: unknown source %q", inputToolName, sourceID)
 }
 
-func joinSourceStatus(source JoinSourceProgress) string {
+func inputSourceStatus(source InputSourceProgress) string {
 	switch {
 	case source.Applied && (!source.AppliedAll || source.Discarded):
 		return "partially_applied"
@@ -593,7 +481,7 @@ func joinSourceStatus(source JoinSourceProgress) string {
 	}
 }
 
-func joinChangesCovered(changes []vfs.JoinChange, applied []string) bool {
+func inputChangesCovered(changes []vfs.InputChange, applied []string) bool {
 	if len(changes) != len(applied) {
 		return false
 	}
@@ -605,7 +493,7 @@ func joinChangesCovered(changes []vfs.JoinChange, applied []string) bool {
 	return true
 }
 
-func hasJoinChange(changes []vfs.JoinChange, path string) bool {
+func hasInputChange(changes []vfs.InputChange, path string) bool {
 	for _, change := range changes {
 		if change.Path == path {
 			return true
@@ -630,7 +518,7 @@ func appendUnique(existing []string, items ...string) []string {
 	return existing
 }
 
-func readJoinFile(store *vfs.Store, envID, path string, offset, limit int) any {
+func readInputFile(store *vfs.Store, envID, path string, offset, limit int) any {
 	data, err := store.View(envID).Read(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]any{"exists": false}
@@ -657,7 +545,7 @@ func pageText(value string, offset, limit int) (string, *int) {
 	return string(runes[offset:end]), &end
 }
 
-func pageChanges(changes []vfs.JoinChange, offset, limit int) ([]vfs.JoinChange, *int) {
+func pageChanges(changes []vfs.InputChange, offset, limit int) ([]vfs.InputChange, *int) {
 	start, end, next := pageRange(len(changes), offset, limit, 200)
 	return changes[start:end], next
 }
@@ -676,11 +564,12 @@ func pageRange(length, offset, limit, defaultLimit int) (int, int, *int) {
 	return offset, end, &end
 }
 
-func cloneJoinProgresses(sessions []JoinProgress) []JoinProgress {
-	out := make([]JoinProgress, len(sessions))
+func cloneInputProgresses(sessions []InputProgress) []InputProgress {
+	out := make([]InputProgress, len(sessions))
 	for i, session := range sessions {
 		out[i] = session
-		out[i].Sources = make([]JoinSourceProgress, len(session.Sources))
+		out[i].Paths = slices.Clone(session.Paths)
+		out[i].Sources = make([]InputSourceProgress, len(session.Sources))
 		for k, source := range session.Sources {
 			out[i].Sources[k] = source
 			out[i].Sources[k].AppliedPaths = slices.Clone(source.AppliedPaths)
@@ -698,13 +587,13 @@ func preview(text string, limit int) string {
 	return string(runes[:limit]) + "…"
 }
 
-func joinNotice(session JoinProgress) string {
+func inputNotice(session InputProgress) string {
 	sources := make([]string, 0, len(session.Sources))
 	for _, source := range session.Sources {
-		sources = append(sources, source.TaskID)
+		sources = append(sources, source.ID)
 	}
 	return fmt.Sprintf(
-		"[join pending] session_id=%s sources=%s。候选尚未修改当前工作区；请用 join list/inspect/apply/discard 处理，并在结束本角色前调用 join finish。",
+		"[input pending] session_id=%s sources=%s。共同状态已直接使用；请用 input list/inspect/apply/discard 处理差异，再调用 input finish 结束文件阶段。",
 		session.ID,
 		strings.Join(sources, ","),
 	)

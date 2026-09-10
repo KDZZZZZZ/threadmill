@@ -75,6 +75,12 @@ type Graph struct {
 	Edges     []Edge     `json:"edges"`     // 节点与子图之间的有向关系
 }
 
+// Copy 是某个 Agent 持有的记忆图副本。
+type Copy struct {
+	AgentID string
+	Graph   Graph
+}
+
 // NodesInSubgraphs 返回至少属于其中一个子图的节点并集。
 // 按图中原有顺序且按 ID 去重；返回值为节点拷贝。订阅列表为空或全未知时返回空切片。
 func (g Graph) NodesInSubgraphs(subgraphIDs []string) []Node {
@@ -106,6 +112,20 @@ func (g Graph) NodesInSubgraphs(subgraphIDs []string) []Node {
 		nodes = append(nodes, cloneNode(node))
 	}
 	return nodes
+}
+
+// CurrentNodesInSubgraphs omits superseded and outdated statements from automatic
+// context projection. Disputed statements retain their status; explicit history
+// queries can still retrieve every statement through NodesInSubgraphs.
+func (g Graph) CurrentNodesInSubgraphs(subgraphIDs []string) []Node {
+	nodes := g.NodesInSubgraphs(subgraphIDs)
+	current := nodes[:0]
+	for _, node := range nodes {
+		if node.Status != NodeStatusSuperseded && node.Status != NodeStatusOutdated {
+			current = append(current, node)
+		}
+	}
+	return current
 }
 
 // LastNodeOfCreator 返回该创建者在图中按 Nodes 顺序的最后一个节点。

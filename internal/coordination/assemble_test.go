@@ -18,9 +18,6 @@ import (
 )
 
 func TestAssembleUsesYamlToolsHooksAndPrompt(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
 	var request agent.Request
 	provider := stubProvider(func(_ context.Context, got agent.Request) (agent.AssistantMessage, error) {
 		request = got
@@ -67,9 +64,6 @@ func TestAssembleUsesYamlToolsHooksAndPrompt(t *testing.T) {
 }
 
 func TestAssembleInjectsTaskInfoIntoEveryRole(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
 	requests := make(map[string]agent.Request)
 	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
 		for _, role := range []string{"planner", "executor", "verifier"} {
@@ -138,113 +132,13 @@ func requestBlockContains(blocks []agent.Block, text string) bool {
 	return false
 }
 
-func TestAssembleInjectsOriginalUserRequestIntoRootOnly(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
-	stores := Stores{Memory: ctxgraph.NewStore()}
-	first := Task{ID: "task-1", Info: "first scoped contract", Env: Env{ID: "env-1"}}
-	second := Task{ID: "task-2", Info: "second scoped contract", Env: Env{ID: "env-2", ParentID: "env-1"}}
-	helper := Task{
-		ID:          "task-3",
-		Info:        "helper scoped contract",
-		Env:         Env{ID: "env-3", ParentID: "env-1"},
-		SpawnedFrom: first.ID,
-	}
-	if err := stores.ProjectManagerUserMessage("FIRST-REQUEST"); err != nil {
-		t.Fatal(err)
-	}
-	if err := stores.ProjectManagerTaskInfos([]Task{first}); err != nil {
-		t.Fatal(err)
-	}
-	if err := stores.ProjectManagerUserMessage("SECOND-REQUEST"); err != nil {
-		t.Fatal(err)
-	}
-	if err := stores.ProjectManagerTaskInfos([]Task{first, second, helper}); err != nil {
-		t.Fatal(err)
-	}
-	if err := stores.Memory.Fork(ManagerEnvID, first.Env.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := stores.Memory.DropSubgraph(first.Env.ID, ManagerMemorySubgraphID); err != nil {
-		t.Fatal(err)
-	}
-	if err := stores.Memory.Fork(first.Env.ID, second.Env.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := stores.Memory.Fork(first.Env.ID, helper.Env.ID); err != nil {
-		t.Fatal(err)
-	}
-
-	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
-		return agent.AssistantMessage{Content: request.WirePrompt()}, nil
-	})
-	assemble := Assemble(
-		stores,
-		provider,
-		agent.FileAgents{Planner: agent.FileAgent{
-			SystemPrompt: "planner role",
-			Hooks:        []string{"inject_subscribed_memory"},
-		}},
-		nil,
-		0,
-		nil,
-	)
-
-	tests := []struct {
-		name     string
-		task     Task
-		want     []string
-		unwanted []string
-	}{
-		{
-			name:     "first root keeps its creation request",
-			task:     first,
-			want:     []string{"[User Message] FIRST-REQUEST", "[Task Info] task-1: first scoped contract"},
-			unwanted: []string{"SECOND-REQUEST"},
-		},
-		{
-			name:     "later root uses the later request",
-			task:     second,
-			want:     []string{"[User Message] SECOND-REQUEST", "[Task Info] task-2: second scoped contract"},
-			unwanted: []string{"FIRST-REQUEST"},
-		},
-		{
-			name:     "helper receives only its scoped contract",
-			task:     helper,
-			want:     []string{"[Task Info] task-3: helper scoped contract"},
-			unwanted: []string{"FIRST-REQUEST", "SECOND-REQUEST"},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			roles, err := assemble(test.task)
-			if err != nil {
-				t.Fatal(err)
-			}
-			prompt, err := roles.Planner.Ask(context.Background(), "plan")
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, want := range test.want {
-				if !strings.Contains(prompt, want) {
-					t.Errorf("prompt does not contain %q: %q", want, prompt)
-				}
-			}
-			for _, unwanted := range test.unwanted {
-				if strings.Contains(prompt, unwanted) {
-					t.Errorf("prompt contains %q: %q", unwanted, prompt)
-				}
-			}
-		})
-	}
-}
-
 func TestAssembleDoesNotStartOrganizerForTaskPackage(t *testing.T) {
 	stores := Stores{Memory: ctxgraph.NewStore()}
-	roles, err := Assemble(
+	called := false
+	_, err := Assemble(
 		stores,
 		stubProvider(func(context.Context, agent.Request) (agent.AssistantMessage, error) {
+			called = true
 			return agent.AssistantMessage{Content: "done"}, nil
 		}),
 		agent.FileAgents{
@@ -257,15 +151,12 @@ func TestAssembleDoesNotStartOrganizerForTaskPackage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble() error = %v", err)
 	}
-	if roles.Prepare != nil {
-		t.Fatal("Assemble() configured eager organizer work for a mechanically complete task package")
+	if called {
+		t.Fatal("Assemble() called the model for a mechanically complete task package")
 	}
 }
 
 func TestAssembleBindsVFSFiles(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
 	files := vfs.NewStore(t.TempDir())
 	calls := 0
 	provider := stubProvider(func(_ context.Context, _ agent.Request) (agent.AssistantMessage, error) {
@@ -308,9 +199,6 @@ func TestAssembleBindsVFSFiles(t *testing.T) {
 }
 
 func TestGraphRunKeepsExecutorFilesButDiscardsPlannerAndVerifierFiles(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
 	files := vfs.NewStore(t.TempDir())
 	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
 		var role, path, content string
@@ -353,7 +241,7 @@ func TestGraphRunKeepsExecutorFilesButDiscardsPlannerAndVerifierFiles(t *testing
 		Verifier: agent.FileAgent{SystemPrompt: "verify role", Tools: []string{"write"}},
 	}
 	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
-	graph := newGraph()
+	graph := New()
 	task := graph.AddTask()
 
 	got, err := graph.Run(
@@ -379,180 +267,7 @@ func TestGraphRunKeepsExecutorFilesButDiscardsPlannerAndVerifierFiles(t *testing
 	}
 }
 
-func TestGraphRunJoinToPlannerDoesNotAutomaticallyExposeCandidateFiles(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
-	graph := newGraph()
-	root := graph.AddTask()
-	target := mustSpawn(t, graph, root.Planner.ID, root.Verifier.ID)
-	writer := mustSpawn(t, graph, root.Planner.ID, target.Planner.ID)
-	coordTools := graph.HelpTools(nil)
-	setTaskInfo(t, graph, target.ID, "target task")
-	setTaskInfo(t, graph, writer.ID, "writer task")
-	files := vfs.NewStore(t.TempDir())
-	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
-		input := firstUserContent(request.Messages)
-		switch {
-		case strings.Contains(request.SystemPrompt, "plan role"):
-			switch {
-			case strings.Contains(input, "writer task"):
-				return agent.AssistantMessage{Content: "writer plan"}, nil
-			case strings.Contains(input, "target task"):
-				if !hasToolResult(request.Messages) {
-					return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-						ID:        "read-joined-code",
-						Name:      "read",
-						Arguments: json.RawMessage(`{"path":"joined.txt"}`),
-					}}}, nil
-				}
-				if strings.Contains(lastToolContent(request.Messages), "from writer") {
-					return agent.AssistantMessage{}, errors.New("planner saw an unaccepted candidate file")
-				}
-				if strings.Contains(lastToolContent(request.Messages), `"discarded"`) {
-					return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-						ID: "finish-join", Name: "join",
-						Arguments: json.RawMessage(`{"action":"finish","session_id":"join:incoming:task-2:planner","reason":"candidate inspected"}`),
-					}}}, nil
-				}
-				if !strings.Contains(lastToolContent(request.Messages), `"finished":true`) {
-					return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-						ID: "discard-join", Name: "join",
-						Arguments: json.RawMessage(`{"action":"discard","session_id":"join:incoming:task-2:planner","source_ids":["task-3"],"reason":"planning evidence only"}`),
-					}}}, nil
-				}
-				return agent.AssistantMessage{Content: "target plan"}, nil
-			default:
-				return agent.AssistantMessage{Content: "root plan"}, nil
-			}
-		case strings.Contains(request.SystemPrompt, "execute role"):
-			if input == "writer plan" && !hasToolResult(request.Messages) {
-				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-					ID:        "write-joined-code",
-					Name:      "write",
-					Arguments: json.RawMessage(`{"path":"joined.txt","content":"from writer"}`),
-				}}}, nil
-			}
-			return agent.AssistantMessage{Content: "executed"}, nil
-		case strings.Contains(request.SystemPrompt, "verify role") && strings.Contains(input, "[join pending]"):
-			if !hasToolResult(request.Messages) {
-				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-					ID: "discard-child", Name: "join",
-					Arguments: json.RawMessage(`{"action":"discard","session_id":"join:incoming:task-1:verifier","source_ids":["task-2"],"reason":"candidate is not part of this isolation test"}`),
-				}}}, nil
-			}
-			if strings.Contains(lastToolContent(request.Messages), `"discarded"`) {
-				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-					ID: "finish-child-join", Name: "join",
-					Arguments: json.RawMessage(`{"action":"finish","session_id":"join:incoming:task-1:verifier","reason":"candidate disposition recorded"}`),
-				}}}, nil
-			}
-			return agent.AssistantMessage{Content: "verified"}, nil
-		default:
-			return agent.AssistantMessage{Content: "verified"}, nil
-		}
-	})
-	agents := agent.FileAgents{
-		Planner:  agent.FileAgent{SystemPrompt: "plan role", Tools: []string{"join", "read"}},
-		Executor: agent.FileAgent{SystemPrompt: "execute role", Tools: []string{"write"}},
-		Verifier: agent.FileAgent{SystemPrompt: "verify role", Tools: []string{"join"}},
-	}
-	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
-
-	if _, err := graph.Run(
-		context.Background(),
-		root.ID,
-		"request",
-		stores,
-		Assemble(stores, provider, agents, nil, 0, nil, agent.FileOverlay{NamedTools: coordTools}),
-	); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if _, err := files.View(root.Env.ID).Read("joined.txt"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("planner join leaked child implementation: %v", err)
-	}
-}
-
-func TestGraphRunJoinToVerifierUsesDisposableWorkspace(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
-	graph := newGraph()
-	root := graph.AddTask()
-	helper := mustSpawn(t, graph, root.Executor.ID, root.Verifier.ID)
-	coordTools := graph.HelpTools(nil)
-	setTaskInfo(t, graph, helper.ID, "verification helper")
-	files := vfs.NewStore(t.TempDir())
-	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
-		input := firstUserContent(request.Messages)
-		switch {
-		case strings.Contains(request.SystemPrompt, "plan role"):
-			if strings.Contains(input, "verification helper") {
-				return agent.AssistantMessage{Content: "helper plan"}, nil
-			}
-			return agent.AssistantMessage{Content: "plan"}, nil
-		case strings.Contains(request.SystemPrompt, "execute role"):
-			if input != "helper plan" || hasToolResult(request.Messages) {
-				return agent.AssistantMessage{Content: "executed"}, nil
-			}
-			return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-				ID:        "write-verification-fixture",
-				Name:      "write",
-				Arguments: json.RawMessage(`{"path":"joined.txt","content":"fixture"}`),
-			}}}, nil
-		case strings.Contains(input, "[join pending]"):
-			if !hasToolResult(request.Messages) {
-				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-					ID:        "read-verification-fixture",
-					Name:      "read",
-					Arguments: json.RawMessage(`{"path":"joined.txt"}`),
-				}}}, nil
-			}
-			if got := lastToolContent(request.Messages); strings.Contains(got, "fixture") {
-				return agent.AssistantMessage{}, fmt.Errorf("verifier saw unaccepted joined fixture: %q", got)
-			}
-			if strings.Contains(lastToolContent(request.Messages), `"discarded"`) {
-				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-					ID: "finish-join", Name: "join",
-					Arguments: json.RawMessage(`{"action":"finish","session_id":"join:incoming:task-1:verifier","reason":"evidence inspected"}`),
-				}}}, nil
-			}
-			if !strings.Contains(lastToolContent(request.Messages), `"finished":true`) {
-				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-					ID: "discard-join", Name: "join",
-					Arguments: json.RawMessage(`{"action":"discard","session_id":"join:incoming:task-1:verifier","source_ids":["task-2"],"reason":"fixture not adopted"}`),
-				}}}, nil
-			}
-			return agent.AssistantMessage{Content: "verified"}, nil
-		default:
-			return agent.AssistantMessage{Content: "verified"}, nil
-		}
-	})
-	agents := agent.FileAgents{
-		Planner:  agent.FileAgent{SystemPrompt: "plan role"},
-		Executor: agent.FileAgent{SystemPrompt: "execute role", Tools: []string{"write"}},
-		Verifier: agent.FileAgent{SystemPrompt: "verify role", Tools: []string{"join", "read"}},
-	}
-	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
-
-	if _, err := graph.Run(
-		context.Background(),
-		root.ID,
-		"request",
-		stores,
-		Assemble(stores, provider, agents, nil, 0, nil, agent.FileOverlay{NamedTools: coordTools}),
-	); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if _, err := files.View(root.Env.ID).Read("joined.txt"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("verifier join leaked helper implementation: %v", err)
-	}
-}
-
 func TestGraphRunKeepsPlannerWorkspaceAfterFailureAndDiscardsItAfterResume(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
 	files := vfs.NewStore(t.TempDir())
 	crashed := errors.New("planner crashed")
 	plannerCalls := 0
@@ -593,7 +308,7 @@ func TestGraphRunKeepsPlannerWorkspaceAfterFailureAndDiscardsItAfterResume(t *te
 		Verifier: agent.FileAgent{SystemPrompt: "verify role"},
 	}
 	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
-	graph := newGraph()
+	graph := New()
 	task := graph.AddTask()
 	assemble := Assemble(stores, provider, agents, nil, 0, nil)
 
@@ -609,9 +324,6 @@ func TestGraphRunKeepsPlannerWorkspaceAfterFailureAndDiscardsItAfterResume(t *te
 }
 
 func TestAssembleBindsExec(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
 	files := vfs.NewStore(t.TempDir())
 	sched := tmexec.New(tmexec.Config{Slots: 1})
 	calls := 0
@@ -658,9 +370,6 @@ func TestAssembleBindsExec(t *testing.T) {
 }
 
 func TestAssembleUsesLLMContextWindowForOverflowCompact(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
 	var sawOrganize bool
 	var request agent.Request
 	provider := stubProvider(func(_ context.Context, got agent.Request) (agent.AssistantMessage, error) {
@@ -704,9 +413,6 @@ func TestAssembleUsesLLMContextWindowForOverflowCompact(t *testing.T) {
 }
 
 func TestAssembleUsesYamlToolDescription(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
 	var request agent.Request
 	provider := stubProvider(func(_ context.Context, got agent.Request) (agent.AssistantMessage, error) {
 		request = got
@@ -742,9 +448,6 @@ func TestAssembleUsesYamlToolDescription(t *testing.T) {
 }
 
 func TestAssembleUsesYamlCompactPrompt(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
 	var compactPrompt string
 	provider := stubProvider(func(_ context.Context, got agent.Request) (agent.AssistantMessage, error) {
 		if got.SystemPrompt == "yaml compact" {
@@ -785,10 +488,7 @@ func TestAssembleUsesYamlCompactPrompt(t *testing.T) {
 }
 
 func TestNewManagerLoopReplacePendingMutatesGraph(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
-	graph := newGraph()
+	graph := New()
 	stores := Stores{Memory: ctxgraph.NewStore()}
 	var request, after agent.Request
 	calls := 0
@@ -800,7 +500,7 @@ func TestNewManagerLoopReplacePendingMutatesGraph(t *testing.T) {
 				ToolCalls: []agenttool.Call{{
 					ID:        "r1",
 					Name:      coordOrchestrateName,
-					Arguments: json.RawMessage(`{"action":"replace_pending","roots":[{"info":"do it"}]}`),
+					Arguments: json.RawMessage(`{"action":"replace_pending","tasks":[{"info":"do it"}]}`),
 				}},
 			}, nil
 		}
@@ -851,24 +551,19 @@ func TestNewManagerLoopReplacePendingMutatesGraph(t *testing.T) {
 }
 
 func TestNewManagerLoopPublishesSelectedCompletedTask(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
-	graph := newGraph()
+	graph := New()
 	task := graph.AddTask()
 	base := t.TempDir()
 	files := vfs.NewStore(base)
 	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
-	if err := stores.Fork("", task.Env.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := files.View(task.Env.ID).Write("selected.txt", []byte("published")); err != nil {
-		t.Fatal(err)
-	}
-	if err := files.Archive(task.Env.ID, taskSnapshotEnvID(task)); err != nil {
-		t.Fatal(err)
-	}
-	if err := graph.recordOutcome(task.ID, nil); err != nil {
+	_, err := graph.Run(context.Background(), task.ID, "publish", stores, func(task Task) (Roles, error) {
+		roles := instantRoles()
+		roles.Executor = askerFunc(func(context.Context, string) (string, error) {
+			return "created", files.View(task.Env.ID).Write("selected.txt", []byte("published"))
+		})
+		return roles, nil
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -916,9 +611,6 @@ func TestNewManagerLoopPublishesSelectedCompletedTask(t *testing.T) {
 }
 
 func TestNewManagerLoopBindsOwnMemoryEnv(t *testing.T) {
-	t.Cleanup(func() { ctxgraph.Update(ctxgraph.Copy{}) })
-	ctxgraph.Update(ctxgraph.Copy{})
-
 	store := ctxgraph.NewStore()
 	store.Save(ManagerEnvID, ctxgraph.Graph{
 		Subgraphs: []ctxgraph.Subgraph{{ID: "bound"}},
@@ -956,7 +648,7 @@ func TestNewManagerLoopBindsOwnMemoryEnv(t *testing.T) {
 	})
 
 	loop, err := NewManagerLoop(
-		newGraph(),
+		New(),
 		Stores{Memory: store},
 		provider,
 		agent.FileAgents{
@@ -982,7 +674,7 @@ func TestNewManagerLoopBindsOwnMemoryEnv(t *testing.T) {
 
 func TestNewManagerLoopNilStore(t *testing.T) {
 	_, err := NewManagerLoop(
-		newGraph(),
+		New(),
 		Stores{},
 		stubProvider(func(context.Context, agent.Request) (agent.AssistantMessage, error) {
 			return agent.AssistantMessage{Content: "done"}, nil

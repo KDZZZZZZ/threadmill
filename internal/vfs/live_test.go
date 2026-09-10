@@ -3,6 +3,7 @@ package vfs
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -176,8 +177,8 @@ func TestMaterializeChildWriteSurvivesParentDirTombstone(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	mustFork(t, store, "", "parent")
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "", "parent")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := store.View("parent").Delete("sub"); err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +225,7 @@ func TestMaterializeChildUsesFrozenSnapshot(t *testing.T) {
 	if err := store.View("parent").Write("base-mod.txt", []byte("p1")); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	if err := store.View("parent").Write("parent-after.txt", []byte("after")); err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +245,7 @@ func TestMaterializeChildUsesFrozenSnapshot(t *testing.T) {
 		t.Fatalf("live base-mod.txt = %q, want p1", got)
 	}
 	if _, err := os.Stat(filepath.Join(live, "parent-after.txt")); !os.IsNotExist(err) {
-		t.Fatalf("child live materialized parent's post-fork file: %v", err)
+		t.Fatalf("child live materialized parent's post-environment creation file: %v", err)
 	}
 }
 
@@ -397,7 +398,7 @@ func TestAbsorbPicksUpSameSizeWriteWithRestoredMtime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	got, err := store.View("child").Read("hello.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -461,7 +462,7 @@ func TestAbsorbTombsLiveDeletions(t *testing.T) {
 	}
 }
 
-func TestAbsorbKeepsDeletedDirectoriesAbsentAfterFork(t *testing.T) {
+func TestAbsorbKeepsDeletedDirectoriesAbsentAfterEnvironmentCreation(t *testing.T) {
 	t.Parallel()
 
 	base := t.TempDir()
@@ -471,14 +472,14 @@ func TestAbsorbKeepsDeletedDirectoriesAbsentAfterFork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "", "parent")
+	mustCreateEnvironment(t, store, "", "parent")
 	live, err := store.Materialize("parent")
 	if err != nil {
 		t.Fatal(err)
 	}
 	removeDirectoryDeletionFixture(t, live)
 
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	assertDirectoryTombstones(t, store, "parent")
 	childLive, err := store.Materialize("child")
 	if err != nil {
@@ -502,7 +503,7 @@ func TestAbsorbKeepsDeletedDirectoriesAbsentAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, first, "", "parent")
+	mustCreateEnvironment(t, first, "", "parent")
 	live, err := first.Materialize("parent")
 	if err != nil {
 		t.Fatal(err)
@@ -519,7 +520,7 @@ func TestAbsorbKeepsDeletedDirectoriesAbsentAfterRestart(t *testing.T) {
 	if err := restarted.Restore("parent"); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, restarted, "parent", "child")
+	mustCreateEnvironment(t, restarted, "parent", "child")
 	assertDirectoryTombstones(t, restarted, "parent")
 	childLive, err := restarted.Materialize("child")
 	if err != nil {
@@ -570,12 +571,12 @@ func TestMaterializeAppliesOverlayTombstone(t *testing.T) {
 	}
 }
 
-func TestApplyJoinSafeUpdatesMaterializedLive(t *testing.T) {
+func TestApplyInputSafeUpdatesMaterializedLive(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	mustFork(t, store, "", "parent")
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "", "parent")
+	mustCreateEnvironment(t, store, "parent", "child")
 	live, err := store.Materialize("parent")
 	if err != nil {
 		t.Fatal(err)
@@ -583,7 +584,7 @@ func TestApplyJoinSafeUpdatesMaterializedLive(t *testing.T) {
 	if err := store.View("child").Write("from-child.txt", []byte("hi")); err != nil {
 		t.Fatal(err)
 	}
-	if err := applySafeJoin(store, "child", "parent"); err != nil {
+	if err := applySafeInput(store, "child", "parent"); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(filepath.Join(live, "from-child.txt"))
@@ -595,20 +596,20 @@ func TestApplyJoinSafeUpdatesMaterializedLive(t *testing.T) {
 	}
 }
 
-func TestForkAbsorbsParentLiveIntoChildSnapshot(t *testing.T) {
+func TestEnvironmentCreationAbsorbsParentLiveIntoChildSnapshot(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	mustFork(t, store, "", "parent")
+	mustCreateEnvironment(t, store, "", "parent")
 	live, err := store.Materialize("parent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(live, "from-live.txt"), []byte("at-fork"), 0o640); err != nil {
+	if err := os.WriteFile(filepath.Join(live, "from-live.txt"), []byte("at-creation"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "parent", "child")
-	if err := os.WriteFile(filepath.Join(live, "from-live.txt"), []byte("after-fork"), 0o640); err != nil {
+	mustCreateEnvironment(t, store, "parent", "child")
+	if err := os.WriteFile(filepath.Join(live, "from-live.txt"), []byte("after-creation"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 
@@ -616,18 +617,18 @@ func TestForkAbsorbsParentLiveIntoChildSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("child missed parent live write: %v", err)
 	}
-	if string(got) != "at-fork" {
-		t.Fatalf("child from-live.txt = %q, want at-fork", got)
+	if string(got) != "at-creation" {
+		t.Fatalf("child from-live.txt = %q, want at-creation", got)
 	}
 }
 
-func TestForkPreservesExecutableBitFromParentLive(t *testing.T) {
+func TestEnvironmentCreationPreservesExecutableBitFromParentLive(t *testing.T) {
 	t.Parallel()
 
 	store, base := newTestStore(t)
 	script := filepath.Join(base, "script.sh")
 	mustWriteFile(t, script, "#!/bin/sh\nexit 0\n")
-	mustFork(t, store, "", "parent")
+	mustCreateEnvironment(t, store, "", "parent")
 	parentLive, err := store.Materialize("parent")
 	if err != nil {
 		t.Fatal(err)
@@ -640,7 +641,7 @@ func TestForkPreservesExecutableBitFromParentLive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	childLive, err := store.Materialize("child")
 	if err != nil {
 		t.Fatal(err)
@@ -679,13 +680,13 @@ func TestWritePreservesExistingExecutableBit(t *testing.T) {
 	}
 }
 
-func TestForkPreservesChmodOnly(t *testing.T) {
+func TestEnvironmentCreationPreservesChmodOnly(t *testing.T) {
 	t.Parallel()
 
 	store, base := newTestStore(t)
 	script := filepath.Join(base, "script.sh")
 	mustWriteFile(t, script, "#!/bin/sh\nexit 0\n")
-	mustFork(t, store, "", "parent")
+	mustCreateEnvironment(t, store, "", "parent")
 	parentLive, err := store.Materialize("parent")
 	if err != nil {
 		t.Fatal(err)
@@ -694,7 +695,7 @@ func TestForkPreservesChmodOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "parent", "child")
 	childLive, err := store.Materialize("child")
 	if err != nil {
 		t.Fatal(err)
@@ -708,14 +709,14 @@ func TestForkPreservesChmodOnly(t *testing.T) {
 	}
 }
 
-func TestApplyJoinSafePreservesExecutableBit(t *testing.T) {
+func TestApplyInputSafePreservesExecutableBit(t *testing.T) {
 	t.Parallel()
 
 	store, base := newTestStore(t)
 	script := filepath.Join(base, "script.sh")
 	mustWriteFile(t, script, "#!/bin/sh\nexit 0\n")
-	mustFork(t, store, "", "parent")
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "", "parent")
+	mustCreateEnvironment(t, store, "parent", "child")
 	childLive, err := store.Materialize("child")
 	if err != nil {
 		t.Fatal(err)
@@ -723,7 +724,7 @@ func TestApplyJoinSafePreservesExecutableBit(t *testing.T) {
 	if err := os.Chmod(filepath.Join(childLive, "script.sh"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := applySafeJoin(store, "child", "parent"); err != nil {
+	if err := applySafeInput(store, "child", "parent"); err != nil {
 		t.Fatal(err)
 	}
 	parentLive, err := store.Materialize("parent")
@@ -735,16 +736,16 @@ func TestApplyJoinSafePreservesExecutableBit(t *testing.T) {
 		t.Fatal(err)
 	}
 	if info.Mode().Perm()&0o111 == 0 {
-		t.Fatalf("merged script mode = %o, want executable", info.Mode().Perm())
+		t.Fatalf("input script mode = %o, want executable", info.Mode().Perm())
 	}
 }
 
-func TestApplyJoinSafeAbsorbsChildLiveWrites(t *testing.T) {
+func TestApplyInputSafeAbsorbsChildLiveWrites(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	mustFork(t, store, "", "parent")
-	mustFork(t, store, "parent", "child")
+	mustCreateEnvironment(t, store, "", "parent")
+	mustCreateEnvironment(t, store, "parent", "child")
 	live, err := store.Materialize("child")
 	if err != nil {
 		t.Fatal(err)
@@ -752,12 +753,12 @@ func TestApplyJoinSafeAbsorbsChildLiveWrites(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(live, "from-live.txt"), []byte("from-live"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := applySafeJoin(store, "child", "parent"); err != nil {
+	if err := applySafeInput(store, "child", "parent"); err != nil {
 		t.Fatal(err)
 	}
 	got, err := store.View("parent").Read("from-live.txt")
 	if err != nil {
-		t.Fatalf("merge missed child live write: %v", err)
+		t.Fatalf("input missed candidate live write: %v", err)
 	}
 	if string(got) != "from-live" {
 		t.Fatalf("parent from-live.txt = %q, want from-live", got)
@@ -791,7 +792,7 @@ func TestPublishCommitsEnvironmentToBase(t *testing.T) {
 	t.Parallel()
 
 	store, base := newTestStore(t)
-	mustFork(t, store, "", "root")
+	mustCreateEnvironment(t, store, "", "root")
 	if err := store.View("root").Write("hello.txt", []byte("changed")); err != nil {
 		t.Fatal(err)
 	}
@@ -839,7 +840,7 @@ func TestPublishCommitsLiveDirectoryDeletions(t *testing.T) {
 	base := t.TempDir()
 	seedDirectoryDeletionFixture(t, base)
 	store := NewStore(base)
-	mustFork(t, store, "", "root")
+	mustCreateEnvironment(t, store, "", "root")
 	live, err := store.Materialize("root")
 	if err != nil {
 		t.Fatal(err)
@@ -856,7 +857,7 @@ func TestPublishCountsNoopAsCommit(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	mustFork(t, store, "", "root")
+	mustCreateEnvironment(t, store, "", "root")
 	receipt, err := store.Publish("root")
 	if err != nil {
 		t.Fatal(err)
@@ -876,7 +877,7 @@ func TestFreezeRetainsSnapshotWithoutLiveWorkspace(t *testing.T) {
 	t.Parallel()
 
 	store, base := newTestStore(t)
-	mustFork(t, store, "", "root")
+	mustCreateEnvironment(t, store, "", "root")
 	live, err := store.Materialize("root")
 	if err != nil {
 		t.Fatal(err)
@@ -908,7 +909,7 @@ func TestArchiveRestoresAndPublishesAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "", "source")
+	mustCreateEnvironment(t, store, "", "source")
 	live, err := store.Materialize("source")
 	if err != nil {
 		t.Fatal(err)
@@ -958,7 +959,7 @@ func TestPublishDoesNotCommitGitMetadata(t *testing.T) {
 
 	store, base := newTestStore(t)
 	mustWriteFile(t, filepath.Join(base, ".git", "index"), "host-index")
-	mustFork(t, store, "", "root")
+	mustCreateEnvironment(t, store, "", "root")
 	live, err := store.Materialize("root")
 	if err != nil {
 		t.Fatal(err)
@@ -988,7 +989,7 @@ func TestPublishProceedsWithActiveSibling(t *testing.T) {
 	// the overlay lower directory. It renders onto the display surface instead,
 	// so a running sibling is no longer its business.
 	store, base := newTestStore(t)
-	mustFork(t, store, "", "root")
+	mustCreateEnvironment(t, store, "", "root")
 	if err := store.View("root").Write("hello.txt", []byte("changed")); err != nil {
 		t.Fatal(err)
 	}
@@ -1017,7 +1018,7 @@ func TestPublishLeavesDisplayOnlyFiles(t *testing.T) {
 	// any checkpoint, so no checkpoint may remove it; a file that did come from
 	// the project still goes when the checkpoint drops it.
 	store, base := newTestStore(t)
-	mustFork(t, store, "", "root")
+	mustCreateEnvironment(t, store, "", "root")
 	if err := store.View("root").Delete("sub/nested.txt"); err != nil {
 		t.Fatal(err)
 	}
@@ -1043,7 +1044,7 @@ func TestPublishRetainsDisplacedDisplayContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "", "root")
+	mustCreateEnvironment(t, store, "", "root")
 	if err := store.View("root").Write("hello.txt", []byte("from-checkpoint")); err != nil {
 		t.Fatal(err)
 	}
@@ -1072,11 +1073,11 @@ func TestPublishRendersAnEarlierCheckpointAgain(t *testing.T) {
 	// Checkpoints are versions to show, not a ratchet: going back is rendering
 	// the earlier one again.
 	store, base := newTestStore(t)
-	mustFork(t, store, "", "first")
+	mustCreateEnvironment(t, store, "", "first")
 	if err := store.View("first").Write("hello.txt", []byte("first")); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "first", "second")
+	mustCreateEnvironment(t, store, "first", "second")
 	if err := store.View("second").Write("hello.txt", []byte("second")); err != nil {
 		t.Fatal(err)
 	}
@@ -1110,11 +1111,11 @@ func TestPersistentPublishLeavesEnvironmentReadsAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "", "done")
+	mustCreateEnvironment(t, store, "", "done")
 	if err := store.View("done").Write("hello.txt", []byte("published")); err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, store, "", "running")
+	mustCreateEnvironment(t, store, "", "running")
 
 	if _, err := store.Publish("done"); err != nil {
 		t.Fatal(err)
@@ -1146,10 +1147,68 @@ func TestPersistentFloorRetakenWhenProjectChangedBetweenSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, restarted, "", "next")
+	mustCreateEnvironment(t, restarted, "", "next")
 	got, err := restarted.View("next").Read("hello.txt")
 	if err != nil || string(got) != "edited-between-sessions" {
 		t.Fatalf("new session read %q, %v, want the edited project", got, err)
+	}
+}
+
+func TestPersistentSnapshotsSurviveProjectReadoption(t *testing.T) {
+	t.Parallel()
+
+	for _, overlay := range []bool{false, true} {
+		t.Run(fmt.Sprintf("overlay=%t", overlay), func(t *testing.T) {
+			base := t.TempDir()
+			state := t.TempDir()
+			mustWriteFile(t, filepath.Join(base, "hello.txt"), "original")
+			mustWriteFile(t, filepath.Join(base, "removed.txt"), "old")
+			store, err := NewPersistentStoreWithOptions(base, state, Options{Overlay: overlay})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustCreateEnvironment(t, store, "", "task")
+			if err := store.View("task").Write("task.txt", []byte("retained task")); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.View("task").Delete("removed.txt"); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Archive("task", "checkpoint"); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			mustWriteFile(t, filepath.Join(base, "hello.txt"), "new project")
+			mustWriteFile(t, filepath.Join(base, "new.txt"), "new base only")
+			restarted, err := NewPersistentStoreWithOptions(base, state, Options{Overlay: overlay})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := restarted.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			for _, id := range []string{"task", "checkpoint"} {
+				if err := restarted.Restore(id); err != nil {
+					t.Fatalf("restore %s after base changed: %v", id, err)
+				}
+				assertFileBody(t, restarted.View(id), "hello.txt", "original")
+				assertFileBody(t, restarted.View(id), "task.txt", "retained task")
+			}
+			mustCreateEnvironment(t, restarted, "checkpoint", "continued")
+			assertFileBody(t, restarted.View("continued"), "hello.txt", "original")
+			for _, path := range []string{"removed.txt", "new.txt"} {
+				if _, err := restarted.View("continued").Read(path); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("old checkpoint acquired %s from new floor: %v", path, err)
+				}
+			}
+			mustCreateEnvironment(t, restarted, "", "new-task")
+			assertFileBody(t, restarted.View("new-task"), "hello.txt", "new project")
+			assertFileBody(t, restarted.View("new-task"), "new.txt", "new base only")
+		})
 	}
 }
 
@@ -1157,8 +1216,8 @@ func TestStoreDiscardDropsOverlayAndUnabsorbedLiveWrites(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	mustFork(t, store, "", "parent")
-	mustFork(t, store, "parent", "scratch")
+	mustCreateEnvironment(t, store, "", "parent")
+	mustCreateEnvironment(t, store, "parent", "scratch")
 	if err := store.View("scratch").Write("overlay.txt", []byte("overlay")); err != nil {
 		t.Fatal(err)
 	}
@@ -1182,7 +1241,7 @@ func TestStoreDiscardDropsOverlayAndUnabsorbedLiveWrites(t *testing.T) {
 		}
 	}
 
-	mustFork(t, store, "parent", "scratch")
+	mustCreateEnvironment(t, store, "parent", "scratch")
 	if _, err := store.View("scratch").Read("overlay.txt"); err == nil {
 		t.Fatalf("reused environment kept stale overlay: %v", err)
 	}
@@ -1192,7 +1251,7 @@ func TestStoreDiscardKeepsTrackingWhenRemovalFails(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
-	mustFork(t, store, "", "scratch")
+	mustCreateEnvironment(t, store, "", "scratch")
 	live, err := store.Materialize("scratch")
 	if err != nil {
 		t.Fatal(err)
@@ -1229,7 +1288,7 @@ func TestPersistentStoreRestoresReleasedEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, first, "", "env-a")
+	mustCreateEnvironment(t, first, "", "env-a")
 	if err := first.View("env-a").Write("hello.txt", []byte("task")); err != nil {
 		t.Fatal(err)
 	}
@@ -1241,7 +1300,7 @@ func TestPersistentStoreRestoresReleasedEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, second, "", "env-a")
+	mustCreateEnvironment(t, second, "", "env-a")
 	got, err := second.View("env-a").Read("hello.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -1257,85 +1316,13 @@ func TestPersistentStoreRestoresReleasedEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustFork(t, third, "", "env-a")
+	mustCreateEnvironment(t, third, "", "env-a")
 	got, err = third.View("env-a").Read("hello.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(got) != "host" {
 		t.Fatalf("discarded hello.txt = %q, want host", got)
-	}
-}
-
-func TestPersistentHandoffMovesReleasedLiveAcrossRestart(t *testing.T) {
-	t.Parallel()
-
-	base := t.TempDir()
-	mustWriteFile(t, filepath.Join(base, "hello.txt"), "host")
-	state := t.TempDir()
-
-	first, err := NewPersistentStore(base, state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustFork(t, first, "", "parent")
-	parentLive, err := first.Materialize("parent")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(parentLive, "hello.txt"), []byte("parent"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := first.Release("parent"); err != nil {
-		t.Fatal(err)
-	}
-	parentInfo, err := os.Stat(parentLive)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	restarted, err := NewPersistentStore(base, state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := restarted.Handoff("parent", "child"); err != nil {
-		t.Fatal(err)
-	}
-	childLive, err := restarted.Materialize("child")
-	if err != nil {
-		t.Fatal(err)
-	}
-	childInfo, err := os.Stat(childLive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !os.SameFile(parentInfo, childInfo) {
-		t.Fatal("Handoff copied the persistent live directory")
-	}
-	got, err := restarted.View("child").Read("hello.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "parent" {
-		t.Fatalf("child hello.txt = %q, want parent", got)
-	}
-	if _, err := os.Stat(parentLive); !os.IsNotExist(err) {
-		t.Fatalf("parent live path still exists after handoff: %v", err)
-	}
-	if got := restarted.Stats().Handoffs; got != 1 {
-		t.Fatalf("handoffs = %d, want 1", got)
-	}
-
-	retried, err := NewPersistentStore(base, state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := retried.Handoff("parent", "child"); err != nil {
-		t.Fatalf("retry Handoff() error = %v", err)
-	}
-	got, err = retried.View("child").Read("hello.txt")
-	if err != nil || string(got) != "parent" {
-		t.Fatalf("retried child hello.txt = %q, %v", got, err)
 	}
 }
 
@@ -1441,7 +1428,7 @@ func TestAbsorbExcludesGitIgnoredWorkspaceArtifacts(t *testing.T) {
 	if err := store.Absorb("env-a"); err != nil {
 		t.Fatalf("Absorb with ignored generated dependency: %v", err)
 	}
-	if err := store.Fork("env-a", "child"); err != nil {
+	if err := store.CreateEnvironment("env-a", "child"); err != nil {
 		t.Fatal(err)
 	}
 	child, err := store.Materialize("child")
@@ -1503,7 +1490,7 @@ func TestAbsorbDoesNotUseHostGlobalGitIgnore(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(live, "source.generated"), []byte("after"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Fork("parent", "child"); err != nil {
+	if err := store.CreateEnvironment("parent", "child"); err != nil {
 		t.Fatal(err)
 	}
 	got, err := store.View("child").Read("source.generated")
@@ -1544,7 +1531,7 @@ func TestAbsorbKeepsUnchangedLargeBaseFileOutsideOverlayLimit(t *testing.T) {
 	if err := os.Remove(filepath.Join(live, ".git", "objects", "pack", "base.pack")); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Fork("parent", "child"); err != nil {
+	if err := store.CreateEnvironment("parent", "child"); err != nil {
 		t.Fatal(err)
 	}
 	child, err := store.Materialize("child")

@@ -233,7 +233,7 @@ func materializedStateBlock(block Block) string {
 // attribution 为真时按来源子图分组并标注多归属，让订阅者看得见边界；
 // 为假时是扁平列表（当前生产默认）。两种渲染的成本差由评测直接对比。
 func FormatSubscribedMemory(graph ctxgraph.Graph, subgraphIDs []string, attribution bool) string {
-	return formatSubscribedNodes(graph, subgraphIDs, graph.NodesInSubgraphs(subgraphIDs), attribution)
+	return formatSubscribedNodes(graph, subgraphIDs, graph.CurrentNodesInSubgraphs(subgraphIDs), attribution)
 }
 
 func formatSubscribedNodes(

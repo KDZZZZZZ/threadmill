@@ -453,3 +453,20 @@ func TestGraphWithSubgraph(t *testing.T) {
 		t.Fatalf("graph revision = %d, want 4", regressed.Revision)
 	}
 }
+
+func TestCurrentNodesInSubgraphsExcludesReplacedFactsButRetainsHistory(t *testing.T) {
+	t.Parallel()
+	graph := Graph{Nodes: []Node{
+		{ID: "old", Statement: "cache exists", Status: NodeStatusSuperseded, SubgraphIDs: []string{"knowledge"}, SupersededBy: "current"},
+		{ID: "current", Statement: "cache removed", Status: NodeStatusAccepted, SubgraphIDs: []string{"knowledge"}},
+		{ID: "past", Statement: "source tests passed", Status: NodeStatusOutdated, SubgraphIDs: []string{"knowledge"}},
+		{ID: "uncertain", Statement: "performance may improve", Status: NodeStatusDisputed, SubgraphIDs: []string{"knowledge"}},
+	}}
+	visible := graph.CurrentNodesInSubgraphs([]string{"knowledge"})
+	if len(visible) != 2 || visible[0].ID != "current" || visible[1].ID != "uncertain" {
+		t.Fatalf("current projection presents replaced facts: %#v", visible)
+	}
+	if len(graph.NodesInSubgraphs([]string{"knowledge"})) != 4 {
+		t.Fatal("explicit history lookup lost replaced facts")
+	}
+}

@@ -49,7 +49,6 @@ func TestHiddenCostProviderForwardsStreamActivity(t *testing.T) {
 func TestAssembleRequestOmitsSubscribedMemoryWithoutHook(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	resetDefaultStore(t)
 
 	var prompt string
 	var memory string
@@ -86,7 +85,6 @@ func TestAssembleRequestOmitsSubscribedMemoryWithoutHook(t *testing.T) {
 func TestLoopLeavesHistoryUncompactedWithoutOverflowHook(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	resetDefaultStore(t)
 
 	var second Request
 	calls := 0
@@ -151,7 +149,6 @@ func TestLoopLeavesHistoryUncompactedWithoutOverflowHook(t *testing.T) {
 func TestLoopKeepsTailWithoutCommitHook(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	resetDefaultStore(t)
 
 	var secondMemory string
 	turns := 0
@@ -195,7 +192,6 @@ func TestLoopKeepsTailWithoutCommitHook(t *testing.T) {
 }
 
 func TestMemoryHooksRegistersHiddenTools(t *testing.T) {
-	resetDefaultStore(t)
 	loop, err := NewLoop(Config{
 		Provider: ignoreOrganize(func(context.Context, Request) (AssistantMessage, error) {
 			return AssistantMessage{Content: "done"}, nil
@@ -229,7 +225,6 @@ func mustAddMemoryHooks(t *testing.T, loop *Loop) {
 
 // 注入投影按 (revision, 订阅列表) memo；取消订阅后列表变了，缓存文本必须失效。
 func TestSubscribedMemoryProjectionInvalidatesOnUnsubscribe(t *testing.T) {
-	resetDefaultStore(t)
 	loop, err := NewLoop(Config{
 		Provider: ignoreOrganize(func(context.Context, Request) (AssistantMessage, error) {
 			return AssistantMessage{Content: "done"}, nil

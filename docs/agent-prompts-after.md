@@ -1,5 +1,7 @@
 # Threadmill 模型提示词设计
 
+> **历史材料（统一边迁移前）**：本页保留当时的设计、提示词或测试记录；root、spawn/join、任务树及旧输入协议不再作为当前规范。现行语义与实现边界见[统一边设计](unified-edge-design.md)，当前配置以 `threadmill.yaml` 为准。历史性能与测试结论仅适用于文中所列版本。
+
 > [`threadmill.yaml`](../threadmill.yaml) 是可配置提示词的来源；代码 fallback 和动态控制文本另列在下文。本文不复制全文，避免与实际请求漂移。
 
 ## 1. 实际输入层次

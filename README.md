@@ -42,6 +42,16 @@ threadmill -C /path/to/project -config /path/to/override.yaml
 
 `-p` 不会启动首次配置交互；用于脚本前，请先运行一次 `threadmill`，或手动写好下面的配置和凭据文件。
 
+## 任务、依赖与持久线程
+
+每个 task 都有 Planner → Executor → Verifier 三个角色。角色之间和 task 之间都使用普通的 `from → to` 依赖，不设 root 类别，也不按创建顺序串行或隐式继承上一个 task。目标读取全部前驱的固定文件与记忆快照；共同部分直接取，先处理文件差异，再整理记忆差异。只有一个前驱时直接继承，不调用记忆整理。
+
+task 可以没有向其他 task 的出边。没有任务需要它的输出时，它的运行或等待不会阻塞无关任务。持久 task 完成一轮后进入 `idle`，继续时保留 task ID，创建新的激活、环境和角色节点，并显式继承上一轮 verifier 输出；关闭只停止这个 task 的当前激活。多个 task 仍共享有限的模型和命令资源。
+
+任务完成、Verifier 判定与发布是三件事。Manager 通过协调工具选择 task 已提交的文件出口渲染到项目目录；发布不改变其他 task 的文件底层。项目在会话间发生变化时，新任务可使用新的只读 floor，旧快照继续引用原来的文件事实。归档在复制/reflink 后端可能保留磁盘文件；当前没有新增快照垃圾回收。
+
+升级到统一边实现时，协调图和激活进度使用版本 `1`，会拒绝旧 root/Join 状态，**没有自动转换器**。切换前保留旧状态与匹配的旧程序；需要接续旧工作时，先用旧版完成，或从人工核对后的项目状态建立新图，不能把旧 `Finished`/`Merged` 标志当成新输入已就绪。接口、恢复边界与测试入口见 [统一边设计](docs/unified-edge-design.md)。
+
 ## 配置分层
 
 提示词、Agent、工具和执行配置已经内置在二进制中，普通使用不再要求项目根目录存在 `threadmill.yaml`。模型设置按以下顺序覆盖，越靠后优先级越高：
@@ -144,7 +154,7 @@ namespace，把项目的规范绝对路径映射到当前 VFS live，然后在�
 | `agents.manager.system_prompt` | manager | 用户对话、协调图编排与最终快照选择 | 直接回答/建 task 的边界、完整期望图、帮助请求、报告审计、发布后收尾 |
 | `agents.planner.system_prompt` | planner | 在一次性工作区调查并产出执行计划 | 项目约束、事实/假设、执行图、验证和风险；一次性 VFS 文件 delta/实现不保留，外部副作用不回滚且仍受授权约束 |
 | `agents.executor.system_prompt` | executor | 在隔离工作区实施任务 | 目标优先级、最小改动、真实工具结果、验证、授权和结果报告 |
-| `agents.verifier.system_prompt` | verifier | 在一次性工作区独立验收 | PASS/FAIL/INCONCLUSIVE、逐项证据；只裁定 Executor 基线，临时 VFS 改动不持久 |
+| `agents.verifier.system_prompt` | verifier | 在一次性工作区独立验收 | PASS/FAIL/INCONCLUSIVE、逐项证据；依据准备好的输入独立验收，临时 VFS 实验不持久 |
 | `agents.subgraph_organizer.system_prompt` | subgraph organizer | 选择并挂接记忆节点 | 查询数据边界、搜索范围、最小集合和目标子图 |
 
-运行时还会动态拼入 5 类上下文，它们不是独立配置项：manager 的最新协调图；manager 专属的用户消息与 task 报告；受保护 task package（root 有创建请求与 Task Info，helper 只有自身 Task Info）；上游输出和 Join session 元数据；压缩调用中的已有记忆、可选子图和待整理对话。上游输出/继承记忆只是线索，不能给 helper 补权限。代码 fallback 与完整来源映射见 [`docs/agent-prompts-after.md`](docs/agent-prompts-after.md)。修改提示词应在固定任务集上比较成功率、工具误用、证据完整性、token、延迟和费用，不能只凭文案判断。
+运行时还会注入 manager 的最新协调图、用户消息与 task 报告、受保护的 task package、上游输出与 Input 阶段信息，以及压缩所需的已有记忆和对话。每个 task package 只包含分配给它的 Task Info 和明确关联的用户请求；创建关系和继承记忆不扩大授权。文件差异处理使用独立会话，原始候选材料不会作为正常角色的当前记忆提前注入。当前模块与接口映射见 [统一边设计](docs/unified-edge-design.md)。修改提示词应在固定任务集上比较成功率、工具误用、证据完整性、token、延迟和费用，不能只凭文案判断。

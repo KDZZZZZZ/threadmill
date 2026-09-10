@@ -155,91 +155,6 @@ func (current Graph) preservingManaged(next Graph) Graph {
 	return out
 }
 
-// mergeAdditive 以 g 为底，并入 theirs 相对 base 的节点、子图和边，Revision 加一。
-//
-// additive-only 不变量（join 回流的合同，测试在 merge_test.go 锁定）：合入只允许两件事——
-// ① 新增节点、子图和边；② 同 ID 同 statement 节点的 SubgraphIDs 归属并集（附着不算修改内容）。
-// 除归属并集外，g 中已有节点的 statement、kind、status、source_refs、creator_agent_id 和
-// superseded_by 永不被 theirs 改写：child 改 statement 会保留 g 的原节点、把 child 版本重映射成
-// 新 ID 后新增；child 改 status 直接跳过；child 的删除永不传播。已有子图的元数据（含
-// name/summary/admission/scope）同样不被覆盖，只有 g 中不存在的子图才整条追加。
-func (g Graph) mergeAdditive(fromID string, base, theirs Graph) Graph {
-	result := g.Clone()
-	remap := make(map[string]string)
-	used := make(map[string]struct{})
-	for _, node := range result.Nodes {
-		if node.ID != "" {
-			used[node.ID] = struct{}{}
-		}
-	}
-	for _, node := range theirs.Nodes {
-		if node.ID != "" {
-			used[node.ID] = struct{}{}
-		}
-	}
-
-	seen := make(map[string]struct{})
-	for _, node := range theirs.Nodes {
-		if node.ID == "" {
-			continue
-		}
-		if _, dup := seen[node.ID]; dup {
-			continue
-		}
-		seen[node.ID] = struct{}{}
-
-		oursNode, oursOK := result.nodeByID(node.ID)
-		if oursOK && oursNode.Statement == node.Statement {
-			for i := range result.Nodes {
-				if result.Nodes[i].ID != node.ID {
-					continue
-				}
-				result.Nodes[i].SubgraphIDs = unionIDs(result.Nodes[i].SubgraphIDs, node.SubgraphIDs)
-				break
-			}
-			continue
-		}
-		if baseNode, ok := base.nodeByID(node.ID); ok && baseNode.Statement == node.Statement {
-			continue
-		}
-		if oursOK {
-			newID, existed := collisionNodeID(fromID, node, result, used)
-			remap[node.ID] = newID
-			if existed {
-				continue
-			}
-			cloned := cloneNode(node)
-			cloned.ID = newID
-			result.Nodes = append(result.Nodes, cloned)
-			used[newID] = struct{}{}
-			continue
-		}
-		result.Nodes = append(result.Nodes, cloneNode(node))
-		used[node.ID] = struct{}{}
-	}
-
-	for _, subgraph := range theirs.Subgraphs {
-		if subgraph.ID == "" || hasSubgraphID(result, subgraph.ID) {
-			continue
-		}
-		result.Subgraphs = append(result.Subgraphs, subgraph)
-	}
-
-	for _, edge := range theirs.Edges {
-		if hasEdge(base, edge) {
-			continue
-		}
-		edge = rewriteEdge(edge, remap)
-		if hasEdge(result, edge) {
-			continue
-		}
-		result.Edges = append(result.Edges, edge)
-	}
-
-	result.Revision = g.Revision + 1
-	return result
-}
-
 func nextSystemNodeID(graph Graph) string {
 	for next := len(graph.Nodes) + 1; ; next++ {
 		id := fmt.Sprintf("system-%d", next)
@@ -258,26 +173,6 @@ func sameNode(a, b Node) bool {
 		a.SupersededBy == b.SupersededBy &&
 		slices.Equal(a.SubgraphIDs, b.SubgraphIDs) &&
 		slices.Equal(a.SourceRefs, b.SourceRefs)
-}
-
-func collisionNodeID(fromID string, node Node, result Graph, used map[string]struct{}) (string, bool) {
-	preferred := fromID + "-" + node.ID
-	if preferred != node.ID {
-		if existing, ok := result.nodeByID(preferred); ok {
-			if existing.Statement == node.Statement {
-				return preferred, true
-			}
-		} else {
-			return preferred, false
-		}
-	}
-	for i := 1; ; i++ {
-		id := fmt.Sprintf("mem-%d", i)
-		if _, taken := used[id]; taken {
-			continue
-		}
-		return id, false
-	}
 }
 
 func unionIDs(dst, extra []string) []string {

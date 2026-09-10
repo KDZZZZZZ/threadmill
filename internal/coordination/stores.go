@@ -2,7 +2,6 @@ package coordination
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
@@ -15,10 +14,6 @@ type Stores struct {
 	Memory *ctxgraph.Store
 	Files  *vfs.Store        // 可以为空
 	Exec   *tmexec.Scheduler // 可以为空
-}
-
-func taskSnapshotEnvID(task Task) string {
-	return task.Env.ID + ":completed"
 }
 
 // ProjectManagerUserMessage 把用户消息投影到 manager 固定子图。
@@ -44,7 +39,7 @@ func (s Stores) ProjectManagerTaskInfos(tasks []Task) error {
 			continue
 		}
 		nodes = append(nodes, taskInfoNode(task))
-		if task.SpawnedFrom != "" || hasNodeID(graph, taskUserInputNodeID(task.ID)) {
+		if hasNodeID(graph, taskUserInputNodeID(task.ID)) {
 			continue
 		}
 		user, ok := userMessageForTask(graph, task.ID)
@@ -112,13 +107,6 @@ func (s Stores) ProjectManagerTaskReport(task Task, statement string) error {
 	node := taskReportNode(task, "task-report-"+task.ID, statement)
 	node.Status = reportNodeStatus(statement)
 	return s.projectManagerNodeKeepingStatus(node)
-}
-
-// ProjectCandidateTaskReport keeps the manager informed without injecting a
-// candidate's full output into the target role; the role reads it through join.
-func (s Stores) ProjectCandidateTaskReport(child Task, output string) error {
-	statement := fmt.Sprintf("[Task Report] %s:\n%s", child.ID, output)
-	return s.ProjectManagerTaskReport(child, statement)
 }
 
 func (s Stores) projectManagerNodeKeepingStatus(node ctxgraph.Node) error {
@@ -211,21 +199,6 @@ func taskReportNode(task Task, id, statement string) ctxgraph.Node {
 		SourceRefs:     []string{"task:" + task.ID},
 		CreatorAgentID: task.Verifier.ID,
 	}
-}
-
-// Fork 把父环境复制到子环境；Files 为空时只 fork 记忆。
-func (s Stores) Fork(parentID, childID string) error {
-	if s.Memory != nil {
-		if err := s.Memory.Fork(parentID, childID); err != nil {
-			return err
-		}
-	}
-	if s.Files != nil {
-		if err := s.Files.Fork(parentID, childID); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // DiscardFiles 删除一次性文件环境及其仍在运行的命令。

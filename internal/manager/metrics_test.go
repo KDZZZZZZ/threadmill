@@ -54,7 +54,7 @@ func TestManagerMetricsAndIdleSnapshotCoverRuntimeAndSubsystems(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := mgr.Metrics()
-	if got.Pending != 0 || got.TaskRunning || got.Events.Model.Completed != 1 || got.Events.Tokens != 7 {
+	if got.Pending != 0 || got.Tasks.Running != 0 || got.Events.Model.Completed != 1 || got.Events.Tokens != 7 {
 		t.Fatalf("metrics = %#v", got)
 	}
 	if got.Events.MemoryTokens != 5 || got.Events.MemoryRetries != 1 {
@@ -128,13 +128,11 @@ func TestManagerMetricsAndIdleSnapshotCoverRuntimeAndSubsystems(t *testing.T) {
 		`"vfs_materialize_copies":`,
 		`"vfs_materialize_copy_errors":`,
 		`"vfs_materialize_copy_duration":`,
-		`"vfs_handoffs":`,
 		`"vfs_publish_attempts":`,
 		`"vfs_publish_commits":`,
 		`"vfs_publish_errors":`,
 		`"vfs_publish_cleanup_errors":`,
 		`"vfs_publish_duration":`,
-		`"memory_baselines":0`,
 		`"memory_subgraphs":`,
 		`"heap_objects":`,
 		`"gc_pause_total":`,
@@ -218,7 +216,7 @@ func TestManagerBurst100MessagesDrainsWithObservableCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := mgr.Metrics()
-	if got.Pending != 0 || got.TaskRunning || got.Events.Model.Completed != 100 || got.Events.Model.Errors != 0 {
+	if got.Pending != 0 || got.Tasks.Running != 0 || got.Events.Model.Completed != 100 || got.Events.Model.Errors != 0 {
 		t.Fatalf("metrics = %#v", got)
 	}
 	if got.Events.Tool.Completed != 0 || got.Events.Memory.Completed != 200 || got.Events.Memory.Errors != 0 {

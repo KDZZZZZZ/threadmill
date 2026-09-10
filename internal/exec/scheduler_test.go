@@ -551,7 +551,7 @@ func TestExternalSandboxUsesPerEnvironmentTemp(t *testing.T) {
 	if err != nil || reused.ExitCode != 0 {
 		t.Fatalf("second Run() in same environment = %#v, %v; temp state was not reused", reused, err)
 	}
-	if err := files.Fork("env-a", "env-b"); err != nil {
+	if err := files.CreateEnvironment("env-a", "env-b"); err != nil {
 		t.Fatal(err)
 	}
 	second, err := s.View("env-b", files).Run(context.Background(), env.Cmd{
@@ -583,7 +583,7 @@ func TestExternalSandboxReusesBuildCacheOnlyWithinEnvironment(t *testing.T) {
 	}); err != nil || result.ExitCode != 0 {
 		t.Fatalf("reuse cache = %#v, %v", result, err)
 	}
-	if err := files.Fork("env-a", "env-b"); err != nil {
+	if err := files.CreateEnvironment("env-a", "env-b"); err != nil {
 		t.Fatal(err)
 	}
 	if result, err := s.View("env-b", files).Run(context.Background(), env.Cmd{
