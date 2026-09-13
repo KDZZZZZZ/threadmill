@@ -279,3 +279,26 @@ func TestCollectorAccumulatesHiddenMemoryCacheUsage(t *testing.T) {
 		t.Fatalf("memory cache usage = %#v, want 120/100/80/10/0.8", got)
 	}
 }
+
+func TestMemoryRetryVisibleBeforeCompletionAndCountedOnce(t *testing.T) {
+	c := NewCollector()
+	ctx := t.Context()
+	c.Handle(ctx, MemoryStart("worker", "compact_memory", "compact"))
+	c.Handle(ctx, RuntimeEvent{AgentID: "worker", Kind: KindMemory, Phase: PhaseRetry, Retries: 1, CallID: "compact"})
+	if got := c.Snapshot(); got.MemoryRetries != 1 || got.Memory.Active != 1 || got.ModelRetries != 0 {
+		t.Fatalf("live memory retry missing or misattributed: %#v", got)
+	}
+	end := MemoryEnd("worker", "compact_memory", "compact", time.Now(), nil)
+	end.Retries = 1
+	c.Handle(ctx, end)
+	if got := c.Snapshot(); got.MemoryRetries != 1 || got.Memory.Active != 0 {
+		t.Fatalf("retry counted twice at end: %#v", got)
+	}
+	c.Handle(ctx, MemoryStart("worker", "compact_memory", "next"))
+	end = MemoryEnd("worker", "compact_memory", "next", time.Now(), nil)
+	end.Retries = 2
+	c.Handle(ctx, end)
+	if got := c.Snapshot().MemoryRetries; got != 3 {
+		t.Fatalf("missing end-only retries: got %d", got)
+	}
+}

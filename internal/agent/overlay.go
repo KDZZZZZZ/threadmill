@@ -38,7 +38,7 @@ func applyFileOverlay(loop *Loop, overlay FileOverlay) error {
 	if len(overlay.Tools) == 0 {
 		return nil
 	}
-	listed := overlayToolDescriptions(listedToolsLocked(loop), overlay.Tools)
+	listed := WithToolDescriptions(listedToolsLocked(loop), overlay.Tools)
 	tools, definitions, err := prepareTools(listed)
 	if err != nil {
 		return err
@@ -67,7 +67,9 @@ var (
 	_ hidden              = describedTool{}
 )
 
-func overlayToolDescriptions(tools []agenttool.Tool, catalog FileToolCatalog) []agenttool.Tool {
+// WithToolDescriptions overlays configured text on existing tools without adding
+// capabilities or replacing their schemas, implementations, or environment binding.
+func WithToolDescriptions(tools []agenttool.Tool, catalog FileToolCatalog) []agenttool.Tool {
 	if len(catalog) == 0 {
 		return tools
 	}

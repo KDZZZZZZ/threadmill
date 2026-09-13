@@ -35,6 +35,10 @@ type options struct {
 	dir        string
 	configPath string
 	message    string
+	web        bool
+	listen     string
+	webUI      string
+	webOrigin  string
 }
 
 type messageSender interface {
@@ -118,6 +122,9 @@ func Run(args []string, stdio IO) int {
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 
+	if opts.web {
+		return runWeb(ctx, opts, open, out, errOut)
+	}
 	if opts.message != "" {
 		return runPrint(ctx, stop, opts, open, out, errOut)
 	}
@@ -322,8 +329,15 @@ func parse(args []string, errOut io.Writer) (options, error) {
 		"highest-priority configuration override file",
 	)
 	fs.StringVar(&opts.message, "p", "", "send one message and exit")
+	fs.BoolVar(&opts.web, "web", false, "serve the local WebUI; open projects from the browser")
+	fs.StringVar(&opts.listen, "listen", "127.0.0.1:8787", "WebUI loopback address")
+	fs.StringVar(&opts.webUI, "web-ui", "docs/webui-demo.html", "WebUI HTML file (relative to launch directory)")
+	fs.StringVar(&opts.webOrigin, "web-origin", "", "additional exact WebUI origin behind a trusted local proxy (scheme://host[:port])")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
+	}
+	if opts.web && opts.message != "" {
+		return options{}, errors.New("-web and -p cannot be combined")
 	}
 	if opts.dir == "" {
 		wd, err := os.Getwd()

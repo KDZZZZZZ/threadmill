@@ -105,6 +105,62 @@ func TestOrganizeInputMemoryUsesFinalFilesAndOnlyDifferences(t *testing.T) {
 	}
 }
 
+func TestOrganizeInputMemoryCreatesWithoutCollidingWithHiddenCommonNodes(t *testing.T) {
+	t.Parallel()
+	common := []ctxgraph.Node{
+		{ID: "mem-1", Kind: ctxgraph.NodeKindFact, Statement: "UNRELATED_COMMON_ONE"},
+		{ID: "mem-2", Kind: ctxgraph.NodeKindFact, Statement: "UNRELATED_COMMON_TWO"},
+	}
+	first := ctxgraph.Graph{Nodes: append(append([]ctxgraph.Node{}, common...), ctxgraph.Node{
+		ID: "candidate", Kind: ctxgraph.NodeKindHypothesis, Statement: "needs investigation",
+	})}
+	calls := 0
+	provider := modelFunc(func(_ context.Context, request Request) (AssistantMessage, error) {
+		calls++
+		for _, message := range request.Messages {
+			if strings.Contains(message.Content, "UNRELATED_COMMON_") {
+				t.Fatal("unrelated common memory leaked into the organizer context")
+			}
+		}
+		if calls == 1 {
+			return AssistantMessage{ToolCalls: []agenttool.Call{{
+				ID: "create-findings", Name: "memory_apply",
+				Arguments: json.RawMessage(`{"ops":[{"action":"create","kind":"hypothesis","statement":"first finding","status":"disputed","reason":"independent question"},{"action":"create","kind":"hypothesis","statement":"second finding","reason":"another question"},{"action":"create","id":"mem-3","kind":"hypothesis","statement":"named finding","reason":"known identity"}]}`),
+			}}}, nil
+		}
+		var result struct {
+			CreatedIDs []string `json:"created_ids"`
+		}
+		last := request.Messages[len(request.Messages)-1]
+		if err := json.Unmarshal([]byte(last.Content), &result); err != nil || len(result.CreatedIDs) != 3 {
+			t.Fatalf("valid auto-ID creates failed: %s", last.Content)
+		}
+		return AssistantMessage{Content: "findings recorded"}, nil
+	})
+	result, err := OrganizeInputMemory(context.Background(), Config{Provider: provider}, InputMemoryRequest{
+		Sources: []ctxgraph.InputSource{
+			{Ref: "first", Graph: first}, {Ref: "second", Graph: ctxgraph.Graph{Nodes: common}},
+		},
+		FilesRef: "files-final",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Nodes) != 6 || !reflect.DeepEqual(result.Nodes[:2], common) {
+		t.Fatalf("findings not added independently of preserved common memory: %#v", result.Nodes)
+	}
+	findings := make(map[string]ctxgraph.Node)
+	for _, node := range result.Nodes {
+		findings[node.Statement] = node
+	}
+	if findings["first finding"].Status != ctxgraph.NodeStatusDisputed || findings["named finding"].ID != "mem-3" {
+		t.Fatalf("auto allocation changed explicit fields or identities: %#v", findings)
+	}
+	if err := result.ValidateReferences(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOrganizeInputMemoryUnsupportedFactsStayDisputed(t *testing.T) {
 	t.Parallel()
 	calls := 0

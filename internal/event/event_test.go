@@ -1,8 +1,11 @@
 package event
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -72,6 +75,43 @@ func TestModelDelta(t *testing.T) {
 	got := ModelDelta("manager", "Hel")
 	if got.Kind != KindModel || got.Phase != PhaseDelta || got.AgentID != "manager" || got.Delta != "Hel" {
 		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestReasoningDeltaStaysSeparateAndOutOfMonitoring(t *testing.T) {
+	const text = " \nfixture\t"
+	var got RuntimeEvent
+	ctx := WithReasoningDeltaSink(context.Background(), func(delta string) {
+		got = ModelReasoningDelta("manager", delta)
+	})
+	ReasoningDeltaSink(ctx)(text)
+	if got.ReasoningDelta != text || got.Delta != "" || got.Kind != KindModel || got.Phase != PhaseDelta {
+		t.Fatalf("event = %#v", got)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["reasoning_delta"] != text || decoded["delta"] != nil {
+		t.Fatalf("wire event = %s", encoded)
+	}
+	var logs bytes.Buffer
+	Monitor(slog.New(slog.NewJSONHandler(&logs, nil)))(ctx, got)
+	collector := NewCollector()
+	collector.Handle(ctx, got)
+	snapshot, err := json.Marshal(collector.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if logs.Len() != 0 || bytes.Contains(snapshot, []byte("fixture")) || bytes.Contains(snapshot, []byte("reasoning_delta")) {
+		t.Fatalf("monitor retained reasoning: logs=%s snapshot=%s", logs.Bytes(), snapshot)
+	}
+	if ReasoningDeltaSink(nil) != nil || ReasoningDeltaSink(context.Background()) != nil || DeltaSink(ctx) != nil {
+		t.Fatal("reasoning sink must be separate and absent by default")
 	}
 }
 

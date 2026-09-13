@@ -667,9 +667,7 @@ func TestRepositorySystemPromptsUseTopicalSections(t *testing.T) {
 		{"verifier", config.Agents.Verifier.SystemPrompt},
 		{"subgraph organizer", config.Agents.SubgraphOrganizer.SystemPrompt},
 	}
-	totalBytes := 0
 	for _, item := range prompts {
-		totalBytes += len(item.prompt)
 
 		lead, rest, found := strings.Cut(item.prompt, "\n\n## ")
 		if !found {
@@ -707,11 +705,7 @@ func TestRepositorySystemPromptsUseTopicalSections(t *testing.T) {
 			}
 		}
 	}
-	// Bound the complete prompt set without growing the budget for each new rule.
-	// Roles receive their own prompt; this is a suite budget, not a request limit.
-	if totalBytes > 38_500 {
-		t.Errorf("complete system prompts total %d bytes, want <= 38500", totalBytes)
-	}
+	// Token budget is measured with per-role tool schemas by the evaluation counter; UTF-8 bytes are not tokens.
 
 	// The two control prompts are a few sentences each, too short for sections.
 	// They still have to name the mechanism they drive and what must survive.
@@ -839,7 +833,7 @@ func TestRepositoryDelegationCreatesNewOwnershipBoundaries(t *testing.T) {
 		{
 			name:   "executor",
 			prompt: config.Agents.Executor.SystemPrompt,
-			wants:  []string{"设计秘密", "等价转交", "不为寻找并发而重新规划"},
+			wants:  []string{"所有权", "等价转交", "不重做已确认的上层设计"},
 		},
 	}
 	for _, check := range checks {
@@ -867,7 +861,7 @@ func TestRepositoryPromptsRecoverStallsAndShapeCacheableCommands(t *testing.T) {
 		"工作区根目录",
 		"无需 cd",
 		"read/grep/find/ls",
-		"完全相同的命令",
+		"相同命令与参数",
 		"按用途命名",
 		"语义正确优先",
 		"等待所有后代进程",
@@ -902,7 +896,7 @@ func TestRepositoryPromptsRecoverStallsAndShapeCacheableCommands(t *testing.T) {
 	for _, want := range []string{
 		"改变契约状态",
 		"区分未决假设",
-		"不为寻找并发而重新规划",
+		"不重做已确认的上层设计",
 		"僵局",
 	} {
 		if !strings.Contains(executor, want) {
@@ -919,7 +913,8 @@ func TestRepositoryPromptsCloseObservedBenchmarkLoops(t *testing.T) {
 
 	for _, want := range []string{
 		"按用途命名",
-		"项目相邻目录",
+		"$TMPDIR",
+		"不跨角色或激活继承",
 		"write/edit",
 		"heredoc",
 		"失败后继续",
@@ -952,7 +947,7 @@ func TestRepositoryPromptsCloseObservedBenchmarkLoops(t *testing.T) {
 	executor := config.Agents.Executor.SystemPrompt
 	for _, want := range []string{
 		"ready frontier 非空时",
-		"不为寻找并发而重新规划",
+		"不重做已确认的上层设计",
 		"证据账本",
 		"已覆盖契约不得重复执行等价门禁",
 	} {
@@ -1643,7 +1638,7 @@ func TestRepositoryPlannerPlanTellsExecutorToRequestHelp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	const want = "Executor 先调用 coordination_requestHelp 按 ready frontier 拆分，再开始实现"
+	const want = "Executor 先调用 coordination_requestHelp 按 ready frontier 拆分，再开始实现。"
 	if !strings.Contains(config.Agents.Planner.SystemPrompt, want) {
 		t.Errorf("planner prompt does not tell executor to request help; missing %q", want)
 	}
@@ -2432,7 +2427,7 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 	for _, want := range []string{
 		"编排并维护全局协调图",
 		"决定普通 task 的依赖、准入、去重和生命周期",
-		"planner 提案不是全局决定",
+		"请求者提案不是全局决定",
 		"普通用户消息与 `[拆分请求]` 是不同输入",
 		"普通用户消息不得触发 provide_help 动作",
 		"manager 永远不调用、也不声称调用 coordination_requestHelp",
@@ -2440,7 +2435,7 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 		"问答不介绍内部机制",
 		"workflow done 不等于验收通过",
 		"coordination_publishTask",
-		"成功前不得声称已落盘",
+		"成功前不声称已落盘",
 	} {
 		if !strings.Contains(got.Agents.Manager.SystemPrompt, want) {
 			t.Errorf("workspace manager system_prompt missing %q", want)

@@ -500,6 +500,102 @@ func TestTaskLifecycleCountsBareTaskID(t *testing.T) {
 	}
 }
 
+func TestActivationRoleEventsUpdateVisibleGraph(t *testing.T) {
+	m := apply(t, newModel(&fakeChat{}, Info{}), tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = apply(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	m = apply(t, m, weaveTickMsg{})
+	m = apply(t, m, weaveTickMsg{})
+	steps := []struct {
+		event event.RuntimeEvent
+		want  []string
+	}{
+		{event.TaskStart("baseline"), []string{"tasks 1"}},
+		{event.ModelStart("baseline:1:planner", 1, 0), []string{"◌ PLANNER", "○ EXECUTOR"}},
+		{event.ModelEnd("baseline:1:planner", "stub", time.Time{}, 0, 0, 0, nil), nil},
+		{event.ModelStart("baseline:1:executor:resume-1", 1, 0), []string{"✓ PLANNER", "◌ EXECUTOR"}},
+		{event.ModelEnd("baseline:1:executor:resume-1", "stub", time.Time{}, 0, 0, 0, errors.New("retry needed")), []string{"▲ EXECUTOR"}},
+		{event.ModelStart("baseline:1:executor:resume-2", 1, 0), []string{"◌ EXECUTOR"}},
+		{event.ModelEnd("baseline:1:executor:resume-2", "stub", time.Time{}, 0, 0, 0, nil), nil},
+		{event.ModelStart("baseline:1:verifier", 1, 0), []string{"✓ EXECUTOR", "◌ VERIFIER"}},
+		{event.ModelEnd("baseline:1:verifier", "stub", time.Time{}, 0, 0, 0, nil), nil},
+		{event.TaskEnd("baseline", "done", time.Time{}, nil), []string{"✓ PLANNER", "✓ EXECUTOR", "✓ VERIFIER", "tasks 0"}},
+	}
+	for i, step := range steps {
+		m = apply(t, m, step.event)
+		view := ansi.Strip(m.View())
+		for _, want := range step.want {
+			if !strings.Contains(view, want) {
+				t.Fatalf("step %d missing %q: %s", i, want, view)
+			}
+		}
+	}
+}
+
+func TestOrganizerActivityDoesNotCreateVisibleTasks(t *testing.T) {
+	for _, agentID := range []string{"subgraph-organizer", "service:1:subgraph-organizer", "service-1:input-organizer"} {
+		t.Run(agentID, func(t *testing.T) {
+			m := apply(t, newModel(&fakeChat{}, Info{}), tea.WindowSizeMsg{Width: 160, Height: 30})
+			m = apply(t, m, tea.KeyMsg{Type: tea.KeyTab})
+			m = apply(t, m, weaveTickMsg{})
+			m = apply(t, m, weaveTickMsg{})
+			m = apply(t, m, event.ModelStart(agentID, 1, 0))
+			view := ansi.Strip(m.View())
+			for _, want := range []string{"NO TASKS YET", "tasks 0", "MODEL " + agentID} {
+				if !strings.Contains(view, want) {
+					t.Fatalf("organizer missing %q: %s", want, view)
+				}
+			}
+			m = apply(t, m, event.TaskStart("service"))
+			view = ansi.Strip(m.View())
+			for _, want := range []string{"3 NODES", "tasks 1"} {
+				if !strings.Contains(view, want) {
+					t.Fatalf("organizer added a task, missing %q: %s", want, view)
+				}
+			}
+			m = apply(t, m, event.ModelEnd(agentID, "stub", time.Time{}, 0, 0, 0, nil))
+			m = apply(t, m, event.TaskEnd("service", "done", time.Time{}, nil))
+			if view := ansi.Strip(m.View()); !strings.Contains(view, "tasks 0") || strings.Contains(view, "ACTIVE") {
+				t.Fatalf("organizer activity did not settle: %s", view)
+			}
+		})
+	}
+}
+
+func TestPersistentActivationResetsGraphAndIgnoresOlderRoleEvents(t *testing.T) {
+	m := apply(t, newModel(&fakeChat{}, Info{}), tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = apply(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	m = apply(t, m, weaveTickMsg{})
+	m = apply(t, m, weaveTickMsg{})
+	m = apply(t, m, event.TaskStart("service"))
+	for _, role := range []string{"planner", "executor", "verifier"} {
+		id := "service:1:" + role
+		m = apply(t, m, event.ModelStart(id, 1, 0))
+		m = apply(t, m, event.ModelEnd(id, "stub", time.Time{}, 0, 0, 0, nil))
+	}
+	m = apply(t, m, event.TaskEnd("service", "idle", time.Time{}, nil))
+	m = apply(t, m, event.TaskStart("service"))
+	for _, want := range []string{"○ PLANNER", "○ EXECUTOR", "○ VERIFIER", "tasks 1"} {
+		if view := ansi.Strip(m.View()); !strings.Contains(view, want) {
+			t.Fatalf("new activation missing %q: %s", want, view)
+		}
+	}
+	m = apply(t, m, event.ModelStart("service:2:planner", 1, 0))
+	m = apply(t, m, event.ModelEnd("service:2:planner", "stub", time.Time{}, 0, 0, 0, nil))
+	// An older activation must not revive a completed role or replace this
+	// activation's activity, even when its start arrives after the new start.
+	m = apply(t, m, event.ModelStart("service:1:verifier:resume-1", 1, 0))
+	m = apply(t, m, event.ModelEnd("service:1:verifier:resume-1", "stub", time.Time{}, 0, 7, 0, errors.New("old failure")))
+	for _, want := range []string{"◌ PLANNER", "○ EXECUTOR", "○ VERIFIER", "TASK service", "token 7", "tasks 1"} {
+		if view := ansi.Strip(m.View()); !strings.Contains(view, want) {
+			t.Fatalf("old activation overwrote current state, missing %q: %s", want, view)
+		}
+	}
+	m = apply(t, m, event.TaskEnd("service", "idle", time.Time{}, nil))
+	if view := ansi.Strip(m.View()); strings.Contains(view, "ACTIVE") || !strings.Contains(view, "tasks 0") {
+		t.Fatalf("old activity leaked after completion: %s", view)
+	}
+}
+
 func TestRecoveredRoleDoesNotStayFailed(t *testing.T) {
 	m := sized(newModel(&fakeChat{}, Info{}))
 	m = apply(t, m, event.ToolStart("task-3:executor", "bash", "call-1"))

@@ -29,6 +29,9 @@ func TestOverlayMaterializeRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !first.Stats().OverlayAvailable {
+		t.Skip("store selected reflink instead of OverlayFS")
+	}
 	live, err := first.Materialize("parent")
 	if err != nil {
 		t.Fatal(err)
@@ -156,6 +159,9 @@ func TestOverlayMaterializeFallsBackAtCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !store.Stats().OverlayAvailable {
+		t.Skip("store selected reflink instead of OverlayFS")
+	}
 	t.Cleanup(func() { _ = store.Close() })
 	for _, envID := range []string{"env-a", "env-b"} {
 		if _, err := store.Materialize(envID); err != nil {
@@ -238,6 +244,9 @@ func TestFuseOverlayAbsorbUsesUpperdirDelta(t *testing.T) {
 	store, err := NewPersistentStoreWithOptions(base, state, Options{Overlay: true})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !store.Stats().OverlayAvailable {
+		t.Skip("store selected reflink instead of OverlayFS")
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	live, err := store.Materialize("parent")

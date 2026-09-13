@@ -12,10 +12,78 @@ import (
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	"github.com/KDZZZZZZ/threadmill/internal/event"
 	tmexec "github.com/KDZZZZZZ/threadmill/internal/exec"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
+
+func TestAssembleConfiguresInputStages(t *testing.T) {
+	for _, stage := range []string{"files", "memory"} {
+		for _, fails := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/error=%t", stage, fails), func(t *testing.T) {
+				metrics := event.NewCollector()
+				providerErr := errors.New("upstream unavailable")
+				provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
+					if active := metrics.Snapshot().Model.Active; active != 1 {
+						t.Errorf("input stage has %d visible model requests while provider is running, want 1", active)
+					}
+					name := "input"
+					if stage == "memory" {
+						name = "memory_apply"
+						for _, tool := range request.Tools {
+							if !strings.HasPrefix(tool.Name, "memory_") {
+								t.Errorf("input organizer received non-memory capability %q", tool.Name)
+							}
+						}
+					}
+					if got := toolDescription(request.Tools, name); got != "configured "+name+" protocol" {
+						t.Errorf("%s description = %q; configured protocol did not reach input stage", name, got)
+					}
+					if fails {
+						return agent.AssistantMessage{}, providerErr
+					}
+					return agent.AssistantMessage{Content: "done"}, nil
+				})
+				roles, err := Assemble(
+					Stores{Memory: ctxgraph.NewStore()}, provider, agent.FileAgents{},
+					[]agenttool.Tool{inputTool{}}, 0, nil,
+					agent.FileOverlay{
+						Events: event.NewBus(metrics.Handle),
+						Tools: agent.FileToolCatalog{
+							"input":        {Description: "configured input protocol"},
+							"memory_apply": {Description: "configured memory_apply protocol"},
+							"bash":         {Description: "file-stage command protocol"},
+						},
+					},
+				)(Task{ID: "task-1", Env: Env{ID: "env-1"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if stage == "files" {
+					err = roles.ResolveInput(context.Background(), Node{ID: "task-1:1:planner"}, InputProgress{
+						ID: "input-1", TargetID: "draft", Phase: "files",
+					})
+				} else {
+					_, err = roles.OrganizeMemory(context.Background(), agent.InputMemoryRequest{
+						FilesRef: "fixed-files",
+						Sources: []ctxgraph.InputSource{
+							{Ref: "a", Graph: ctxgraph.Graph{Nodes: []ctxgraph.Node{{ID: "claim", Statement: "candidate"}}}},
+							{Ref: "b"},
+						},
+					})
+				}
+				if fails && !errors.Is(err, providerErr) || !fails && err != nil {
+					t.Fatalf("input stage error = %v, fails = %t", err, fails)
+				}
+				got := metrics.Snapshot().Model
+				if got.Started != 1 || got.Completed != 1 || got.Active != 0 || (got.Errors == 1) != fails {
+					t.Fatalf("input stage model lifecycle = %+v, fails = %t", got, fails)
+				}
+			})
+		}
+	}
+}
 
 func TestAssembleUsesYamlToolsHooksAndPrompt(t *testing.T) {
 	var request agent.Request

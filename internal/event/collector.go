@@ -172,6 +172,7 @@ type modelFlight struct {
 	started   time.Time
 	lastDelta time.Time
 	deltaSeen bool
+	retries   uint64
 }
 
 // Collector 同步、无 I/O 地聚合 RuntimeEvent；可直接注册到 Bus。
@@ -298,12 +299,15 @@ func (c *Collector) Handle(_ context.Context, ev RuntimeEvent) {
 			}
 		}
 		if ev.Kind == KindMemory {
+			flight := c.memoryFlights[ev.AgentID]
 			delete(c.memoryFlights, ev.AgentID)
 			c.memoryTokens += uint64(max(ev.Tokens, 0))
 			c.memoryInputTokens += uint64(max(ev.InputTokens, 0))
 			c.memoryCachedTokens += uint64(max(ev.CachedTokens, 0))
 			c.memoryCacheWriteTokens += uint64(max(ev.CacheWriteTokens, 0))
-			c.memoryRetries += uint64(max(ev.Retries, 0))
+			if total := uint64(max(ev.Retries, 0)); total > flight.retries {
+				c.memoryRetries += total - flight.retries
+			}
 			if ev.MemoryOrganized {
 				c.memoryOrganizerRuns++
 				c.memoryOrganizerCandidates += uint64(max(ev.MemoryCandidates, 0))
@@ -316,6 +320,12 @@ func (c *Collector) Handle(_ context.Context, ev RuntimeEvent) {
 	case PhaseRetry:
 		if ev.Kind == KindModel {
 			c.modelRetries++
+		}
+		if ev.Kind == KindMemory {
+			c.memoryRetries++
+			flight := c.memoryFlights[ev.AgentID]
+			flight.retries++
+			c.memoryFlights[ev.AgentID] = flight
 		}
 	}
 }

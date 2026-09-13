@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,7 +49,7 @@ func nextWeaveFrame() tea.Cmd {
 func (m *model) handleRuntimeEvent(ev event.RuntimeEvent) tea.Cmd {
 	wasBusy := m.busy()
 	changed := m.applyEvent(ev)
-	taskID, _ := splitTaskAgent(ev.AgentID)
+	taskID, _, _ := splitTaskAgent(ev.AgentID)
 	var cmd tea.Cmd
 	if changed && managerTextDelta(ev) {
 		if m.mode == viewChat && !m.framePending {
@@ -70,8 +71,10 @@ func (m *model) handleRuntimeEvent(ev event.RuntimeEvent) tea.Cmd {
 
 func (m *model) applyEvent(ev event.RuntimeEvent) bool {
 	changed := false
-	m.observeTask(ev)
-	m.observeActivity(ev)
+	current := m.observeTask(ev)
+	if current || ev.Phase == event.PhaseEnd {
+		m.observeActivity(ev)
+	}
 	switch {
 	case ev.Kind == event.KindModel && ev.Phase == event.PhaseStart && ev.AgentID == "manager":
 		m.streamed = nil
@@ -155,32 +158,49 @@ func (m *model) applyEvent(ev event.RuntimeEvent) bool {
 	if ev.Kind == event.KindModel && ev.Phase == event.PhaseEnd && ev.Tokens > 0 {
 		m.tokens += ev.Tokens
 	}
+	inflightID := ev.AgentID
+	if taskID, role, activation := splitTaskAgent(ev.AgentID); role != "" {
+		inflightID = taskView{id: taskID, activation: activation}.roleID(role)
+	}
 	switch ev.Phase {
 	case event.PhaseStart:
-		m.inflight[ev.AgentID]++
+		if current {
+			m.inflight[inflightID]++
+		}
 	case event.PhaseEnd:
-		m.inflight[ev.AgentID]--
-		if m.inflight[ev.AgentID] <= 0 {
-			delete(m.inflight, ev.AgentID)
+		m.inflight[inflightID]--
+		if m.inflight[inflightID] <= 0 {
+			delete(m.inflight, inflightID)
 		}
 	}
 	return changed
 }
 
-func (m *model) observeTask(ev event.RuntimeEvent) {
-	taskID, role := splitTaskAgent(ev.AgentID)
-	if taskID == "" {
-		return
+func (m *model) observeTask(ev event.RuntimeEvent) bool {
+	taskID, role, activation := splitTaskAgent(ev.AgentID)
+	if taskID == "" || (role == "" && ev.Kind != event.KindTask) {
+		return true
 	}
 	task, ok := m.tasks[taskID]
-	if !ok {
+	if role != "" && activation < task.activation {
+		return false
+	}
+	if ev.Kind == event.KindTask && ev.Phase == event.PhaseStart && task.outcome == "idle" {
+		// Task lifecycle events carry only the task ID. Continue advances an
+		// idle task; role events supply the authoritative activation number.
+		activation = task.activation + 1
+	}
+	if !ok || activation > task.activation {
 		task = taskView{
 			id:         taskID,
+			activation: activation,
 			outcome:    "active",
 			seenRoles:  map[string]bool{},
 			failedRole: map[string]bool{},
 		}
-		m.taskOrder = append(m.taskOrder, taskID)
+		if !ok {
+			m.taskOrder = append(m.taskOrder, taskID)
+		}
 	}
 	if role != "" {
 		task.seenRoles[role] = true
@@ -199,6 +219,7 @@ func (m *model) observeTask(ev event.RuntimeEvent) {
 		}
 	}
 	m.tasks[taskID] = task
+	return true
 }
 
 func (m *model) observeActivity(ev event.RuntimeEvent) {
@@ -254,16 +275,22 @@ func eventAgent(ev event.RuntimeEvent) string {
 	return sanitizeText(ev.AgentID)
 }
 
-func splitTaskAgent(agentID string) (taskID, role string) {
-	if !strings.HasPrefix(agentID, "task-") {
-		return "", ""
+func splitTaskAgent(agentID string) (taskID, role string, activation uint64) {
+	if agentID == "" || agentID == "manager" {
+		return "", "", 0
 	}
 	taskID, role, _ = strings.Cut(agentID, ":")
+	if raw, rest, ok := strings.Cut(role, ":"); ok {
+		if n, err := strconv.ParseUint(raw, 10, 64); err == nil && n > 0 {
+			activation, role = n, rest
+		}
+	}
+	role, _, _ = strings.Cut(role, ":")
 	switch role {
 	case "", "planner", "executor", "verifier":
-		return taskID, role
+		return taskID, role, activation
 	default:
-		return taskID, ""
+		return "", "", 0
 	}
 }
 

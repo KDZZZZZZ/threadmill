@@ -23,6 +23,7 @@ func (transport transport) postStream(ctx context.Context, payload any, sink fun
 
 	replayable := event.ReplayableDeltas(ctx)
 	activitySink := event.DeltaActivitySink(ctx)
+	reasoningSink := event.ReasoningDeltaSink(ctx)
 	retries := 0
 	for {
 		response, err := transport.do(ctx, body, "text/event-stream", &retries)
@@ -30,23 +31,41 @@ func (transport transport) postStream(ctx context.Context, payload any, sink fun
 			return createResponseResponse{}, err
 		}
 		delivered := false
-		var buffered []string
-		result, readErr := readResponseStream(response.Body, func(delta string) {
-			if replayable {
-				buffered = append(buffered, delta)
-				return
+		type bufferedDelta struct {
+			text string
+			sink func(string)
+		}
+		var buffered []bufferedDelta
+		forward := func(target func(string)) func(string) {
+			if target == nil {
+				return nil
 			}
-			delivered = sink != nil
-			if sink != nil {
-				sink(delta)
+			return func(delta string) {
+				if ctx.Err() != nil {
+					return
+				}
+				if replayable {
+					buffered = append(buffered, bufferedDelta{delta, target})
+					return
+				}
+				delivered = true
+				target(delta)
 			}
-		}, activitySink)
+		}
+		result, readErr := readResponseStream(response.Body, forward(sink), activitySink, forward(reasoningSink))
 		closeErr := response.Body.Close()
 		if readErr == nil && closeErr == nil {
+			if err := ctx.Err(); err != nil {
+				return result, err
+			}
+			if result.Status != "completed" {
+				return result, nil
+			}
 			for _, delta := range buffered {
-				if sink != nil {
-					sink(delta)
+				if err := ctx.Err(); err != nil {
+					return result, err
 				}
+				delta.sink(delta.text)
 			}
 			return result, nil
 		}
@@ -57,18 +76,21 @@ func (transport transport) postStream(ctx context.Context, payload any, sink fun
 		retryable := strings.HasPrefix(readErr.Error(), "read responses stream:") ||
 			strings.Contains(readErr.Error(), "ended without response.completed") ||
 			retryableResponseStreamError(readErr)
-		if delivered || ctx.Err() != nil || retries >= maxRequestRetries || !retryable {
+		if (delivered && event.DeltaResetSink(ctx) == nil) || ctx.Err() != nil || retries >= transport.maxRetries || !retryable {
 			return result, readErr
+		}
+		if delivered {
+			event.DeltaResetSink(ctx)()
 		}
 		retries++
 		notifyRetry(ctx, retryReasonForStreamError(readErr))
-		if err := waitRetry(ctx, transport.retryInterval); err != nil {
+		if err := waitRetry(ctx, retryDelay(response, transport.retryInterval)); err != nil {
 			return createResponseResponse{}, err
 		}
 	}
 }
 
-func readResponseStream(r io.Reader, sink func(string), activity func(bool)) (createResponseResponse, error) {
+func readResponseStream(r io.Reader, sink func(string), activity func(bool), reasoningSink func(string)) (createResponseResponse, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), maxResponseBody)
 
@@ -76,6 +98,28 @@ func readResponseStream(r io.Reader, sink func(string), activity func(bool)) (cr
 	var completed *createResponseResponse
 	completedItems := make(map[int]json.RawMessage)
 	var streamed strings.Builder
+	reasoningParts := make(map[[2]int]*strings.Builder)
+	emitReasoning := func(index [2]int, text string, complete bool) error {
+		if reasoningSink == nil || text == "" {
+			return nil
+		}
+		part := reasoningParts[index]
+		if part == nil {
+			part = &strings.Builder{}
+			reasoningParts[index] = part
+		}
+		if complete {
+			if !strings.HasPrefix(text, part.String()) {
+				return errors.New("completed reasoning text does not match streamed prefix")
+			}
+			text = text[part.Len():]
+		}
+		if text != "" {
+			part.WriteString(text)
+			reasoningSink(text)
+		}
+		return nil
+	}
 	total := 0
 	dispatch := func() error {
 		if data == "" {
@@ -87,13 +131,15 @@ func readResponseStream(r io.Reader, sink func(string), activity func(bool)) (cr
 			return errors.New("provider response exceeds 16 MiB")
 		}
 		var payload struct {
-			Type        string                  `json:"type"`
-			Code        string                  `json:"code"`
-			Message     string                  `json:"message"`
-			Delta       string                  `json:"delta"`
-			OutputIndex *int                    `json:"output_index"`
-			Item        json.RawMessage         `json:"item"`
-			Response    *createResponseResponse `json:"response"`
+			Type         string                  `json:"type"`
+			Code         string                  `json:"code"`
+			Message      string                  `json:"message"`
+			Delta        string                  `json:"delta"`
+			Text         string                  `json:"text"`
+			ContentIndex int                     `json:"content_index"`
+			OutputIndex  *int                    `json:"output_index"`
+			Item         json.RawMessage         `json:"item"`
+			Response     *createResponseResponse `json:"response"`
 			createResponseResponse
 		}
 		if err := json.Unmarshal([]byte(data), &payload); err != nil {
@@ -109,6 +155,21 @@ func readResponseStream(r io.Reader, sink func(string), activity func(bool)) (cr
 			activity(typ == "response.output_text.delta" && payload.Delta != "")
 		}
 		switch typ {
+		// The protocol distinguishes plaintext reasoning from reasoning_summary_text and encrypted_content.
+		// Source: https://developers.openai.com/api/reference/resources/responses/streaming-events#response.reasoning_text.delta
+		case "response.reasoning_text.delta", "response.reasoning_text.done":
+			index := [2]int{0, payload.ContentIndex}
+			if payload.OutputIndex != nil {
+				index[0] = *payload.OutputIndex
+			}
+			text := payload.Delta
+			complete := typ == "response.reasoning_text.done"
+			if complete {
+				text = payload.Text
+			}
+			if err := emitReasoning(index, text, complete); err != nil {
+				return err
+			}
 		case "response.output_text.delta":
 			if payload.Delta != "" {
 				streamed.WriteString(payload.Delta)
@@ -201,6 +262,24 @@ func readResponseStream(r io.Reader, sink func(string), activity func(bool)) (cr
 	if completed == nil {
 		return createResponseResponse{}, errors.New("responses stream ended without response.completed")
 	}
+	if completed.Status == "completed" && reasoningSink != nil {
+		for outputIndex, rawOutput := range completed.Output {
+			var output responseOutput
+			if err := json.Unmarshal(rawOutput, &output); err != nil {
+				return createResponseResponse{}, fmt.Errorf("decode responses output item: %w", err)
+			}
+			if output.Type != "reasoning" {
+				continue
+			}
+			for contentIndex, content := range output.Content {
+				if content.Type == "reasoning_text" {
+					if err := emitReasoning([2]int{outputIndex, contentIndex}, content.Text, true); err != nil {
+						return createResponseResponse{}, err
+					}
+				}
+			}
+		}
+	}
 	return *completed, nil
 }
 
@@ -229,13 +308,38 @@ func retryableResponseStreamError(err error) bool {
 	if !errors.As(err, &streamErr) {
 		return false
 	}
+	if rateLimitedStreamError(streamErr) {
+		return true
+	}
 	switch strings.ToLower(streamErr.code) {
-	case "server_error", "rate_limit_error", "rate_limit_exceeded", "request_timeout", "overloaded_error":
+	case "server_error", "request_timeout", "overloaded_error":
 		return true
 	case "stream_read_error":
 		return true
+	case "upstream_error":
+		message := strings.ToLower(streamErr.message)
+		return strings.HasPrefix(message, "openai stream disconnected before completion:") &&
+			strings.HasSuffix(message, "unexpected eof")
+	case "new_api_error":
+		message := strings.ToLower(streamErr.message)
+		return strings.HasPrefix(message, "no available channel for model ") ||
+			strings.HasPrefix(message, "system cpu overloaded")
 	case "":
 		return streamErr.event == "error"
+	default:
+		return false
+	}
+}
+
+func rateLimitedStreamError(err *responseStreamError) bool {
+	switch strings.ToLower(err.code) {
+	case "rate_limit_error", "rate_limit_exceeded", "gateway_concurrency_limit":
+		return true
+	case "upstream_error", "invalid_request":
+		// These gateways wrap explicit quota failures in otherwise permanent codes.
+		message := strings.ToLower(err.message)
+		return strings.Contains(message, "too many rate-limited requests") ||
+			strings.Contains(strings.ReplaceAll(message, " ", ""), "超过rpm限制")
 	default:
 		return false
 	}
@@ -244,16 +348,17 @@ func retryableResponseStreamError(err error) bool {
 func retryReasonForStreamError(err error) string {
 	var streamErr *responseStreamError
 	if errors.As(err, &streamErr) {
+		if rateLimitedStreamError(streamErr) {
+			return "stream_rate_limit"
+		}
 		switch strings.ToLower(streamErr.code) {
 		case "server_error":
 			return "stream_server_error"
-		case "rate_limit_error", "rate_limit_exceeded":
-			return "stream_rate_limit"
 		case "request_timeout":
 			return "stream_timeout"
-		case "overloaded_error":
+		case "overloaded_error", "new_api_error":
 			return "stream_overloaded"
-		case "stream_read_error":
+		case "stream_read_error", "upstream_error":
 			return "stream_read"
 		default:
 			return "stream_error"

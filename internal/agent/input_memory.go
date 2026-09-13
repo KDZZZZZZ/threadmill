@@ -21,7 +21,7 @@ type InputMemoryRequest struct {
 
 // OrganizeInputMemory returns a new memory snapshot without modifying any source
 // or live target. Empty differences bypass the organizer, including its provider.
-func OrganizeInputMemory(ctx context.Context, config Config, request InputMemoryRequest) (ctxgraph.Graph, error) {
+func OrganizeInputMemory(ctx context.Context, config Config, request InputMemoryRequest, overlay ...FileOverlay) (ctxgraph.Graph, error) {
 	if err := ctx.Err(); err != nil {
 		return ctxgraph.Graph{}, err
 	}
@@ -69,13 +69,13 @@ func OrganizeInputMemory(ctx context.Context, config Config, request InputMemory
 			hasEvidence: strings.TrimSpace(request.Evidence) != "",
 		}
 	}
-	// Keep only model settings. Caller hooks, checkpoints and tools may reference
-	// live task state, so this organizer must never inherit them.
+	// Reuse description text on the isolated memory tools. Caller hooks,
+	// checkpoints and tools may reference live state and must never be inherited.
 	organizer, err := NewLoop(Config{
 		AgentID: config.AgentID, Provider: config.Provider,
 		MaxSteps: config.MaxSteps, ContextWindow: config.ContextWindow,
 		SystemPrompt: strings.TrimSpace(config.SystemPrompt + "\n\n" + inputMemoryInstructions),
-		Events:       config.Events, Tools: listed,
+		Events:       config.Events, Tools: WithToolDescriptions(listed, firstOverlay(overlay).Tools),
 	})
 	if err != nil {
 		return ctxgraph.Graph{}, err
@@ -252,7 +252,12 @@ func (t boundedInputMemoryTool) Execute(ctx context.Context, call agenttool.Call
 		if err := json.Unmarshal(call.Arguments, &args); err != nil {
 			return agenttool.Output{}, err
 		}
-		for _, op := range args.Ops {
+		var wire struct {
+			Ops []map[string]json.RawMessage `json:"ops"`
+		}
+		var used map[string]bool
+		nextID := 1
+		for i, op := range args.Ops {
 			if op.Action != ctxgraph.NodeChangeCreate && op.Action != ctxgraph.NodeChangeUpdate && op.Action != ctxgraph.NodeChangeStatus {
 				continue
 			}
@@ -274,6 +279,38 @@ func (t boundedInputMemoryTool) Execute(ctx context.Context, call agenttool.Call
 				(!t.hasEvidence || !strings.Contains(op.Reason, t.filesRef)) {
 				return agenttool.Output{}, fmt.Errorf("input memory: accepted facts require evidence citing final files %q", t.filesRef)
 			}
+			if op.Action == ctxgraph.NodeChangeCreate && strings.TrimSpace(op.ID) == "" {
+				if used == nil {
+					// Allocation sees all reserved identities, while the model and
+					// memory tools still see only the bounded difference graph.
+					used = make(map[string]bool)
+					for _, nodes := range [][]ctxgraph.Node{t.view.input.Common.Nodes, t.view.graph.Nodes} {
+						for _, node := range nodes {
+							used[node.ID] = true
+						}
+					}
+					for _, candidate := range args.Ops {
+						if candidate.Action == ctxgraph.NodeChangeCreate {
+							used[strings.TrimSpace(candidate.ID)] = true
+						}
+					}
+					if err := json.Unmarshal(call.Arguments, &wire); err != nil {
+						return agenttool.Output{}, err
+					}
+				}
+				for {
+					id := fmt.Sprintf("mem-%d", nextID)
+					nextID++
+					if !used[id] {
+						used[id] = true
+						wire.Ops[i]["id"], _ = json.Marshal(id)
+						break
+					}
+				}
+			}
+		}
+		if used != nil {
+			call.Arguments, _ = json.Marshal(wire)
 		}
 	}
 	output, err := t.inner.Execute(ctx, call)

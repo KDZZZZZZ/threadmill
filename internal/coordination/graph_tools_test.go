@@ -71,6 +71,87 @@ func TestGraphToolsExposeSingleManagerOrchestrationTool(t *testing.T) {
 	}
 }
 
+func TestOrchestrationReceiptsKeepReferencesWithoutRepeatingReports(t *testing.T) {
+	graph := New()
+	ctx := helpContext(t, graph)
+	stores := Stores{Memory: ctxgraph.NewStore()}
+	source := graph.AddTask()
+	report := strings.Repeat("preserved evidence\n", 4096)
+	_, err := graph.Run(ctx, source.ID, "produce evidence", stores, func(Task) (Roles, error) {
+		roles := instantRoles()
+		roles.Verifier = askerFunc(func(context.Context, string) (string, error) { return report, nil })
+		return roles, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(name string, result agenttool.Output) {
+		t.Helper()
+		var receipt Snapshot
+		if err := json.Unmarshal([]byte(result.Content), &receipt); err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Content) >= len(report) {
+			t.Errorf("%s receipt repeats report bytes: receipt=%d, report=%d", name, len(result.Content), len(report))
+		}
+		stored, ok := graph.Output(source.Verifier.ID)
+		if !ok || stored.Report != report {
+			t.Fatal("canonical evidence changed when rendering receipt")
+		}
+		projection, err := graph.Snapshot().PromptProjection()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var current Snapshot
+		if err := json.Unmarshal(projection, &current); err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, output := range current.Outputs {
+			if output.Node.ID == source.Verifier.ID && output.Report == report {
+				found = true
+			}
+		}
+		if !found || len(receipt.Outputs) != len(current.Outputs) {
+			t.Fatal("current graph must retain full evidence and receipt must retain all references")
+		}
+		for i, output := range receipt.Outputs {
+			want := current.Outputs[i]
+			if output.Node != want.Node || output.FilesRef != want.FilesRef || output.MemoryRef != want.MemoryRef {
+				t.Fatalf("%s receipt changed output identity: %+v", name, output.Node)
+			}
+		}
+		t.Logf("%s: receipt=%d bytes, preserved report=%d bytes", name, len(result.Content), len(report))
+	}
+	args, _ := json.Marshal(orchestrateArgs{Action: "replace_pending", Tasks: []PendingTask{{ID: source.ID}}})
+	result, err := executeGraphTool(t, GraphTools(graph), coordOrchestrateName, string(args))
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("replace_pending", result)
+
+	requester := graph.AddTask()
+	notified := make(chan string, 1)
+	tools := graph.HelpTools(func(message string) { notified <- message })
+	done := runHelpTask(ctx, graph, requester, stores, func(task Task) (Roles, error) {
+		return requestHelpRoles(tools, task, helpCall(), nil), nil
+	})
+	message := awaitHelpMessage(t, ctx, notified)
+	result, err = provideHelpTasks(t, graph, message, PendingSubgraph{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitHelpDone(t, ctx, done)
+	// The requester may finish after the receipt; compare at the source boundary.
+	if strings.Contains(result.Content, "preserved evidence") {
+		t.Error("provide_help receipt repeats the source report")
+	}
+	stored, ok := graph.Output(source.Verifier.ID)
+	if !ok || stored.Report != report {
+		t.Fatal("provide_help modified canonical evidence")
+	}
+}
+
 func TestOrchestrateRejectsFieldsFromAnotherAction(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct{ name, args, want string }{

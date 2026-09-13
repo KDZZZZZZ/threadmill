@@ -747,10 +747,12 @@ func cloneBlob(b blob) blob {
 	return blob{data: cloneBytes(b.data), mode: b.mode}
 }
 
+// Blob payloads are owned by the store and immutable: writes replace blobs,
+// and reads copy bytes before returning them. Snapshots only need their own map.
 func cloneFiles(src map[string]blob) map[string]blob {
 	dst := make(map[string]blob, len(src))
 	for path, b := range src {
-		dst[path] = cloneBlob(b)
+		dst[path] = b
 	}
 	return dst
 }

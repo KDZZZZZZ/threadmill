@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -705,5 +706,32 @@ func TestResponsesGenerateOrdersSegmentsForPrefixCache(t *testing.T) {
 		Suffix: "pressure reminder",
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestResponsesConfiguredRetryBudget(t *testing.T) {
+	var calls atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) <= 7 {
+			w.WriteHeader(503)
+			return
+		}
+		io.WriteString(w, `{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"recovered"}]}]}`)
+	}))
+	defer s.Close()
+	cfg := testLLMConfig(t, s.URL)
+	cfg.MaxRetries = 8
+	cfg.RetryIntervalSeconds = 15
+	m, err := NewResponses(cfg, s.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.retryInterval != 15*time.Second {
+		t.Fatal("configured interval ignored")
+	}
+	m.retryInterval = time.Millisecond
+	got, err := m.Generate(t.Context(), agent.Request{Messages: []agent.Message{{Role: agent.RoleUser, Content: "hi"}}})
+	if err != nil || got.Content != "recovered" || calls.Load() != 8 {
+		t.Fatalf("calls=%d reply=%q err=%v", calls.Load(), got.Content, err)
 	}
 }

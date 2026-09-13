@@ -279,7 +279,7 @@ func (t orchestrateTool) Execute(ctx context.Context, call agenttool.Call) (agen
 		if err != nil {
 			return agenttool.Output{}, err
 		}
-		return encodeGraphJSON(snap)
+		return encodeGraphReceipt(snap, nil)
 	case "provide_help":
 		if args.TaskID != "" || args.Input != "" {
 			return agenttool.Output{}, fmt.Errorf("%s: task_id and input are not valid for provide_help", coordOrchestrateName)
@@ -298,7 +298,7 @@ func (t orchestrateTool) Execute(ctx context.Context, call agenttool.Call) (agen
 		if err != nil {
 			return agenttool.Output{}, err
 		}
-		return encodeGraphJSON(result)
+		return encodeGraphReceipt(result.Snapshot, result.Sources)
 	case "continue_task", "close_task":
 		if args.RequestID != "" || args.Tasks != nil || args.Edges != nil {
 			return agenttool.Output{}, fmt.Errorf("%s: request_id, tasks and edges are not valid for %s", coordOrchestrateName, args.Action)
@@ -340,6 +340,19 @@ func decodeGraphArgs(raw json.RawMessage, dst any) error {
 		return fmt.Errorf("decode arguments: expected one JSON value")
 	}
 	return nil
+}
+
+func encodeGraphReceipt(snapshot Snapshot, sources []helpSourceStatus) (agenttool.Output, error) {
+	// Snapshot owns this output slice. Full reports remain in the canonical
+	// graph injected before each Manager request; receipts need only references.
+	for i := range snapshot.Outputs {
+		snapshot.Outputs[i].Report = ""
+	}
+	return encodeGraphJSON(struct {
+		Snapshot
+		Sources               []helpSourceStatus `json:"sources,omitempty"`
+		ReportsInCurrentGraph bool               `json:"reports_in_current_graph"`
+	}{snapshot, sources, true})
 }
 
 func encodeGraphJSON(value any) (agenttool.Output, error) {

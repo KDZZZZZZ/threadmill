@@ -254,10 +254,16 @@ type hiddenCostProvider struct {
 	cacheWriteTokens int
 	retries          int
 	activity         func(bool)
+	onRetry          func(int, string)
 }
 
 func (p *hiddenCostProvider) Generate(ctx context.Context, request Request) (AssistantMessage, error) {
-	ctx = event.WithRetrySink(ctx, func(string) { p.retries++ })
+	ctx = event.WithRetrySink(ctx, func(reason string) {
+		p.retries++
+		if p.onRetry != nil {
+			p.onRetry(p.retries, reason)
+		}
+	})
 	if p.activity != nil {
 		ctx = event.WithDeltaActivitySink(ctx, p.activity)
 	}
@@ -304,6 +310,13 @@ func (l *Loop) execHidden(ctx context.Context, name string, args json.RawMessage
 	cost := &hiddenCostProvider{inner: transcript.Provider}
 	cost.activity = func(text bool) {
 		l.publish(ctx, event.MemoryDelta(l.agentID, name, callID, text))
+	}
+	cost.onRetry = func(retries int, reason string) {
+		l.publish(ctx, event.RuntimeEvent{
+			Time: time.Now(), AgentID: l.agentID, Kind: event.KindMemory,
+			Phase: event.PhaseRetry, Name: name, CallID: callID,
+			Retries: retries, RetryReason: reason,
+		})
 	}
 	transcript.Provider = cost
 	ctx = WithTranscript(ctx, transcript)

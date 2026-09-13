@@ -31,7 +31,7 @@ func NewResponses(config LLMConfig, client *http.Client) (*Responses, error) {
 }
 
 // Generate 调用 Responses API，并转换文本及函数调用。
-// ctx 上挂了 DeltaSink 时走 SSE（stream=true），否则走一次性 JSON。
+// ctx 上挂了文本、推理或仅活动回调时走 SSE，否则走一次性 JSON。
 // 协议来源：https://platform.openai.com/docs/api-reference/responses/create
 func (provider *Responses) Generate(ctx context.Context, request agent.Request) (agent.AssistantMessage, error) {
 	payload, err := provider.buildRequest(request)
@@ -40,7 +40,7 @@ func (provider *Responses) Generate(ctx context.Context, request agent.Request) 
 	}
 	sink := event.DeltaSink(ctx)
 	var response createResponseResponse
-	if sink != nil {
+	if sink != nil || event.ReasoningDeltaSink(ctx) != nil || event.DeltaActivitySink(ctx) != nil {
 		payload.Stream = true
 		response, err = provider.postStream(ctx, payload, sink)
 	} else {

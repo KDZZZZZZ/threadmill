@@ -689,11 +689,11 @@ func underHostMount(root, abs string) bool {
 }
 
 func workspaceRel(root, abs string) string {
+	if abs == root {
+		return "."
+	}
 	if root == "/" {
 		return strings.TrimPrefix(abs, "/")
-	}
-	if abs == root {
-		return ""
 	}
 	return strings.TrimPrefix(abs, root+"/")
 }

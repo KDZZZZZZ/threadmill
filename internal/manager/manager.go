@@ -480,10 +480,15 @@ func (s *Manager) hooks(session context.Context) agent.Hooks {
 		},
 		AfterAssistant: []agent.AfterAssistantHook{
 			func(_ context.Context, message agent.AssistantMessage) error {
-				if len(message.ToolCalls) > 0 || message.Content == "" || s.output == nil {
+				if len(message.ToolCalls) > 0 {
 					return nil
 				}
-				s.emitOutput(message.Content)
+				if message.Content != "" && s.output != nil {
+					s.emitOutput(message.Content)
+				}
+				// The graph is settled for this turn. Ready tasks do not consume
+				// the manager's tail memory and need not wait for its compaction.
+				s.runReady(session)
 				return nil
 			},
 		},

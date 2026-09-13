@@ -99,7 +99,7 @@
 - `ready frontier` 恰好包含依赖已满足的单元。
 - 同一 frontier 的互补单元须写入不冲突；合规 race 候选在隔离工作区可共享写入边界，并进入同一 concurrency group。
 - 共享前置只做一次，完成后立即 fan-out。
-- 只展开当前 frontier；未知后代由子任务自己的 Planner 继续精化。
+- 只展开当前 frontier；未知后代由承担该范围的任务 Agent 根据新证据继续精化。
 - 属于同一交付的结果汇入该交付唯一的 integration owner；合流后运行组合门禁。独立 task 有自己的交付，不要求汇回创建者。
 
 自然 helper 数就是当前 frontier 中通过分派门槛的单元数。没有自然并行面时写 `split: none`，并指出“一个交付物 / 一个共享状态 / 一个验收边界”中的实际原因；不需要逐轴证明，也不能用“任务小”代替边界。
@@ -128,7 +128,7 @@ Planner 只交付四段：
 3. `集成与最终门禁`：合流动作及每个 evidence recipe 可证伪的契约。
 4. `未知项`：仍需 Executor 验证的假设、替代路径和未覆盖面。
 
-Executor 对当前 ready frontier 只提交一次 help 请求，不按帮助 task 分批，不改写依赖。该请求只是编排建议，不直接修改协调图。Manager 可以拒绝未通过 I1/I2/I3 的单元，但不静默替 Planner 重新设计；所有 task/edge 改图都经 `coordination_orchestrate`。未物化部分由 Executor 按同一图完成。
+三个任务角色都自主决定何时请求 Help，结果由发起者消费和综合，不要求 Planner 预先批准。Executor 沿用已确认的上层契约；合流或新证据出现后，按剩余承诺、所需能力、知识边界、输入与验收重新判断当前 frontier，一次提交同批 ready 单元。共享契约尚未明确时先由当前 owner 定义语义，再检查可下放的实现；定义契约不等于亲自实现所有消费者。Verifier 可以组织独立取证并保留裁决。Manager 可以拒绝未通过 I1/I2/I3 的单元，但不静默改写请求；所有 task/edge 改图都经 `coordination_orchestrate`。未物化部分由请求者继续完成。
 
 ## 5. 按任务类型选门禁
 

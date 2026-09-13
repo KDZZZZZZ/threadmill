@@ -95,12 +95,14 @@ type ExecCacheConfig struct {
 
 // LLMConfig 配置一个 OpenAI-compatible Responses API Provider。
 type LLMConfig struct {
-	Provider      string `yaml:"provider"`
-	BaseURL       string `yaml:"base_url"`
-	ProxyURL      string `yaml:"proxy_url"`
-	Credential    string `yaml:"credential"`
-	Model         string `yaml:"model"`
-	ContextWindow int    `yaml:"context_window"`
+	Provider             string `yaml:"provider"`
+	BaseURL              string `yaml:"base_url"`
+	ProxyURL             string `yaml:"proxy_url"`
+	Credential           string `yaml:"credential"`
+	Model                string `yaml:"model"`
+	ContextWindow        int    `yaml:"context_window"`
+	MaxRetries           int    `yaml:"max_retries"`            // 0 keeps the default retry budget.
+	RetryIntervalSeconds int    `yaml:"retry_interval_seconds"` // 0 keeps the default delay.
 }
 
 // LoadConfig 从 root/threadmill.yaml 读取并严格校验配置。
@@ -426,6 +428,9 @@ func (c ExecCacheConfig) validate() error {
 
 // validate 拒绝缺失字段和不能安全构造请求地址的配置。
 func (config LLMConfig) validate() error {
+	if config.MaxRetries < 0 || config.MaxRetries > 1000 || config.RetryIntervalSeconds < 0 || config.RetryIntervalSeconds > 3600 {
+		return fmt.Errorf("%w: llm retry budget must be 0..1000 and interval 0..3600 seconds", ErrInvalidConfig)
+	}
 	if strings.TrimSpace(config.Provider) != config.Provider ||
 		strings.TrimSpace(config.BaseURL) != config.BaseURL ||
 		strings.TrimSpace(config.ProxyURL) != config.ProxyURL ||

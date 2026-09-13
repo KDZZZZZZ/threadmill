@@ -23,7 +23,8 @@ type Key struct {
 }
 
 func (k Key) index() string {
-	sum := sha256.Sum256([]byte("tmcmd1\n" + k.Command + "\n" + k.Backend + "\n" + k.EnvHash))
+	// v1 entries may omit root-directory dependencies and cannot be trusted.
+	sum := sha256.Sum256([]byte("tmcmd2\n" + k.Command + "\n" + k.Backend + "\n" + k.EnvHash))
 	return hex.EncodeToString(sum[:])
 }
 

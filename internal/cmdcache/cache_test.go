@@ -1,6 +1,8 @@
 package cmdcache
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -33,6 +35,25 @@ func observation(reads map[string]ReadKind, writes ...string) Observation {
 }
 
 var testKey = Key{Command: "go build -o app ./cmd/app", Backend: "bwrap", EnvHash: "env"}
+
+func TestCacheDoesNotReplayEntriesWithoutRootDirectoryTracking(t *testing.T) {
+	cache := newCache(t, Config{})
+	live := t.TempDir()
+	key := Key{Command: "ls -1", Backend: "bwrap", EnvHash: "env"}
+	legacyHash := sha256.Sum256([]byte("tmcmd1\nls -1\nbwrap\nenv"))
+	legacyDir := filepath.Join(cache.dir, "index", fmt.Sprintf("%x", legacyHash))
+	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{"command":"ls -1","backend":"bwrap","env_hash":"env","reads":{},"output":"old.txt\n"}`
+	if err := os.WriteFile(filepath.Join(legacyDir, "legacy.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := cache.Lookup(live, key)
+	if err != nil || entry != nil {
+		t.Fatalf("unsafe legacy entry reused: %+v, %v", entry, err)
+	}
+}
 
 // 两个 agent 的依赖文件版本一致就该复用，哪怕它们的工作区不是同一个目录。
 func TestCacheHitAcrossEnvironments(t *testing.T) {

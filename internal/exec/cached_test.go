@@ -47,6 +47,34 @@ func baseRepo(t *testing.T) string {
 	return base
 }
 
+func TestCachedRootListingIncludesFilesAddedByAnotherAgent(t *testing.T) {
+	sched, cache := newCachedScheduler(t, Config{Slots: 1})
+	files := vfs.NewStore(baseRepo(t))
+	command := env.Cmd{Command: "ls -1"}
+	first, err := sched.View("agent-a", files).Run(t.Context(), command)
+	if err != nil || first.ExitCode != 0 {
+		t.Fatalf("first listing = %+v, %v", first, err)
+	}
+	if cache.Stats().Stores == 0 {
+		t.Fatal("first listing was not cached")
+	}
+	if err := files.View("agent-b").Write("new.txt", []byte("new file\n")); err != nil {
+		t.Fatal(err)
+	}
+	second, err := sched.View("agent-b", files).Run(t.Context(), command)
+	if err != nil || second.ExitCode != 0 || !strings.Contains(second.Output, "new.txt\n") {
+		t.Fatalf("listing after adding file = %+v, %v", second, err)
+	}
+	started := sched.Stats().Started
+	third, err := sched.View("agent-b", files).Run(t.Context(), command)
+	if err != nil || third.ExitCode != 0 || third.Output != second.Output {
+		t.Fatalf("unchanged listing = %+v, %v", third, err)
+	}
+	if sched.Stats().Started != started {
+		t.Fatal("unchanged directory listing should reuse its new cached result")
+	}
+}
+
 // 这是整个特性的核心断言：两个 agent 从同一基线分叉，各自改了互不相干的
 // 文件，同一条命令必须能复用彼此的执行结果和产物，而且命中的那次完全不占
 // 执行槽位。

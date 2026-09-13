@@ -573,6 +573,9 @@ func (p eventProvider) Generate(ctx context.Context, request Request) (Assistant
 	ctx = event.WithDeltaSink(ctx, func(delta string) {
 		p.loop.publish(ctx, event.ModelDelta(p.loop.agentID, delta))
 	})
+	ctx = event.WithReasoningDeltaSink(ctx, func(delta string) {
+		p.loop.publish(ctx, event.ModelReasoningDelta(p.loop.agentID, delta))
+	})
 	p.loop.publish(ctx, event.ModelStart(p.loop.agentID, len(request.Messages), len(request.Tools)))
 	started := time.Now()
 	message, err := p.inner.Generate(ctx, request)

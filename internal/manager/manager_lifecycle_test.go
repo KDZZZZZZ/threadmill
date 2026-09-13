@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -210,4 +211,63 @@ func TestManagerPersistentTaskDoesNotBlockForegroundLifecycle(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestManagerStartsReadyTasksBeforeTailMemoryCompletes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	tailStarted := make(chan struct{})
+	releaseTail := make(chan struct{})
+	taskStarted := make(chan struct{}, 2)
+	created := false
+	var tailOnce sync.Once
+	mgr, err := Open(ctx, Options{
+		Root: t.TempDir(), File: loadRepoConfig(t),
+		Provider: stubProvider(func(ctx context.Context, request agent.Request) (agent.AssistantMessage, error) {
+			switch {
+			case strings.Contains(request.SystemPrompt, "你是记忆压缩器"):
+				tailOnce.Do(func() {
+					close(tailStarted)
+					select {
+					case <-releaseTail:
+					case <-ctx.Done():
+					}
+				})
+				return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
+			case strings.Contains(request.SystemPrompt, "你是 manager"):
+				if created {
+					return agent.AssistantMessage{Content: "accepted"}, nil
+				}
+				created = true
+				return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
+					ID: "create-ready", Name: "coordination_orchestrate",
+					Arguments: json.RawMessage(`{"action":"replace_pending","tasks":[{"info":"first independent task"},{"info":"second independent task"}],"edges":[]}`),
+				}}}, nil
+			case strings.Contains(request.SystemPrompt, "你是 planner"):
+				taskStarted <- struct{}{}
+				<-ctx.Done()
+				return agent.AssistantMessage{}, ctx.Err()
+			}
+			return agent.AssistantMessage{Content: "done"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { cancel(); mgr.Close() }()
+	mgr.Send("run both")
+	select {
+	case <-tailStarted:
+	case <-ctx.Done():
+		t.Fatal("tail memory did not start")
+	}
+	for range 2 {
+		select {
+		case <-taskStarted:
+		case <-ctx.Done():
+			t.Fatal("ready task waited for unrelated manager tail memory")
+		}
+	}
+	close(releaseTail)
 }

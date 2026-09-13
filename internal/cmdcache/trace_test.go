@@ -47,6 +47,21 @@ func TestParseTraceRecordsDirectoryOpen(t *testing.T) {
 	}
 }
 
+func TestParseTraceRecordsWorkspaceRootDirectory(t *testing.T) {
+	for _, root := range []string{"/", "/workspace"} {
+		t.Run(root, func(t *testing.T) {
+			trace := `1 openat(AT_FDCWD<` + root + `>, ".", O_RDONLY|O_CLOEXEC|O_DIRECTORY) = 3<` + root + `>`
+			obs, err := ParseTrace(strings.NewReader(trace+"\n"), root, "/tmp", traceLimit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind, ok := obs.Reads["."]; !ok || kind != ReadDir || obs.Incomplete {
+				t.Fatalf("root directory dependency missing: %+v", obs)
+			}
+		})
+	}
+}
+
 // 命令自己产出的中间文件不是依赖：首次触碰是写就不能进读集，
 // 否则读集里会记下产物的执行后内容，任何环境都无法匹配。
 func TestParseTraceExcludesSelfWrittenFileFromReads(t *testing.T) {

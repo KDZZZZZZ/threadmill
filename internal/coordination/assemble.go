@@ -8,6 +8,7 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
 	"github.com/KDZZZZZZ/threadmill/internal/env"
+	"github.com/KDZZZZZZ/threadmill/internal/event"
 	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
@@ -77,6 +78,10 @@ func Assemble(
 	checkpoints agent.CheckpointStore,
 	overlay ...agent.FileOverlay,
 ) AssembleFunc {
+	var events *event.Bus
+	if len(overlay) > 0 {
+		events = overlay[0].Events
+	}
 	return func(task Task) (Roles, error) {
 		if stores.Memory == nil {
 			return Roles{}, ErrNilStore
@@ -119,7 +124,8 @@ func Assemble(
 					AgentID: task.Env.ID + ":input-organizer", Provider: provider,
 					ContextWindow: contextWindow, MaxSteps: organizer.MaxSteps,
 					SystemPrompt: organizer.SystemPrompt,
-				}, request)
+					Events:       events,
+				}, request, overlay...)
 			},
 		}
 		var inputTool agenttool.Tool
@@ -136,9 +142,13 @@ func Assemble(
 		if inputTool != nil {
 			roles.ResolveInput = func(ctx context.Context, node Node, input InputProgress) error {
 				tools := append(agenttool.FileTools(), agenttool.Bash(), inputTool)
+				if len(overlay) > 0 {
+					tools = agent.WithToolDescriptions(tools, overlay[0].Tools)
+				}
 				loop, err := agent.NewLoop(agent.Config{
 					AgentID: node.ID, Provider: provider, Tools: tools, ContextWindow: contextWindow,
 					MaxSteps:     agents.Executor.MaxSteps,
+					Events:       events,
 					SystemPrompt: "只处理本次固定来源的文件差异。共同文件已经直接使用。用 input 查看和选择差异，必要时编辑、验证当前草稿；为未采纳的候选注明原因，完成后调用 input finish。不得执行原任务、整理记忆或把候选报告当作当前事实。文件处理完成后立即结束。",
 				})
 				if err != nil {

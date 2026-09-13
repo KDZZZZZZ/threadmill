@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +30,7 @@ type transport struct {
 	apiKey        string
 	model         string
 	retryInterval time.Duration
+	maxRetries    int
 }
 
 // newTransport 校验协议类型并构造对应 API 端点。
@@ -58,6 +60,13 @@ func newTransport(
 		return transport{}, err
 	}
 
+	maxRetries, retryInterval := maxRequestRetries, defaultRetryInterval
+	if config.MaxRetries > 0 {
+		maxRetries = config.MaxRetries
+	}
+	if config.RetryIntervalSeconds > 0 {
+		retryInterval = time.Duration(config.RetryIntervalSeconds) * time.Second
+	}
 	baseURL, _ := url.Parse(config.BaseURL)
 	baseURL.Path = strings.TrimRight(baseURL.Path, "/") + endpointPath
 	baseURL.RawPath = ""
@@ -66,7 +75,8 @@ func newTransport(
 		endpoint:      baseURL.String(),
 		apiKey:        strings.TrimSpace(apiKey),
 		model:         config.Model,
-		retryInterval: defaultRetryInterval,
+		retryInterval: retryInterval,
+		maxRetries:    maxRetries,
 	}, nil
 }
 
@@ -127,12 +137,12 @@ func (transport transport) post(ctx context.Context, payload any, output any) er
 			closeErr = fmt.Errorf("close provider response: %w", closeErr)
 		}
 		if responseErr := errors.Join(readErr, closeErr); responseErr != nil {
-			if ctx.Err() != nil || retries >= maxRequestRetries {
+			if ctx.Err() != nil || retries >= transport.maxRetries {
 				return responseErr
 			}
 			retries++
 			notifyRetry(ctx, "response_read")
-			if err := waitRetry(ctx, transport.retryInterval); err != nil {
+			if err := waitRetry(ctx, retryDelay(response, transport.retryInterval)); err != nil {
 				return err
 			}
 			continue
@@ -173,7 +183,7 @@ func (transport transport) do(ctx context.Context, body []byte, accept string, r
 		}
 		if err != nil {
 			err = fmt.Errorf("send provider request: %w", err)
-			if ctx.Err() != nil || *retries >= maxRequestRetries {
+			if ctx.Err() != nil || *retries >= transport.maxRetries {
 				return nil, err
 			}
 		} else {
@@ -187,13 +197,13 @@ func (transport transport) do(ctx context.Context, body []byte, accept string, r
 				return nil, errors.New("provider response exceeds 16 MiB")
 			}
 			err = decodeHTTPError(response.Status, responseBody)
-			if !retryableStatus(response.StatusCode) || *retries >= maxRequestRetries {
+			if !retryableStatus(response.StatusCode) || *retries >= transport.maxRetries {
 				return nil, err
 			}
 		}
 		(*retries)++
 		notifyRetry(ctx, retryReason)
-		if err := waitRetry(ctx, transport.retryInterval); err != nil {
+		if err := waitRetry(ctx, retryDelay(response, transport.retryInterval)); err != nil {
 			return nil, err
 		}
 	}
@@ -223,6 +233,23 @@ func retryableStatus(status int) bool {
 		status == http.StatusConflict ||
 		status == http.StatusTooManyRequests ||
 		status >= http.StatusInternalServerError
+}
+
+// retryDelay honors Retry-After's seconds and HTTP-date forms without shortening
+// the configured interval. See RFC 9110 section 10.2.3.
+func retryDelay(response *http.Response, minimum time.Duration) time.Duration {
+	if response == nil {
+		return minimum
+	}
+	value := strings.TrimSpace(response.Header.Get("Retry-After"))
+	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil {
+		const maxSeconds = (1<<63 - 1) / uint64(time.Second)
+		return max(minimum, time.Duration(min(seconds, maxSeconds))*time.Second)
+	}
+	if deadline, err := http.ParseTime(value); err == nil {
+		return max(minimum, time.Until(deadline))
+	}
+	return minimum
 }
 
 func waitRetry(ctx context.Context, interval time.Duration) error {

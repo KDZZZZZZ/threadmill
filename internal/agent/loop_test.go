@@ -859,13 +859,14 @@ func TestMemoryCompactDoesNotPublishModelEvents(t *testing.T) {
 			compactEvents = append(compactEvents, ev)
 		}
 	}
-	if len(compactEvents) != 2 ||
+	if len(compactEvents) != 3 ||
 		compactEvents[0].Phase != event.PhaseStart ||
-		compactEvents[1].Phase != event.PhaseEnd {
-		t.Fatalf("compact events = %#v, want start/end", compactEvents)
+		compactEvents[1].Phase != event.PhaseRetry || compactEvents[1].Retries != 1 ||
+		compactEvents[2].Phase != event.PhaseEnd {
+		t.Fatalf("compact events = %#v, want start/retry/end", compactEvents)
 	}
-	if compactEvents[1].Tokens != 13 || compactEvents[1].Retries != 1 {
-		t.Fatalf("compact end = %#v, want hidden model cost", compactEvents[1])
+	if compactEvents[2].Tokens != 13 || compactEvents[2].Retries != 1 {
+		t.Fatalf("compact end = %#v, want hidden model cost", compactEvents[2])
 	}
 }
 

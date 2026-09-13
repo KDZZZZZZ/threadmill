@@ -6,7 +6,9 @@
 
 ```mermaid
 flowchart TD
-    U[User] --> M[Manager]
+    U[User] --> UI[TUI / WebUI]
+    UI --> ADAPTER[CLI / local HTTP-SSE adapter]
+    ADAPTER --> M[Manager]
     M <-->|single orchestration tool / task reports| G[Coordination Graph]
 
     G --> P[Planner]
@@ -81,3 +83,17 @@ Solid arrows are the only allowed business dependencies. Dashed arrows are persi
 `done` means a nonpersistent activation completed successfully; a successful persistent activation becomes `idle`. Neither outcome replaces the Verifier verdict nor means its snapshot has been published. The real project changes only after a successful manager-selected publication.
 
 The project directory is a display surface, not the substrate environments read. Environments read an immutable floor cloned when the session adopts the project, so publication renders a checkpoint for the user without moving anything underneath running work. When project changes require a new floor, retained task snapshots keep the previous floor. Floor generations and copy/reflink archives currently remain on disk without a new garbage collector. Release of a running workspace is not a promise that its durable snapshot files are deleted.
+
+## WebUI 接线（2026-09-11）
+
+Human Design：按指定 demo 整理 OpenAPI、连接前后端、使用真实模型从 GUI 测评。新增 UI → adapter → Manager 的展示边界由该请求授权。adapter 只转交用户消息与控制、读取 Manager 快照和事件，不直接调度或改文件/记忆；TUI 保留原进程内接法，WebUI 复用同一 Manager API。Agent Self-Claimed：复用已有 net/http/SSE 网关与原生 HTML，不新增依赖；本地同源和有界订阅队列；具体契约见 docs/openapi.yaml。
+
+2026-09-12 Tailscale 访问：Human Design：允许 Tailscale 的 Windows 使用 WebUI。Agent Self-Claimed：使用已有 Tailscale Serve 提供 tailnet 内 HTTPS；网关仍监听loopback，以可选 `-web-origin` 精确允许代理保留的Host/Origin，并继续拒绝跨站请求。部署使用仓库外用户systemd服务，不改变Manager、调度和存储边界，不引入新的Go依赖。
+
+2026-09-12 聊天Markdown：Human Design：为GUI聊天页面实现Markdown渲染。Agent Self-Claimed：在现有UI内部打包Marked/DOMPurify固定版本，覆盖用户消息、Manager正文和任务报告；清理生成HTML、保留原始HTML为文本，按消息缓存渲染；增加离线浏览器回归页生成器。无新增模块间依赖或服务端接口，来源与许可证见docs/webui-third-party.md。
+
+2026-09-12 VFS / Manager 启动修复：VFS 快照复制映射并共享 Store 拥有的不可变 blob 字节，公开读写入口仍复制缓冲区，保留隔离语义。Manager 在没有后续工具调用的最终答复后启动现有 ready task，使执行不再等待 Manager 尾部记忆压缩；原有 AfterTurn 恢复路径、显式边、输入冻结与暂停规则保持。没有新增模块依赖或业务角色。Btrfs 在仓库外独立测试卷部署，详见 webui-iteration.md。
+
+2026-09-12 编排工具回执：replace_pending/provide_help 的展示回执省去已在当前图注入的重复报告正文，保留拓扑和引用并显式标记 reports_in_current_graph。规范图、持久化、完整报告、调度及对外 Graph API 不改变。无新增模块依赖；这是工具展示数据的去重，不是证据删除或新的调度方案。
+
+2026-09-12 输入阶段修复：文件解析循环与隔离输入 Organizer 复用配置中的工具说明，工具集合、schema、绑定与事务规则保持。输入 memory_apply 的自动编号须避开完整共同记忆、当前差异草稿及同批显式创建已占用的 ID；身份占用范围不等于模型可见范围，无关共同内容仍不进入模型或读取工具。无新增模块依赖，不修改共同节点保护、普通图分配或调度规则。

@@ -65,6 +65,7 @@ const (
 
 type taskView struct {
 	id         string
+	activation uint64
 	outcome    string
 	seenRoles  map[string]bool
 	failedRole map[string]bool
@@ -575,20 +576,17 @@ func (m model) runningTasks() int {
 		if key == "" {
 			continue
 		}
+		if _, ok := m.tasks[key]; !ok {
+			continue
+		}
 		seen[key] = struct{}{}
 	}
 	return len(seen)
 }
 
 func taskKey(agentID string) string {
-	if !strings.HasPrefix(agentID, "task-") {
-		return ""
-	}
-	i := strings.IndexByte(agentID, ':')
-	if i < 0 {
-		return agentID
-	}
-	return agentID[:i]
+	taskID, _, _ := splitTaskAgent(agentID)
+	return taskID
 }
 
 type taskNodeStatus int
@@ -602,7 +600,7 @@ const (
 )
 
 func (m model) taskRoleStatus(task taskView, role string) taskNodeStatus {
-	if m.inflight[task.id+":"+role] > 0 {
+	if m.inflight[task.roleID(role)] > 0 {
 		return taskActive
 	}
 	if task.failedRole[role] {
@@ -628,6 +626,13 @@ func (m model) taskRoleStatus(task taskView, role string) taskNodeStatus {
 		return taskActive
 	}
 	return taskDone
+}
+
+func (t taskView) roleID(role string) string {
+	if t.activation > 0 {
+		return fmt.Sprintf("%s:%d:%s", t.id, t.activation, role)
+	}
+	return t.id + ":" + role
 }
 
 // graphNodeVisual 给出节点状态符号、文字色、描边色。

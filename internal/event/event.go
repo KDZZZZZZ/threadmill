@@ -50,6 +50,7 @@ type RuntimeEvent struct {
 	Retries          int           `json:"retries,omitempty"`
 	RetryReason      string        `json:"retry_reason,omitempty"`
 	Delta            string        `json:"delta,omitempty"`
+	ReasoningDelta   string        `json:"reasoning_delta,omitempty"`
 	StreamText       bool          `json:"stream_text,omitempty"`
 	MemoryOrganized  bool          `json:"memory_organized,omitempty"`
 	MemoryCandidates int           `json:"memory_candidates,omitempty"`
@@ -236,7 +237,16 @@ func ModelDelta(agentID, delta string) RuntimeEvent {
 	}
 }
 
+// ModelReasoningDelta carries explicit provider reasoning text, separate from the answer.
+func ModelReasoningDelta(agentID, delta string) RuntimeEvent {
+	ev := ModelDelta(agentID, "")
+	ev.ReasoningDelta = delta
+	return ev
+}
+
 type deltaKey struct{}
+
+type reasoningDeltaKey struct{}
 
 type retryKey struct{}
 
@@ -258,6 +268,23 @@ func DeltaSink(ctx context.Context) func(string) {
 		return nil
 	}
 	sink, _ := ctx.Value(deltaKey{}).(func(string))
+	return sink
+}
+
+// WithReasoningDeltaSink attaches a sink for explicit plaintext reasoning, never summaries or opaque model state.
+func WithReasoningDeltaSink(ctx context.Context, sink func(string)) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, reasoningDeltaKey{}, sink)
+}
+
+// ReasoningDeltaSink returns the reasoning text sink, or nil when absent.
+func ReasoningDeltaSink(ctx context.Context) func(string) {
+	if ctx == nil {
+		return nil
+	}
+	sink, _ := ctx.Value(reasoningDeltaKey{}).(func(string))
 	return sink
 }
 
@@ -310,4 +337,17 @@ func RetrySink(ctx context.Context) func(string) {
 	}
 	sink, _ := ctx.Value(retryKey{}).(func(string))
 	return sink
+}
+
+// WithDeltaResetSink opts a presentation into withdrawing an incomplete response
+// before retry. Callers without this capability must never replay visible deltas.
+func WithDeltaResetSink(ctx context.Context, reset func()) context.Context {
+	return context.WithValue(ctx, deltaResetKey{}, reset)
+}
+
+type deltaResetKey struct{}
+
+func DeltaResetSink(ctx context.Context) func() {
+	reset, _ := ctx.Value(deltaResetKey{}).(func())
+	return reset
 }
