@@ -3,6 +3,7 @@ package coordination
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/KDZZZZZZ/threadmill/internal/agent"
@@ -86,7 +87,15 @@ func Assemble(
 		if stores.Memory == nil {
 			return Roles{}, ErrNilStore
 		}
-		team, err := agent.NewTeam(provider, contextWindow, agents, extra, overlay...)
+		taskAgents := agents
+		if !task.RealDirectory {
+			for _, role := range []*agent.FileAgent{&taskAgents.Planner, &taskAgents.Executor, &taskAgents.Verifier} {
+				role.Tools = slices.DeleteFunc(slices.Clone(role.Tools), func(name string) bool {
+					return name == coordMessageManagerName
+				})
+			}
+		}
+		team, err := agent.NewTeam(provider, contextWindow, taskAgents, extra, overlay...)
 		if err != nil {
 			return Roles{}, err
 		}
@@ -210,7 +219,7 @@ func NewManagerLoop(
 	if overlay.NamedTools == nil {
 		overlay.NamedTools = make(map[string]agenttool.Tool)
 	}
-	for name, tool := range GraphToolMap(graph, stores) {
+	for name, tool := range GraphToolMap(graph) {
 		overlay.NamedTools[name] = tool
 	}
 	loop, err := agent.NewManager(provider, contextWindow, agents, extra, overlay)

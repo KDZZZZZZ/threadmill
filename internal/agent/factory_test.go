@@ -658,7 +658,7 @@ func TestTeamBindUsesYamlPluginsAgainstEnvStore(t *testing.T) {
 }
 
 func TestFileAgentsRejectsManagerGraphToolsOnPlanner(t *testing.T) {
-	for _, toolName := range []string{coordOrchestrateToolName, coordPublishTaskToolName} {
+	for _, toolName := range []string{coordOrchestrateToolName} {
 		err := FileAgents{
 			Planner: FileAgent{Tools: []string{toolName}},
 		}.Validate()

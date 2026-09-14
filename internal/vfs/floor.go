@@ -96,6 +96,7 @@ func cloneFloor(displayDir, floor, liveRoot string) error {
 		return fmt.Errorf("vfs: create floor staging: %w", err)
 	}
 	if _, err := copyTree(source, staging); err != nil {
+		_ = os.RemoveAll(staging)
 		return fmt.Errorf("vfs: clone floor: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(floor), 0o700); err != nil {

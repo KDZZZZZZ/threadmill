@@ -62,8 +62,7 @@ func (s *Store) absorbOverlayUpper(envID, live string) (
 		// floor; its upper layer describes changes against an older floor.
 		return true, false, 0, nil
 	}
-	ignored := gitIgnoredPaths(live)
-	scan, supported, scanErr := scanUpperLayer(upper, ignored)
+	scan, supported, scanErr := scanUpperLayer(upper)
 	if scanErr != nil || !supported {
 		return true, false, scan.visited, nil
 	}
@@ -236,7 +235,7 @@ func readUpperEntry(
 	return blob{data: data, mode: mode}, true, size, nil
 }
 
-func scanUpperLayer(root string, ignored map[string]bool) (upperScan, bool, error) {
+func scanUpperLayer(root string) (upperScan, bool, error) {
 	scan := upperScan{paths: make(map[string]upperPathKind)}
 	if _, supported, err := overlayEntryMetadata(root, nil); err != nil || !supported {
 		return scan, supported, err
@@ -266,12 +265,6 @@ func scanUpperLayer(root string, ignored map[string]bool) (upperScan, bool, erro
 		}
 		if !supported {
 			return errUnsupportedUpperDelta
-		}
-		if directory, skip := ignored[rel]; skip {
-			if directory && d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
 		}
 		scan.visited++
 		switch {

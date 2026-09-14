@@ -311,6 +311,20 @@ func TestReplayReflinksArtifactsWhenSupported(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsArtifactsWithoutReflink(t *testing.T) {
+	root, err := os.MkdirTemp("/dev/shm", "threadmill-cache-test-")
+	if err != nil {
+		t.Skipf("tmpfs fixture unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	cache := newCache(t, Config{Dir: filepath.Join(root, "cache")})
+	work := filepath.Join(root, "work")
+	writeFile(t, work, "app", "binary", 0o755)
+	if _, err := cache.Store(work, testKey, observation(nil, "app"), Result{}); err == nil {
+		t.Fatal("cache copied an artifact on a filesystem without reflink")
+	}
+}
+
 func TestReplayRestoresDeletion(t *testing.T) {
 	cache := newCache(t, Config{})
 	recorded, target := t.TempDir(), t.TempDir()

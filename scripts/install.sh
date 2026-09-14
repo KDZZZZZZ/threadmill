@@ -14,6 +14,9 @@ bin_dir=$install_root/bin
 bin_path=$bin_dir/threadmill
 profile_override=${THREADMILL_PROFILE:-}
 temp_dir=
+project_probe=
+state_probe=
+path_probe=
 toolchain_stage=
 
 step() {
@@ -26,6 +29,9 @@ fail() {
 }
 
 cleanup() {
+  for probe in "$project_probe" "$state_probe" "$path_probe"; do
+    [ -z "$probe" ] || rm -rf -- "$probe"
+  done
   if [ -n "$temp_dir" ] && [ -d "$temp_dir" ]; then
     rm -rf "$temp_dir"
   fi
@@ -87,8 +93,6 @@ install_runtime_dependencies() {
   command -v bash >/dev/null 2>&1 || packages="$packages bash"
   command -v bwrap >/dev/null 2>&1 || packages="$packages bubblewrap"
   command -v git >/dev/null 2>&1 || packages="$packages git"
-  command -v fuse-overlayfs >/dev/null 2>&1 || packages="$packages fuse-overlayfs"
-  command -v fusermount3 >/dev/null 2>&1 || packages="$packages fuse3"
   [ -n "$packages" ] || return 0
 
   step "Installing runtime dependencies:$packages"
@@ -113,8 +117,6 @@ install_runtime_dependencies() {
   command -v bash >/dev/null 2>&1 || fail "bash installation did not provide the bash command"
   command -v bwrap >/dev/null 2>&1 || fail "bubblewrap installation did not provide the bwrap command"
   command -v git >/dev/null 2>&1 || fail "git installation did not provide the git command"
-  command -v fuse-overlayfs >/dev/null 2>&1 || fail "fuse-overlayfs installation did not provide the fuse-overlayfs command"
-  command -v fusermount3 >/dev/null 2>&1 || fail "fuse3 installation did not provide the fusermount3 command"
 }
 
 download() {
@@ -200,22 +202,30 @@ select_go() {
   bootstrap_go
 }
 
+# Probe the same user/PID namespaces and writable mounts used by the runner.
+# https://github.com/containers/bubblewrap/blob/main/README.md
 probe_bwrap() {
-  probe_root=$temp_dir/bwrap-root
+  probe_root=$state_probe/sandbox
   mkdir -p "$probe_root/tmp"
-  bwrap \
-    --unshare-user \
-    --unshare-pid \
-    --die-with-parent \
-    --bind "$probe_root" / \
-    --ro-bind-try /usr /usr \
-    --ro-bind-try /bin /bin \
-    --ro-bind-try /lib /lib \
-    --ro-bind-try /lib64 /lib64 \
-    --dev /dev \
-    --proc /proc \
-    --chdir / \
-    -- bash -c true >/dev/null 2>&1
+  for workspace in "$state_probe/clone" "$project_probe"; do
+    bwrap \
+      --unshare-user \
+      --unshare-pid \
+      --die-with-parent \
+      --tmpfs / \
+      --bind "$probe_root/tmp" /tmp \
+      --setenv PATH /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+      --ro-bind-try /usr /usr \
+      --ro-bind-try /bin /bin \
+      --ro-bind-try /lib /lib \
+      --ro-bind-try /lib64 /lib64 \
+      --dev /dev \
+      --proc /proc \
+      --bind "$workspace" /workspace \
+      --chdir /workspace \
+      -- bash -c 'set -eu; ./executable; printf sandbox > written; mv written renamed; rm renamed' \
+      >"$temp_dir/bwrap.log" 2>&1 || return 1
+  done
 }
 
 prepare_bwrap() {
@@ -236,8 +246,10 @@ prepare_bwrap() {
     run_as_root apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
   fi
 
-  probe_bwrap ||
+  probe_bwrap || {
+    cat "$temp_dir/bwrap.log" >&2
     fail "bwrap cannot create the required user namespace; refusing to install a command runner that cannot execute commands"
+  }
   step "Sandbox dependency ready: bwrap"
 }
 
@@ -275,6 +287,65 @@ configure_path() {
   path_action=added
 }
 
+# This runs before package/toolchain/application installation. sudo is only for
+# dependency setup: filesystem probes must run as the eventual application user.
+probe_paths() {
+  [ -z "${SUDO_USER:-}" ] || fail "run the installer as the intended Threadmill user, without sudo; it requests administrator access itself"
+  command -v cp >/dev/null 2>&1 || fail "GNU cp with --reflink=always is required"
+  project_dir=$(CDPATH= cd -- "${THREADMILL_PROJECT_DIR:-.}" && pwd -P) ||
+    fail "select an existing project with THREADMILL_PROJECT_DIR"
+  printf '%s' "$project_dir" >"$temp_dir/project-path"
+  project_id=$(file_sha256 "$temp_dir/project-path")
+  state_root="$HOME/.threadmill/projects/$project_id/vfs"
+  case "$state_root/" in
+    "$project_dir/"*) fail "project must not contain its Threadmill state directory; run the installer from your project directory" ;;
+  esac
+  step "Checking filesystem permissions and mandatory reflink for $project_dir"
+  mkdir -p "$state_root" "$bin_dir" || fail "state and installation directories must be writable by the current user"
+  state_probe=$(mktemp -d "$state_root/.preflight.XXXXXX") || fail "VFS state directory is not writable"
+  project_probe=$(mktemp -d "$project_dir/.threadmill-preflight.XXXXXX") || fail "project directory is not writable"
+  printf '#!/bin/sh\nexit 0\n' >"$project_probe/executable"
+  chmod 700 "$project_probe/executable"
+  "$project_probe/executable" || fail "project filesystem does not permit execution"
+  ln -s executable "$project_probe/link" || fail "project filesystem must support symbolic links"
+  mkdir "$state_probe/clone"
+  # A nonempty file proves CoW support even when the project starts empty.
+  # --reflink=always must fail rather than silently copy on unsupported filesystems.
+  cp --reflink=always -a -- "$project_probe/." "$state_probe/clone" ||
+    fail "reflink from project to $state_root is required; ordinary copying is disabled (use the same reflink-capable filesystem)"
+  [ "$(readlink "$state_probe/clone/link")" = executable ] || fail "VFS clone did not preserve symbolic links"
+  "$state_probe/clone/executable" || fail "VFS state filesystem does not permit execution"
+  # Detect unreadable files and nested mounts before installing anything.
+  mkdir "$state_probe/floor"
+  cp --reflink=always -a -- "$project_dir/." "$state_probe/floor" ||
+    fail "all project files must be readable and reflink-cloneable into VFS storage"
+  for writable_dir in "$bin_dir" "$install_root/toolchains" "$install_root/cache/mod" "$install_root/cache/build" "$install_root/go" "$(dirname -- "$project_dir")" "$(dirname -- "$(pick_profile)")"; do
+    mkdir -p "$writable_dir" || fail "required directory cannot be created: $writable_dir"
+    path_probe=$(mktemp -d "$writable_dir/.threadmill-preflight.XXXXXX") ||
+      fail "required directory is not writable: $writable_dir"
+    printf '#!/bin/sh\nexit 0\n' >"$path_probe/executable"
+    chmod 700 "$path_probe/executable"
+    case "$writable_dir" in
+      "$bin_dir" | "$install_root/toolchains" | "$(dirname -- "$project_dir")")
+        "$path_probe/executable" || fail "required directory does not permit execution: $writable_dir"
+        ;;
+    esac
+    mv "$path_probe/executable" "$path_probe/renamed" || fail "required directory does not permit rename: $writable_dir"
+    rm -rf -- "$path_probe"
+    path_probe=
+  done
+  profile_path=$(pick_profile)
+  if [ -e "$profile_path" ]; then
+    [ -f "$profile_path" ] && [ -w "$profile_path" ] || fail "shell profile is not a writable regular file: $profile_path"
+  fi
+  if [ -n "${GRADLE_USER_HOME:-}" ] && [ -d "$GRADLE_USER_HOME" ]; then
+    mkdir "$state_probe/gradle"
+    cp --reflink=always -a -- "$GRADLE_USER_HOME/." "$state_probe/gradle" ||
+      fail "GRADLE_USER_HOME must be reflink-cloneable into VFS storage"
+  fi
+}
+
+probe_paths
 require_admin_access
 install_runtime_dependencies
 prepare_bwrap
@@ -306,7 +377,7 @@ chmod 755 "$bin_path"
 
 configure_path
 
-step "VFS acceleration ready: fuse-overlayfs; privileged runs automatically prefer native OverlayFS"
+step "VFS ready: mandatory reflink verified; ordinary copy fallback disabled"
 
 step "Threadmill installed"
 if [ "${path_action:-already}" = added ]; then

@@ -16,7 +16,7 @@ OpenAPI 草案在 [`ui-backend.yaml`](ui-backend.yaml)。全部 HTTP/SSE 路由�
 | 渐进文本 | `OnEvent` 中 manager 的文本 delta | 单独的 SSE `ui_delta`；只影响临时展示，不作为完整历史 |
 | 运行元数据 | `Manager.Options.OnEvent` → [`event.RuntimeEvent`](../../internal/event/event.go) | SSE `runtime` 保留 kind/phase/agent_id/call_id 等元数据，去掉 Delta |
 | 指标 | [`Manager.Metrics`](../../internal/manager/metrics.go) | `GET /metrics`；含嵌套时长的全部 duration 都是整数纳秒 |
-| 已发布文件 | 发布收据 + display surface | `GET /artifacts?path=...` 只读；path 是工作区相对路径，不是 files_ref |
+| 真实目录文件 | 真实项目目录（project_task_id 标识归属） | `GET /artifacts?path=...` 只读；path 是工作区相对路径，不是 files_ref |
 | 持久 task 激活/关闭 | 用户消息 → Manager → 编排工具 | 首期只走 `POST /messages`，由 Manager 决定 continue_task/close_task；没有直接控制 Graph 的 HTTP 端点 |
 
 ## 消息、展示与事件恢复
@@ -41,7 +41,7 @@ OpenAPI 草案在 [`ui-backend.yaml`](ui-backend.yaml)。全部 HTTP/SSE 路由�
 - workspace 只能是服务端登记标识，不接受任意绝对路径；当前状态目录按规范化项目路径生成，因此同 workspace 至多一个活跃 Manager，重复创建返回 409，不声称能隔离同项目的多个并发会话。
 - Cancel 直接映射 `Manager.Cancel` 的即时布尔回执：它取消前台工作或抢占 Manager 当前轮，不关闭持久 task。持久任务的继续/关闭、编排、帮助、发布选择与验收仍通过用户消息和 Manager/agent 工具完成。
 - SSE 断线只清理该连接。显式 DELETE session 调用 `Manager.Close` 并等资源回收，会取消全部运行中的激活，包括持久 task 的当前激活；已持久化身份/快照保留，不等价于对每个 task 执行 close_task。
-- artifact 读取只针对当前 display surface，query path 支持嵌套相对路径；拒绝绝对路径、目录穿越和符号链接逃逸。它描述用户现在看到的文件，不承诺等于某个不可变快照。
+- artifact 读取只针对当前真实项目目录，query path 支持嵌套相对路径；拒绝绝对路径、目录穿越和符号链接逃逸。它描述用户现在看到的文件，不承诺等于某个不可变快照。
 
 接入顺序：先验证单进程的两条现有回调（Output + OnEvent）、Send/Cancel/Close；再实现有界重放与固定 revision 页，最后让 TUI 的 Enter/Esc/Tab 使用此适配器，Web UI 复用相同契约。验证应覆盖无 delta 时的完整回复、delta 后完整回复去重、报告与回复交错、过期游标、慢客户端及持久激活回收。
 

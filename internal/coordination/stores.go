@@ -1,7 +1,6 @@
 package coordination
 
 import (
-	"errors"
 	"strings"
 
 	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
@@ -203,12 +202,13 @@ func taskReportNode(task Task, id, statement string) ctxgraph.Node {
 
 // DiscardFiles 删除一次性文件环境及其仍在运行的命令。
 func (s Stores) DiscardFiles(envID string) error {
-	var err error
 	if s.Exec != nil {
-		err = s.Exec.Reap(envID)
+		if err := s.Exec.Reap(envID); err != nil {
+			return err
+		}
 	}
 	if s.Files == nil {
-		return err
+		return nil
 	}
-	return errors.Join(err, s.Files.Discard(envID))
+	return s.Files.Discard(envID)
 }

@@ -99,6 +99,10 @@ func (g *Graph) start(ctx context.Context, taskID, input string, stores Stores, 
 		g.mu.Unlock()
 		return nil, false, fmt.Errorf("%w: %q", ErrUnknownTask, taskID)
 	}
+	if task.RealDirectory && g.projectTaskID != task.ID && task.Outcome != OutcomeDone {
+		g.mu.Unlock()
+		return nil, false, fmt.Errorf("coordination: real directory belongs to a newer task")
+	}
 	if task.Outcome == OutcomeClosed {
 		g.mu.Unlock()
 		return nil, false, fmt.Errorf("coordination: task %s is closed", taskID)
@@ -155,6 +159,9 @@ type runner struct {
 	reportMu    sync.Mutex
 	reports     []func(Task, string, error) error
 	reported    bool
+	// Protected by graph.mu with message acceptance and the final inbox check.
+	projectNode string
+	projectSeen int
 }
 
 func (r *runner) execute(input string) {
@@ -231,7 +238,10 @@ func (r *runner) runTask(input string) (output string, err error) {
 	defer func() {
 		for _, workspace := range []string{r.task.Env.ID, r.task.Env.ID + ":" + RolePlanner, r.task.Env.ID + ":" + RoleVerifier} {
 			if r.stores.Exec != nil {
-				err = errors.Join(err, r.stores.Exec.Reap(workspace))
+				if reapErr := r.stores.Exec.Reap(workspace); reapErr != nil {
+					err = errors.Join(err, reapErr)
+					continue
+				}
 			}
 			if r.stores.Files != nil {
 				err = errors.Join(err, r.stores.Files.Release(workspace))
@@ -287,7 +297,11 @@ func (r *runner) runRole(node Node, input string) (string, error) {
 	} else if len(sources) == 1 && sources[0].Report != "" {
 		input = sources[0].Report
 	}
-	output, err := askRole(r.ctx, asker, taskInput(r.task.Info, input))
+	query := taskInput(r.task.Info, input)
+	if r.task.RealDirectory {
+		query = "[真实目录工作区] 当前 task 的文件和命令工具直接作用于真实项目目录，改动立即可见。已有内容已作为输入来源完成合入。Planner/Verifier 仍不修复实现；临时实验也会影响真实目录，必须自行清理。运行中可用 coordination_messageManager 向 manager 发送进展、问题或答复；manager 消息会在模型请求前送达。消息不改变角色职责，不是用户授权或验收结论。\n\n" + query
+	}
+	output, err := r.askProjectRole(node, asker, query)
 	if err != nil {
 		return "", err
 	}
@@ -298,7 +312,7 @@ func (r *runner) runRole(node Node, input string) (string, error) {
 	}
 	filesID := workspace
 	memory := r.stores.Memory.Load(r.task.Env.ID)
-	if node.Role != RoleExecutor && r.roles.bind != nil {
+	if node.Role != RoleExecutor && r.roles.bind != nil && !r.task.RealDirectory {
 		ready = r.latestRoleInput(node.ID, ready)
 		filesID = ready.FilesRef
 		memory, err = r.qualifyDisposableMemory(node, workspace, ready, memory)
@@ -309,8 +323,13 @@ func (r *runner) runRole(node Node, input string) (string, error) {
 	if err := r.export(node, filesID, memory, output); err != nil {
 		return "", err
 	}
-	if r.stores.Files != nil && node.Role != RoleExecutor && r.roles.bind != nil {
+	if r.stores.Files != nil && node.Role != RoleExecutor && r.roles.bind != nil && !r.task.RealDirectory {
 		if err := r.stores.DiscardFiles(workspace); err != nil {
+			return "", err
+		}
+	}
+	if r.task.RealDirectory && r.stores.Files != nil {
+		if err := r.stores.Files.Freeze(workspace); err != nil {
 			return "", err
 		}
 	}
@@ -369,9 +388,21 @@ func (r *runner) completeExport(export ExportProgress) error {
 
 func (r *runner) collectInputs(ctx context.Context, node Node) ([]Output, error) {
 	incoming := r.graph.Incoming(node.ID)
-	if batch, exists := r.inputState(node.ID); exists {
+	batch, exists := r.inputState(node.ID)
+	var project *Output
+	if r.task.RealDirectory && node.ID == r.task.Planner.ID {
+		source, err := r.projectSource(node, !exists)
+		if err != nil {
+			return nil, err
+		}
+		project = &source
+	}
+	if exists {
 		incoming = nil
 		for _, source := range batch.Sources {
+			if r.task.RealDirectory && node.ID == r.task.Planner.ID && source.ID == projectSourceID(node) {
+				continue
+			}
 			output, ok := r.graph.Output(source.ID)
 			if !ok || output.FilesRef != source.FilesRef || output.MemoryRef != source.MemoryRef {
 				return nil, fmt.Errorf("input: committed source %s is missing or changed", source.ID)
@@ -396,6 +427,9 @@ func (r *runner) collectInputs(ctx context.Context, node Node) ([]Output, error)
 			return nil, err
 		}
 		outputs = append(outputs, output)
+	}
+	if project != nil {
+		outputs = append(outputs, *project)
 	}
 	return outputs, nil
 }

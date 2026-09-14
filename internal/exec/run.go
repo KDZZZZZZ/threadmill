@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	osexec "os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -37,7 +38,7 @@ func sandboxEnv(home, tmpdir string) []string {
 	}
 }
 
-var networkEnvironment = [...]string{
+var forwardedEnvironment = [...]string{
 	"all_proxy",
 	"http_proxy",
 	"https_proxy",
@@ -52,16 +53,59 @@ var networkEnvironment = [...]string{
 	"REQUESTS_CA_BUNDLE",
 	"SSL_CERT_DIR",
 	"SSL_CERT_FILE",
+	"JAVA_HOME",
+	"JAVA_TOOL_OPTIONS",
+	"JDK_JAVA_OPTIONS",
+	"GRADLE_OPTS",
+	"MAVEN_OPTS",
+	"MAVEN_ARGS",
+	"GOPROXY",
+	"GOSUMDB",
+	"GOPRIVATE",
+	"GONOPROXY",
+	"GONOSUMDB",
+	"GOFLAGS",
+	"CGO_ENABLED",
+	"CC",
+	"CXX",
+	"CFLAGS",
+	"CXXFLAGS",
+	"LDFLAGS",
+	"PKG_CONFIG_PATH",
+	"PYTHONPATH",
+	"VIRTUAL_ENV",
 }
 
 func networkSandboxEnv(home, tmpdir string) []string {
 	env := sandboxEnv(home, tmpdir)
-	for _, name := range networkEnvironment {
+	for _, name := range forwardedEnvironment {
 		if value, ok := os.LookupEnv(name); ok {
 			env = append(env, name+"="+value)
 		}
 	}
+	if os.Getenv("GRADLE_USER_HOME") != "" {
+		env = append(env, "GRADLE_USER_HOME="+filepath.Join(home, ".gradle"))
+	}
 	return env
+}
+
+// Keep the image's offline Gradle configuration and cache available without
+// sharing a writable user home between tasks. cloning requires reflinks.
+func seedGradleHome(ctx context.Context, home string) error {
+	source := os.Getenv("GRADLE_USER_HOME")
+	if source == "" {
+		return nil
+	}
+	if _, err := os.Stat(source); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	dest := filepath.Join(home, ".gradle")
+	if err := os.Mkdir(dest, 0o700); err != nil {
+		return err
+	}
+	return osexec.CommandContext(ctx, "cp", "--reflink=always", "-a", "--", filepath.Clean(source)+"/.", dest).Run()
 }
 
 func bashArgs(command string) []string {

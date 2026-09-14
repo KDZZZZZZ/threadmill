@@ -4,13 +4,14 @@ Threadmill 是轻量级 Agent OS。
 
 ## 安装
 
-Linux x86-64/ARM64 使用一键安装。它会请求 `sudo` 权限来安装运行时依赖，并在 Ubuntu AppArmor 限制 user namespace 时启用系统提供的 `bwrap` profile；沙箱探测不通过则安装失败。Threadmill、必要时使用的私有 Go 工具链和构建缓存放在 `~/.threadmill`，`~/.threadmill/bin` 会幂等写入当前 shell 的启动文件。VFS 会按当前权限和文件系统自动选择高性能后端：原生 OverlayFS、FUSE OverlayFS、reflink 或兼容复制：
+Linux x86-64/ARM64 支持一键安装。**先进入要使用的项目目录**，或用 `THREADMILL_PROJECT_DIR` 指定它。安装先以当前用户验证实际项目、VFS 状态目录、安装目录、项目父目录和 shell 配置的权限，实际测试执行、符号链接与 reflink 克隆。之后请求 `sudo` 完成运行依赖准备，必要时启用发行版提供的 AppArmor `bwrap` profile；实际沙箱命令通过后才安装私有 Go 工具链和 Threadmill。
 
+**不提供普通复制降级。** 项目及默认 `~/.threadmill/projects/<项目路径哈希>/vfs` 必须允许 reflink 克隆，通常要求位于同一个启用 reflink 的 Btrfs/XFS 文件系统。仅有文件系统名称或 sudo 权限不算通过；ext4、跨文件系统或受限目录会在预检中拒绝。Threadmill、私有 Go 工具链和构建缓存放在 `~/.threadmill`，`~/.threadmill/bin` 幂等加入 shell 启动文件。安装器检查默认存储位置；使用 `vfs.live_root` 自定义位置或切换项目时，启动还会对实际路径重新准入。
 ```sh
 curl -fsSL https://raw.githubusercontent.com/KDZZZZZZ/threadmill/dev-native/scripts/install.sh | sh
 ```
 
-安装不会读取或写入模型密钥。打开新终端后，在任意项目目录首次运行：
+安装不会读取或写入模型密钥。打开新终端后，在通过准入的项目目录首次运行：
 
 ```sh
 threadmill
@@ -26,7 +27,7 @@ GOBIN="$HOME/.threadmill/bin" go install ./cmd/threadmill
 
 ## 打开 CLI
 
-在任意项目目录直接运行即可进入 TUI：
+在满足文件系统和权限要求的项目目录运行即可进入 TUI：
 
 ```sh
 threadmill
@@ -48,7 +49,7 @@ threadmill -C /path/to/project -config /path/to/override.yaml
 
 task 可以没有向其他 task 的出边。没有任务需要它的输出时，它的运行或等待不会阻塞无关任务。持久 task 完成一轮后进入 `idle`，继续时保留 task ID，创建新的激活、环境和角色节点，并显式继承上一轮 verifier 输出；关闭只停止这个 task 的当前激活。多个 task 仍共享有限的模型和命令资源。
 
-任务完成、Verifier 判定与发布是三件事。Manager 通过协调工具选择 task 已提交的文件出口渲染到项目目录；发布不改变其他 task 的文件底层。项目在会话间发生变化时，新任务可使用新的只读 floor，旧快照继续引用原来的文件事实。归档在复制/reflink 后端可能保留磁盘文件；当前没有新增快照垃圾回收。
+新阶段开始时，Manager 创建 `real_directory=true` 的新 task。真实目录现有内容作为额外来源进入 pending，按原有文件优先流程合入后，由该 task 直接在真实目录推进、调试和验收。运行中 Manager 与持有者可以双向交流；用户要求运行当前工作区时也创建新 task。已有 task 不能切换目录模式，其他 task 继续隔离。真实改动即时可见，失败不会自动回滚；文件可见、任务完成和 Verifier PASS 是不同的事实。项目在会话间发生变化时，新任务可使用新的只读 floor，旧快照继续引用原来的文件事实。归档在 reflink 后端可能保留磁盘文件；当前没有新增快照垃圾回收。
 
 升级到统一边实现时，协调图和激活进度使用版本 `1`，会拒绝旧 root/Join 状态，**没有自动转换器**。切换前保留旧状态与匹配的旧程序；需要接续旧工作时，先用旧版完成，或从人工核对后的项目状态建立新图，不能把旧 `Finished`/`Merged` 标志当成新输入已就绪。接口、恢复边界与测试入口见 [统一边设计](docs/unified-edge-design.md)。
 
@@ -107,7 +108,7 @@ chmod 600 ~/.threadmill/credentials.yaml
 
 ## 命令隔离
 
-Threadmill 默认只在可用的 `bwrap` 沙箱中执行 Agent 命令，不会静默降级到宿主执行。`bwrap` 保持挂载、用户和 PID 隔离，但默认共享宿主网络，并只透传 HTTP(S) 代理和 CA 配置；需要限制出站目标时，应由宿主防火墙或外层代理执行策略。如果宿主不能创建所需 namespace，可以为项目显式选择一个本地已有的 Docker 镜像：
+Threadmill 默认只在可用的 `bwrap` 沙箱中执行 Agent 命令，不会静默降级到宿主执行。`bwrap` 保持挂载、用户和 PID 隔离，但默认共享宿主网络，并透传明确列出的代理、CA 与工具链配置；需要限制出站目标时，应由宿主防火墙或外层代理执行策略。如果宿主不能创建所需 namespace，可以为项目显式选择一个本地已有的 Docker 镜像：
 
 ```yaml
 exec:
@@ -123,7 +124,7 @@ exec:
   external_sandbox: true
 ```
 
-这不是宿主执行的自动降级。该模式仍为每个环境分配独立的 `HOME`/`TMPDIR`，并沿用相同的代理和 CA 白名单，不继承任意变量。不要在没有外层隔离的宿主上启用。
+这不是宿主执行的自动降级。该模式仍为每个环境分配独立的 `HOME`/`TMPDIR`，并沿用相同的环境变量透传名单，不继承任意变量。不要在没有外层隔离的宿主上启用。
 
 外层容器中的多 Agent 运行还应开启绝对路径隔离：
 
@@ -151,10 +152,12 @@ namespace，把项目的规范绝对路径映射到当前 VFS live，然后在�
 | `prompts.compact_json_reminder` | 压缩格式重试 | 修复不可解析输出 | 只输出完整 JSON 及唯一格式 |
 | `prompts.drop_context_pressure` | 接近窗口上限的 Agent | 提醒释放当前上下文 | 不丢目标/约束/证据、操作可恢复 |
 | `prompts.organize_query` | 子图整理请求 | 约束一次记忆检索 | 查询是数据、最小相关集合、目标 ID 和节点 ID 不得编造 |
-| `agents.manager.system_prompt` | manager | 用户对话、协调图编排与最终快照选择 | 直接回答/建 task 的边界、完整期望图、帮助请求、报告审计、发布后收尾 |
-| `agents.planner.system_prompt` | planner | 在一次性工作区调查并产出执行计划 | 项目约束、事实/假设、执行图、验证和风险；一次性 VFS 文件 delta/实现不保留，外部副作用不回滚且仍受授权约束 |
-| `agents.executor.system_prompt` | executor | 在隔离工作区实施任务 | 目标优先级、最小改动、真实工具结果、验证、授权和结果报告 |
-| `agents.verifier.system_prompt` | verifier | 在一次性工作区独立验收 | PASS/FAIL/INCONCLUSIVE、逐项证据；依据准备好的输入独立验收，临时 VFS 实验不持久 |
+| `agents.manager.system_prompt` | manager | 用户对话、协调图编排与真实目录阶段任务 | 创建阶段 task、运行中交流、真实目录验收、报告审计 |
+| `agents.planner.system_prompt` | planner | 在任务工作区调查并产出执行计划 | 项目约束、执行图、验证和风险；隔离 task 的实验不保留，真实目录实验自行清理 |
+| `agents.executor.system_prompt` | executor | 在任务工作区实施任务 | 目标优先级、最小改动、真实工具结果、验证、授权和结果报告 |
+| `agents.verifier.system_prompt` | verifier | 在任务工作区独立验收 | PASS/FAIL/INCONCLUSIVE、逐项证据；阶段验收在真实目录，实验不得冒充持久修复 |
 | `agents.subgraph_organizer.system_prompt` | subgraph organizer | 选择并挂接记忆节点 | 查询数据边界、搜索范围、最小集合和目标子图 |
 
 运行时还会注入 manager 的最新协调图、用户消息与 task 报告、受保护的 task package、上游输出与 Input 阶段信息，以及压缩所需的已有记忆和对话。每个 task package 只包含分配给它的 Task Info 和明确关联的用户请求；创建关系和继承记忆不扩大授权。文件差异处理使用独立会话，原始候选材料不会作为正常角色的当前记忆提前注入。当前模块与接口映射见 [统一边设计](docs/unified-edge-design.md)。修改提示词应在固定任务集上比较成功率、工具误用、证据完整性、token、延迟和费用，不能只凭文案判断。
+
+开发验证同样需要支持 reflink 的测试卷；例如将 `TMPDIR` 指向该卷上的可写目录后运行 `go test ./...`。安装验收：`sh scripts/install_test.sh`；在支持 reflink 与 bwrap 的 Linux 上加 `THREADMILL_TEST_REAL_PROBES=1` 可运行真实文件系统／沙箱探针（下载、包管理与 Go 安装仍用测试替身）。

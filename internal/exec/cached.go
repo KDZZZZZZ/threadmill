@@ -14,7 +14,8 @@ import (
 const maxTraceBytes = 64 << 20
 
 func (s *Scheduler) cacheEnabled() bool {
-	return s != nil && s.cache != nil && s.tracing
+	// Gradle's mutable init scripts live in runtime HOME, outside traced inputs.
+	return s != nil && s.cache != nil && s.tracing && os.Getenv("GRADLE_USER_HOME") == ""
 }
 
 func (s *Scheduler) cacheKey(command string) cmdcache.Key {

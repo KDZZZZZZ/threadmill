@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -83,6 +84,36 @@ func TestOpenUsesOneUserStateDirectoryForCanonicalPath(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(project, ".threadmill")); !os.IsNotExist(err) {
 		t.Fatalf("project-local .threadmill exists or stat failed: %v", err)
+	}
+}
+
+func TestOpenRejectsUnavailableExecutionSandbox(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	bin := t.TempDir()
+	cp, err := exec.LookPath("cp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(cp, filepath.Join(bin, "cp")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	file := loadRepoConfig(t)
+	file.Exec.ExternalSandbox = false
+	file.Exec.ContainerImage = ""
+	manager, err := Open(context.Background(), Options{
+		Root: t.TempDir(), File: file,
+		Provider: stubProvider(func(context.Context, agent.Request) (agent.AssistantMessage, error) {
+			t.Fatal("model called before sandbox admission")
+			return agent.AssistantMessage{}, nil
+		}),
+	})
+	if err == nil {
+		manager.Close()
+		t.Fatal("manager opened without a usable execution sandbox")
+	}
+	if !strings.Contains(err.Error(), "sandbox is unavailable") {
+		t.Fatalf("Open error = %v, want sandbox admission failure", err)
 	}
 }
 
@@ -593,7 +624,7 @@ func TestOpenRestoresCompletedTaskAfterReportFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err := graph.ReplacePending(ctx, coordination.PendingSubgraph{
-		Tasks: []coordination.PendingTask{{Info: "retain completed task files for report retry"}},
+		Tasks: []coordination.PendingTask{{Info: "retain completed task files for report retry", RealDirectory: true}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -652,16 +683,7 @@ func TestOpenRestoresCompletedTaskAfterReportFailure(t *testing.T) {
 		Provider: stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
 			switch {
 			case strings.Contains(request.SystemPrompt, "你是 manager"):
-				if !hasToolResult(request.Messages) {
-					args, err := json.Marshal(map[string]string{"task_id": task.ID})
-					if err != nil {
-						return agent.AssistantMessage{}, err
-					}
-					return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
-						ID: "publish-recovered", Name: "coordination_publishTask", Arguments: args,
-					}}}, nil
-				}
-				return agent.AssistantMessage{Content: "reported and published"}, nil
+				return agent.AssistantMessage{Content: "reported"}, nil
 			case strings.Contains(request.SystemPrompt, "你是记忆压缩器"):
 				return agent.AssistantMessage{Content: `{"nodes":[]}`}, nil
 			default:

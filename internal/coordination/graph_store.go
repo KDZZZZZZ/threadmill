@@ -16,25 +16,16 @@ const graphStateVersion = 1
 var ErrGraphStateVersion = errors.New("coordination: unsupported graph state version")
 
 type graphState struct {
-	Version    int              `json:"version"`
-	Nodes      []Node           `json:"nodes"`
-	Outputs    []Output         `json:"outputs"`
-	Revision   int64            `json:"revision"`
-	NextID     uint64           `json:"next_id"`
-	Publishing publicationState `json:"publishing,omitzero"`
-	Published  publicationState `json:"published,omitzero"`
-	Tasks      []Task           `json:"tasks"`
-	Edges      []Edge           `json:"edges"`
-	Helps      []helpState      `json:"helps,omitempty"`
-}
-
-// publicationState fixes one selection across task continuation and retries.
-type publicationState struct {
-	TaskID     string `json:"task_id"`
-	Activation uint64 `json:"activation"`
-	NodeID     string `json:"node_id"`
-	FilesRef   string `json:"files_ref"`
-	Outcome    string `json:"outcome"`
+	Version         int              `json:"version"`
+	Nodes           []Node           `json:"nodes"`
+	Outputs         []Output         `json:"outputs"`
+	Revision        int64            `json:"revision"`
+	NextID          uint64           `json:"next_id"`
+	ProjectTaskID   string           `json:"project_task_id,omitempty"`
+	ProjectMessages []ProjectMessage `json:"project_messages,omitempty"`
+	Tasks           []Task           `json:"tasks"`
+	Edges           []Edge           `json:"edges"`
+	Helps           []helpState      `json:"helps,omitempty"`
 }
 
 // OpenGraph 打开一张持久化协调图；文件不存在时创建空图。
@@ -190,31 +181,20 @@ func validateGraphState(state graphState) error {
 			}
 		}
 	}
-	for _, publication := range []publicationState{state.Publishing, state.Published} {
-		if publication == (publicationState{}) {
-			continue
+	if state.ProjectTaskID != "" {
+		owner, exists := tasks[state.ProjectTaskID]
+		if !exists || !owner.RealDirectory {
+			return fmt.Errorf("invalid real directory task %q", state.ProjectTaskID)
 		}
-		task, ok := tasks[publication.TaskID]
-		if !ok {
-			return fmt.Errorf("unknown publication task %q", publication.TaskID)
+	}
+	messageIDs := make(map[string]bool, len(state.ProjectMessages))
+	for _, message := range state.ProjectMessages {
+		node, exists := nodes[message.NodeID]
+		if !exists || !tasks[node.TaskID].RealDirectory || message.ID == "" || messageIDs[message.ID] || message.Content == "" ||
+			(message.From != ManagerEnvID && message.From != node.ID) {
+			return fmt.Errorf("invalid project message %q", message.ID)
 		}
-		output, ok := outputs[publication.NodeID]
-		if !ok || output.Node.TaskID != task.ID || output.FilesRef != publication.FilesRef {
-			return fmt.Errorf("publication does not match committed output %q", publication.NodeID)
-		}
-		if publication.Activation == 0 || publication.Activation > task.Activation ||
-			publication.NodeID != fmt.Sprintf("%s:%d:%s", task.ID, publication.Activation, output.Node.Role) {
-			return fmt.Errorf("invalid publication activation for %q", publication.NodeID)
-		}
-		switch publication.Outcome {
-		case OutcomeDone, OutcomeFailed:
-		case OutcomeIdle, OutcomeClosed:
-			if !task.Persistent {
-				return fmt.Errorf("nonpersistent publication task %q has outcome %q", task.ID, publication.Outcome)
-			}
-		default:
-			return fmt.Errorf("invalid publication outcome %q", publication.Outcome)
-		}
+		messageIDs[message.ID] = true
 	}
 	helps := make(map[string]bool, len(state.Helps))
 	for _, help := range state.Helps {
@@ -246,16 +226,16 @@ func validateGraphState(state graphState) error {
 
 func (g *Graph) stateLocked() graphState {
 	return graphState{
-		Version:    graphStateVersion,
-		Nodes:      append([]Node(nil), g.nodes...),
-		Outputs:    g.outputListLocked(),
-		Revision:   g.revision,
-		NextID:     g.nextID,
-		Publishing: g.publishing,
-		Published:  g.published,
-		Tasks:      append([]Task(nil), g.tasks...),
-		Edges:      append([]Edge(nil), g.edges...),
-		Helps:      cloneHelpStates(g.helps),
+		Version:         graphStateVersion,
+		Nodes:           append([]Node(nil), g.nodes...),
+		Outputs:         g.outputListLocked(),
+		Revision:        g.revision,
+		NextID:          g.nextID,
+		ProjectTaskID:   g.projectTaskID,
+		ProjectMessages: append([]ProjectMessage(nil), g.projectMessages...),
+		Tasks:           append([]Task(nil), g.tasks...),
+		Edges:           append([]Edge(nil), g.edges...),
+		Helps:           cloneHelpStates(g.helps),
 	}
 }
 
@@ -270,8 +250,8 @@ func (g *Graph) applyStateLocked(state graphState) {
 	g.nextID = state.NextID
 	g.helps = cloneHelpStates(state.Helps)
 	g.revision = state.Revision
-	g.publishing = state.Publishing
-	g.published = state.Published
+	g.projectTaskID = state.ProjectTaskID
+	g.projectMessages = append([]ProjectMessage(nil), state.ProjectMessages...)
 }
 
 func cloneHelpStates(states []helpState) []helpState {

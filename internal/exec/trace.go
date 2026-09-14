@@ -248,7 +248,7 @@ func cacheEnvHash(backend string) string {
 	fmt.Fprintf(hasher, "backend\t%s\n", backend)
 	fmt.Fprintf(hasher, "PATH\t%s\n", os.Getenv("PATH"))
 	fmt.Fprintf(hasher, "LANG\tC.UTF-8\n")
-	for _, name := range networkEnvironment {
+	for _, name := range forwardedEnvironment {
 		if value, ok := os.LookupEnv(name); ok {
 			fmt.Fprintf(hasher, "%s\t%s\n", name, value)
 		}

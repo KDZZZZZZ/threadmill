@@ -1,39 +1,57 @@
 package vfs
 
 import (
-	"syscall"
+	"errors"
+	"fmt"
+	"os"
+
+	"golang.org/x/sys/unix"
 )
 
-// Linux 文件系统魔数；用于判断 live 目录所在盘是否支持 reflink。
-const (
-	fsMagicBtrfs = 0x9123683E
-	fsMagicXFS   = 0x58465342
-)
-
-// ReflinkSupported 报告 root 所在文件系统是否支持 reflink（XFS/btrfs）。
-// 在 reflink 文件系统上，Materialize 的 cp --reflink=auto 退化为块级克隆；
-// 无法判定时保守返回 false。
+// ReflinkSupported tests CoW cloning on root using nonempty files. Filesystem
+// names alone cannot prove support (for example XFS may disable reflinks).
 func ReflinkSupported(root string) bool {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(root, &stat); err != nil {
-		return false
-	}
-	magic := uint64(stat.Type)
-	return magic == fsMagicBtrfs || magic == fsMagicXFS
+	return requireReflink(root, root) == nil
 }
 
-// ReflinkCloneable 报告从 floorDir 拷贝到 liveRoot 能否走 reflink：
-// 要求 liveRoot 在 reflink 文件系统上，且两者在同一设备（跨文件系统内核会回退为全量拷贝）。
+// ReflinkCloneable tests the actual source/destination pair, including mount
+// boundaries and the current user's permissions.
 func ReflinkCloneable(floorDir, liveRoot string) bool {
-	if !ReflinkSupported(liveRoot) {
-		return false
+	return requireReflink(floorDir, liveRoot) == nil
+}
+
+func requireReflink(sourceDir, targetDir string) (retErr error) {
+	defer func() {
+		if retErr != nil {
+			retErr = fmt.Errorf("vfs: reflink required from %q to %q; ordinary copying is disabled: %w", sourceDir, targetDir, retErr)
+		}
+	}()
+	source, err := os.CreateTemp(sourceDir, ".threadmill-reflink-")
+	if err != nil {
+		return err
 	}
-	var base, live syscall.Stat_t
-	if err := syscall.Stat(floorDir, &base); err != nil {
-		return false
+	defer func() { retErr = errors.Join(retErr, source.Close(), os.Remove(source.Name())) }()
+	if _, err := source.WriteString("threadmill CoW probe\n"); err != nil {
+		return err
 	}
-	if err := syscall.Stat(liveRoot, &live); err != nil {
-		return false
+	target, err := os.CreateTemp(targetDir, ".threadmill-reflink-")
+	if err != nil {
+		return err
 	}
-	return base.Dev == live.Dev
+	defer func() { retErr = errors.Join(retErr, target.Close(), os.Remove(target.Name())) }()
+	// FICLONE never falls back to copying. See Linux ioctl_ficlone(2).
+	if err := unix.IoctlFileClone(int(target.Fd()), int(source.Fd())); err != nil {
+		return err
+	}
+	if _, err := target.WriteAt([]byte("changed"), 0); err != nil {
+		return err
+	}
+	original, err := os.ReadFile(source.Name())
+	if err != nil {
+		return err
+	}
+	if string(original) != "threadmill CoW probe\n" {
+		return fmt.Errorf("clone changes modified the source")
+	}
+	return nil
 }

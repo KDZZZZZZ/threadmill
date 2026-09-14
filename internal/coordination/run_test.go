@@ -19,7 +19,7 @@ import (
 	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
-func TestGraphRunRetainsFilesForManagerPublish(t *testing.T) {
+func TestGraphRunRetainsIsolatedTaskOutputs(t *testing.T) {
 	t.Parallel()
 
 	graph := New()
@@ -67,17 +67,13 @@ func TestGraphRunRetainsFilesForManagerPublish(t *testing.T) {
 	if err := files.Discard(task.Env.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := executeGraphTool(
-		t,
-		GraphTools(graph, Stores{Memory: ctxgraph.NewStore(), Files: files}),
-		coordPublishTaskName,
-		`{"task_id":"`+task.ID+`"}`,
-	); err != nil {
-		t.Fatalf("publish archived task: %v", err)
+	output, ok := graph.Output(task.Verifier.ID)
+	if !ok {
+		t.Fatal("missing retained output")
 	}
-	got, err = os.ReadFile(filepath.Join(base, "from-bash.txt"))
+	got, err = files.View(output.FilesRef).Read("from-bash.txt")
 	if err != nil || string(got) != "from-live" {
-		t.Fatalf("published archived from-bash.txt = %q, %v", got, err)
+		t.Fatalf("archived file = %q, %v", got, err)
 	}
 }
 

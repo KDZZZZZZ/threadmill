@@ -53,6 +53,9 @@ func (r *runner) latestRoleInput(nodeID string, initial InputProgress) InputProg
 }
 
 func (r *runner) installInput(input *InputProgress, workspace string) error {
+	if r.task.RealDirectory && r.stores.Files != nil {
+		return r.installProjectInput(input, workspace)
+	}
 	if input.Started {
 		if r.stores.Files == nil {
 			return nil
@@ -431,7 +434,7 @@ func (r *runner) pauseHelp(nodeID, callID string) (Node, Node, error) {
 		}
 		filesID := workspace
 		memory := r.stores.Memory.Load(r.task.Env.ID)
-		if role != RoleExecutor && r.roles.bind != nil {
+		if role != RoleExecutor && r.roles.bind != nil && !r.task.RealDirectory {
 			input := r.latestRoleInput(nodeID, InputProgress{})
 			filesID = input.FilesRef
 			memory, err = r.qualifyDisposableMemory(pause, workspace, input, memory)

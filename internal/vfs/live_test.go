@@ -982,6 +982,18 @@ func TestPublishDoesNotCommitGitMetadata(t *testing.T) {
 	}
 }
 
+func TestPersistentWorkspaceRootIsTheProjectPath(t *testing.T) {
+	base := t.TempDir()
+	store, err := NewPersistentStore(base, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.WorkspaceRoot()
+	if err != nil || got != base {
+		t.Fatalf("WorkspaceRoot() = %q, %v; want %q", got, err, base)
+	}
+}
+
 func TestPublishProceedsWithActiveSibling(t *testing.T) {
 	t.Parallel()
 
@@ -1369,7 +1381,7 @@ func TestAbsorbRejectsFileExceedingMaxSize(t *testing.T) {
 	}
 }
 
-func TestAbsorbExcludesGitIgnoredWorkspaceArtifacts(t *testing.T) {
+func TestAbsorbPreservesGitIgnoredWorkspaceArtifacts(t *testing.T) {
 	base := t.TempDir()
 	if err := os.WriteFile(filepath.Join(base, ".gitignore"), []byte("node_modules/\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1413,17 +1425,7 @@ func TestAbsorbExcludesGitIgnoredWorkspaceArtifacts(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(generated), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	f, err := os.Create(generated)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Truncate(int64(MaxFileSize + 1)); err != nil {
-		_ = f.Close()
-		t.Fatal(err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatal(err)
-	}
+	mustWriteFile(t, generated, "generated dependency")
 
 	if err := store.Absorb("env-a"); err != nil {
 		t.Fatalf("Absorb with ignored generated dependency: %v", err)
@@ -1446,8 +1448,8 @@ func TestAbsorbExcludesGitIgnoredWorkspaceArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "base cache" {
-		t.Fatalf("child ignored base cache = %q, want unchanged base cache", got)
+	if string(got) != "changed cache" {
+		t.Fatalf("child ignored base cache = %q, want changed cache", got)
 	}
 	got, err = os.ReadFile(filepath.Join(child, "node_modules", "tracked.txt"))
 	if err != nil {
@@ -1456,8 +1458,14 @@ func TestAbsorbExcludesGitIgnoredWorkspaceArtifacts(t *testing.T) {
 	if string(got) != "tracked after" {
 		t.Fatalf("child tracked ignored file = %q, want tracked after", got)
 	}
-	if _, err := os.Stat(filepath.Join(child, "node_modules", "package")); !os.IsNotExist(err) {
-		t.Fatalf("new ignored package exists in child: %v", err)
+	if got, err := os.ReadFile(filepath.Join(child, "node_modules", "package", "artifact.bin")); err != nil || string(got) != "generated dependency" {
+		t.Fatalf("child generated dependency = %q, %v", got, err)
+	}
+	if _, err := store.Publish("env-a"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(base, "node_modules", "package", "artifact.bin")); err != nil || string(got) != "generated dependency" {
+		t.Fatalf("published generated dependency = %q, %v", got, err)
 	}
 }
 

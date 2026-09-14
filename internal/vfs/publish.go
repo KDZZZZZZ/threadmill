@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -13,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -56,7 +57,18 @@ func (r PublishReceipt) Changed() int {
 // Content that a publication overwrites or removes is saved under the store's
 // replaced directory first, so an edit made directly in the project directory
 // survives being displaced by a checkpoint.
-func (s *Store) Publish(envID string) (receipt PublishReceipt, retErr error) {
+func (s *Store) Publish(envID string) (PublishReceipt, error) {
+	return s.publish(envID, nil)
+}
+
+// InstallProject reconciles prepared input onto the real directory. Source
+// paths include files explicitly rejected by input resolution, so those files
+// are removed even when they were created after the store adopted its floor.
+func (s *Store) InstallProject(envID string, sources []string) (PublishReceipt, error) {
+	return s.publish(envID, sources)
+}
+
+func (s *Store) publish(envID string, sources []string) (receipt PublishReceipt, retErr error) {
 	if envID == "" {
 		return PublishReceipt{}, nil
 	}
@@ -90,6 +102,20 @@ func (s *Store) Publish(envID string) (receipt PublishReceipt, retErr error) {
 	published, err := s.loadPublishedPaths()
 	if err != nil {
 		return PublishReceipt{}, err
+	}
+	for _, source := range sources {
+		if err := s.Restore(source); err != nil {
+			return PublishReceipt{}, err
+		}
+		s.mu.Lock()
+		files, err := s.visibleInputFiles(source)
+		s.mu.Unlock()
+		if err != nil {
+			return PublishReceipt{}, err
+		}
+		for path := range files {
+			published[path] = struct{}{}
+		}
 	}
 
 	s.mu.Lock()
@@ -186,18 +212,32 @@ func (s *Store) planPublish(
 
 	files, directories := expandPublishCandidates(paths, display, tracked, floorDirs)
 	steps := make([]publishStep, 0, len(files)+len(directories))
+	replacedTrees := make(map[string]struct{})
+	resetTrees := make(map[string]struct{})
 	for _, path := range files {
-		target, err := publishTargetPath(display, path)
-		if err != nil {
-			return nil, err
+		if hasPathAncestor(replacedTrees, path) {
+			continue
 		}
 		s.mu.Lock()
 		want, visible := s.regularFileSnapshot(envID, path)
+		if !visible {
+			state := s.lookupContent(envID, path)
+			if state.exists && !state.tombstone && state.mode.IsDir() {
+				want, visible = fileSnapshot{mode: state.mode}, true
+			}
+		}
 		s.mu.Unlock()
 
-		have, err := readDisplayFile(target)
-		if err != nil {
-			return nil, err
+		var have displayFile
+		if !hasPathAncestor(resetTrees, path) {
+			target, err := publishTargetPath(display, path)
+			if err != nil {
+				return nil, err
+			}
+			have, err = readDisplayFile(target)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if !visible {
 			if _, ours := tracked[path]; have.exists && ours {
@@ -209,7 +249,7 @@ func (s *Store) planPublish(
 		if err != nil {
 			return nil, err
 		}
-		if have.exists && have.regular &&
+		if have.exists && have.supported &&
 			have.mode == want.mode && bytes.Equal(have.data, data) {
 			continue
 		}
@@ -220,10 +260,24 @@ func (s *Store) planPublish(
 			mode:    want.mode,
 			existed: have.exists,
 		})
+		if !want.mode.IsDir() {
+			replacedTrees[path] = struct{}{}
+		} else if !have.mode.IsDir() {
+			resetTrees[path] = struct{}{}
+		}
 	}
 	// Directories go last and deepest first, so a directory is only reclaimed
 	// once whatever the checkpoint dropped inside it is gone.
 	for _, path := range directories {
+		if _, replaced := replacedTrees[path]; replaced || hasPathAncestor(replacedTrees, path) {
+			continue
+		}
+		s.mu.Lock()
+		state := s.lookupContent(envID, path)
+		s.mu.Unlock()
+		if state.exists && !state.tombstone && state.mode.IsDir() {
+			continue
+		}
 		steps = append(steps, publishStep{path: path, action: publishRemoveDir})
 	}
 	return steps, nil
@@ -349,10 +403,10 @@ func snapshotContent(want fileSnapshot) ([]byte, error) {
 }
 
 type displayFile struct {
-	exists  bool
-	regular bool
-	mode    fs.FileMode
-	data    []byte
+	exists    bool
+	supported bool
+	mode      fs.FileMode
+	data      []byte
 }
 
 func readDisplayFile(target string) (displayFile, error) {
@@ -364,6 +418,13 @@ func readDisplayFile(target string) (displayFile, error) {
 		return displayFile{}, fmt.Errorf("vfs: publish inspect %q: %w", target, err)
 	}
 	if !info.Mode().IsRegular() {
+		if info.IsDir() {
+			return displayFile{exists: true, supported: true, mode: fs.ModeDir | info.Mode().Perm()}, nil
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			target, err := os.Readlink(target)
+			return displayFile{exists: true, supported: true, mode: fs.ModeSymlink, data: []byte(target)}, err
+		}
 		return displayFile{exists: true}, nil
 	}
 	data, err := os.ReadFile(target)
@@ -371,10 +432,10 @@ func readDisplayFile(target string) (displayFile, error) {
 		return displayFile{}, fmt.Errorf("vfs: publish read %q: %w", target, err)
 	}
 	return displayFile{
-		exists:  true,
-		regular: true,
-		mode:    info.Mode().Perm(),
-		data:    data,
+		exists:    true,
+		supported: true,
+		mode:      info.Mode().Perm(),
+		data:      data,
 	}, nil
 }
 
@@ -383,6 +444,17 @@ func readDisplayFile(target string) (displayFile, error) {
 func writeDisplayFile(target string, data []byte, mode fs.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return fmt.Errorf("vfs: publish create parent of %q: %w", target, err)
+	}
+	if mode.IsDir() {
+		if info, err := os.Lstat(target); err == nil && !info.IsDir() {
+			if err := os.Remove(target); err != nil {
+				return err
+			}
+		}
+		if err := os.MkdirAll(target, mode.Perm()); err != nil {
+			return err
+		}
+		return os.Chmod(target, mode.Perm())
 	}
 	if info, err := os.Lstat(target); err == nil && !info.Mode().IsRegular() {
 		if err := os.RemoveAll(target); err != nil {
@@ -394,6 +466,18 @@ func writeDisplayFile(target string, data []byte, mode fs.FileMode) error {
 		return fmt.Errorf("vfs: publish stage %q: %w", target, err)
 	}
 	name := temp.Name()
+	if mode&fs.ModeSymlink != 0 {
+		if err := errors.Join(temp.Close(), os.Remove(name)); err != nil {
+			return err
+		}
+		if err := os.Symlink(string(data), name); err != nil {
+			return err
+		}
+		if err := os.Rename(name, target); err != nil {
+			return errors.Join(err, os.Remove(name))
+		}
+		return nil
+	}
 	if _, err := temp.Write(data); err != nil {
 		return errors.Join(
 			fmt.Errorf("vfs: publish write %q: %w", target, err),
@@ -433,7 +517,7 @@ func publishTargetPath(display, path string) (string, error) {
 	if rel == "" || filepath.IsAbs(rel) || !filepath.IsLocal(rel) {
 		return "", fmt.Errorf("vfs: publish %q: %w", path, ErrInvalidPath)
 	}
-	return filepath.Join(display, rel), nil
+	return createLivePath(display, filepath.ToSlash(rel))
 }
 
 func (s *Store) newReplacedDir() (string, error) {
@@ -606,7 +690,7 @@ func copyPublishedPath(src, dst string) (retErr error) {
 		if err != nil {
 			return errors.Join(err, input.Close())
 		}
-		_, copyErr := io.Copy(output, input)
+		copyErr := unix.IoctlFileClone(int(output.Fd()), int(input.Fd()))
 		retErr = errors.Join(copyErr, output.Close(), input.Close())
 	default:
 		return fmt.Errorf("%w: %s", ErrSpecialFile, src)

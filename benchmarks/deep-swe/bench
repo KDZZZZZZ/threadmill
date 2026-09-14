@@ -80,8 +80,11 @@ case "${1:-}" in
     [[ $# -ge 3 ]] || { usage >&2; exit 2; }
     check_source
     target="$(task_path "$2")"
+    prepared_dir="$(mktemp -d "$work_root/deep-swe/run.XXXXXX")"
+    target="$(python3 "$script_dir/prepare.py" "$target" "$prepared_dir")"
     shift 2
     THREADMILL_BENCHMARK_NAME=deep-swe \
+      THREADMILL_BENCH_WORKSPACE=/app \
       THREADMILL_HARBOR_BIN="$runtime" \
       "$harbor_tools/bench" run-path "$target" "$@"
     ;;
