@@ -1,0 +1,7 @@
+.agents/skills/
+.threadmill/
+web/node_modules/
+web/e2e/shots/
+web/e2e/shots-dark/
+web/.heroui-docs/
+web/.heroui-AGENTS.md

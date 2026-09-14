@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly UPSTREAM_URL="https://github.com/Einsia/SWE-Refactor-Bench.git"
+readonly UPSTREAM_REVISION="1270471ccb5e6f254627784658d4e29acb90b953"
+readonly TESTED_HARBOR_VERSION="0.22.0"
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+benchmark_dir="$(cd -- "$script_dir/.." && pwd)"
+repo_root="$(cd -- "$benchmark_dir/.." && pwd)"
+harbor_bench="$repo_root/benchmarks/harbor/bench"
+work_root="${THREADMILL_BENCHMARK_HOME:-$benchmark_dir/.work}"
+source_dir="$work_root/swe-refactor-bench/source"
+jobs_dir="$work_root/swe-refactor-bench/jobs"
+
+usage() {
+  cat <<'EOF'
+Usage: ./bench <command> [args...]
+
+Commands:
+  doctor              check local prerequisites
+  fetch               fetch the pinned official suite
+  path                print the pinned suite checkout path
+  jobs                create and print the ignored Harbor jobs path
+  list                list the 20 tasks and their resource budgets
+  validate [task|all] validate one task (default: all)
+  harness-test        run the official grading harness unit tests
+  adapter-test        test the Threadmill Harbor adapter
+  build               build Threadmill from the current worktree
+  prepare-infra       build the pinned official verifier donor image
+  install-only <task> <provider/model> [Harbor args...]
+                      build the task container and install the adapter only
+  run <task> <provider/model> [Harbor args...]
+                      run and grade one official task
+EOF
+}
+
+die() {
+  printf 'swe-refactor-bench: %s\n' "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
+}
+
+check_source() {
+  [[ -d "$source_dir/.git" ]] || die "suite not fetched; run: $0 fetch"
+  local actual
+  actual="$(git -C "$source_dir" rev-parse HEAD)"
+  [[ "$actual" == "$UPSTREAM_REVISION" ]] ||
+    die "suite is at $actual, expected $UPSTREAM_REVISION; run: $0 fetch"
+  [[ -z "$(git -C "$source_dir" status --porcelain)" ]] ||
+    die "suite checkout is modified; keep experiments outside the pinned source"
+}
+
+doctor() {
+  require_command git
+  require_command python3
+  require_command docker
+  require_command harbor
+
+  python3 - <<'PY'
+import sys
+if sys.version_info < (3, 12):
+    raise SystemExit(f"Python 3.12+ required by Harbor; found {sys.version.split()[0]}")
+print(f"ok  python {sys.version.split()[0]}")
+PY
+
+  docker info >/dev/null 2>&1 || die "Docker daemon is unavailable"
+  printf 'ok  docker %s\n' "$(docker version --format '{{.Server.Version}}')"
+
+  local harbor_version
+  harbor_version="$(harbor --version)"
+  printf 'ok  harbor %s' "$harbor_version"
+  if [[ "$harbor_version" == "$TESTED_HARBOR_VERSION" ]]; then
+    printf ' (tested)\n'
+  else
+    printf ' (this integration was tested with %s)\n' "$TESTED_HARBOR_VERSION"
+  fi
+
+  if python3 -m pytest --version >/dev/null 2>&1; then
+    printf 'ok  pytest\n'
+  else
+    printf 'warn pytest is absent; only harness-test needs it\n' >&2
+  fi
+
+  if [[ -r /sys/fs/cgroup/cgroup.controllers ]] &&
+    grep -qw cpu /sys/fs/cgroup/cgroup.controllers &&
+    grep -qw memory /sys/fs/cgroup/cgroup.controllers; then
+    printf 'ok  cgroup cpu,memory controllers\n'
+  else
+    printf 'warn cgroup limits unavailable; pass --cpus ignore --memory ignore to Harbor\n' >&2
+  fi
+
+  df -h "$benchmark_dir" | awk 'NR == 2 {print "info disk available " $4}'
+}
+
+fetch() {
+  require_command git
+  mkdir -p -- "$(dirname -- "$source_dir")"
+  local fresh=false
+  if [[ ! -d "$source_dir/.git" ]]; then
+    [[ ! -e "$source_dir" ]] || die "$source_dir exists but is not a Git checkout"
+    git clone --filter=blob:none --no-checkout "$UPSTREAM_URL" "$source_dir"
+    fresh=true
+  fi
+
+  local origin
+  origin="$(git -C "$source_dir" remote get-url origin)"
+  [[ "$origin" == "$UPSTREAM_URL" ]] ||
+    die "unexpected origin $origin in $source_dir"
+  if [[ "$fresh" == false ]]; then
+    [[ -z "$(git -C "$source_dir" status --porcelain)" ]] ||
+      die "refusing to overwrite modified suite checkout: $source_dir"
+  fi
+
+  git -C "$source_dir" fetch --depth=1 origin "$UPSTREAM_REVISION"
+  git -C "$source_dir" checkout --detach --force "$UPSTREAM_REVISION"
+  check_source
+  printf '%s\n' "$source_dir"
+}
+
+list_tasks() {
+  check_source
+  SOURCE_DIR="$source_dir" python3 - <<'PY'
+import os
+import pathlib
+import tomllib
+
+root = pathlib.Path(os.environ["SOURCE_DIR"])
+print(f"{'task':42} {'category':18} {'agent':>7} {'cpu':>4} {'memory':>8}")
+for path in sorted((root / "tasks").glob("*/task.toml")):
+    with path.open("rb") as stream:
+        task = tomllib.load(stream)
+    hours = task["agent"]["timeout_sec"] / 3600
+    env = task["environment"]
+    print(
+        f"{path.parent.name:42} "
+        f"{task['metadata']['category']:18} "
+        f"{hours:6.1f}h {env['cpus']:4} {env['memory_mb']:7}M"
+    )
+PY
+}
+
+validate() {
+  check_source
+  local target="${1:-all}"
+  if [[ "$target" == "all" ]]; then
+    local task_dir
+    for task_dir in "$source_dir"/tasks/*; do
+      PYTHONPATH="$source_dir/infra" python3 -m swerefactor validate \
+        --task-dir "$task_dir"
+    done
+    return
+  fi
+
+  [[ "$target" != */* ]] || die "task must be an ID, not a path"
+  [[ -d "$source_dir/tasks/$target" ]] || die "unknown task: $target"
+  PYTHONPATH="$source_dir/infra" python3 -m swerefactor validate \
+    --task-dir "$source_dir/tasks/$target"
+}
+
+harness_test() {
+  check_source
+  python3 -m pytest --version >/dev/null 2>&1 ||
+    die "pytest is required; install it in a disposable Python environment"
+  (cd "$source_dir" && PYTHONPATH=infra python3 -m pytest infra/tests -q)
+}
+
+prepare_infra() (
+  check_source
+  require_command patch
+  require_command tar
+
+  mkdir -p -- "$work_root/swe-refactor-bench"
+  local staging
+  staging="$(mktemp -d "$work_root/swe-refactor-bench/.infra.XXXXXX")"
+  trap 'rm -rf -- "$staging"' EXIT
+
+  git -C "$source_dir" archive "$UPSTREAM_REVISION" infra |
+    tar -x -C "$staging" --strip-components=1
+  patch --batch --forward --directory="$staging" -p1 \
+    <"$script_dir/harbor-results-readable.patch"
+  docker build \
+    --label "org.threadmill.swe-refactor.revision=$UPSTREAM_REVISION" \
+    --label "org.threadmill.swe-refactor.patch=harbor-results-readable" \
+    -t swerefactor/infra:1 "$staging"
+)
+
+task_path() {
+  local task="$1"
+  [[ "$task" != */* ]] || die "task must be an ID, not a path"
+  [[ -d "$source_dir/tasks/$task" ]] || die "unknown task: $task"
+  printf '%s\n' "$source_dir/tasks/$task"
+}
+
+prepare_proxy_task() {
+  local task="$1"
+  local destination="$2"
+  local proxy="$3"
+
+  mkdir -p -- "$destination"
+  git -C "$source_dir" archive "$UPSTREAM_REVISION" "tasks/$task" |
+    tar -x -C "$destination" --strip-components=2
+
+  TASK_DIR="$destination" \
+    FETCH_MAVEN="$script_dir/fetch-maven.sh" \
+    THREADMILL_BUILD_PROXY="$proxy" \
+    python3 - <<'PY'
+import os
+from pathlib import Path
+import shutil
+import urllib.parse
+
+task = Path(os.environ["TASK_DIR"])
+dockerfile = task / "environment" / "Dockerfile"
+text = dockerfile.read_text()
+
+url = urllib.parse.urlsplit(os.environ["THREADMILL_BUILD_PROXY"])
+if url.scheme != "http" or not url.hostname or url.path not in ("", "/"):
+    raise SystemExit("THREADMILL_BUILD_PROXY must be an http://host:port URL")
+if url.username or url.password or url.query or url.fragment:
+    raise SystemExit("authenticated or decorated build proxy URLs are unsupported")
+
+needle = "/opt/srb/fetch_deps.sh /opt/srb/deps.txt"
+if needle not in text:
+    raise SystemExit(0)
+if text.count(needle) != 1:
+    raise SystemExit(f"ambiguous Maven fetch invocation in {dockerfile}")
+
+fetcher_name = ".threadmill-fetch-maven"
+fetcher_container = "/opt/srb/threadmill-fetch-maven"
+shutil.copyfile(
+    os.environ["FETCH_MAVEN"],
+    task / "environment" / fetcher_name,
+)
+lines = text.splitlines(keepends=True)
+dependency_lines = [
+    index
+    for index, line in enumerate(lines)
+    if line.startswith("COPY deps.txt ")
+]
+if len(dependency_lines) != 1:
+    raise SystemExit(f"Maven fetch injection requires one deps.txt COPY in {dockerfile}")
+lines[dependency_lines[0]:dependency_lines[0]] = [
+    f"COPY --chmod=0755 {fetcher_name} {fetcher_container}\n"
+]
+text = "".join(lines).replace(
+    needle,
+    f"{fetcher_container} /opt/srb/deps.txt && rm -f {fetcher_container}",
+    1,
+)
+dockerfile.write_text(text)
+PY
+}
+
+run_task() (
+  local task="$1"
+  local model="$2"
+  shift 2
+  check_source
+  local input
+  input="$(task_path "$task")"
+  if [[ -n "${THREADMILL_BUILD_PROXY:-}" ]]; then
+    local staging
+    staging="$(mktemp -d "$work_root/swe-refactor-bench/.task.XXXXXX")"
+    trap 'rm -rf -- "$staging"' EXIT
+    input="$staging/$task"
+    prepare_proxy_task "$task" "$input" "$THREADMILL_BUILD_PROXY"
+  fi
+  THREADMILL_BENCHMARK_NAME=swe-refactor-bench \
+    THREADMILL_BENCHMARK_JOBS="$jobs_dir" \
+    "$harbor_bench" run-path "$input" "$model" "$@"
+)
+
+case "${1:-}" in
+  doctor) doctor ;;
+  fetch) fetch ;;
+  path) check_source; printf '%s\n' "$source_dir" ;;
+  jobs) mkdir -p -- "$jobs_dir"; printf '%s\n' "$jobs_dir" ;;
+  list) list_tasks ;;
+  validate) validate "${2:-all}" ;;
+  harness-test) harness_test ;;
+  adapter-test) "$harbor_bench" test ;;
+  build) "$harbor_bench" build ;;
+  prepare-infra) prepare_infra ;;
+  install-only)
+    [[ $# -ge 3 ]] || { usage >&2; exit 2; }
+    run_task "$2" "$3" --install-only "${@:4}"
+    ;;
+  run)
+    [[ $# -ge 3 ]] || { usage >&2; exit 2; }
+    prepare_infra
+    run_task "$2" "$3" "${@:4}"
+    ;;
+  -h|--help|help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

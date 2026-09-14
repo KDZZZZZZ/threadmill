@@ -1,0 +1,869 @@
+// Package manager 把经理循环、协调图调度和任务报告串成一个可唤醒的运行单元。
+package manager
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"runtime"
+	"runtime/debug"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/KDZZZZZZ/threadmill/internal/agent"
+	"github.com/KDZZZZZZ/threadmill/internal/cmdcache"
+	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	"github.com/KDZZZZZZ/threadmill/internal/coordination"
+	"github.com/KDZZZZZZ/threadmill/internal/event"
+	tmexec "github.com/KDZZZZZZ/threadmill/internal/exec"
+	"github.com/KDZZZZZZ/threadmill/internal/logging"
+	"github.com/KDZZZZZZ/threadmill/internal/provider"
+	"github.com/KDZZZZZZ/threadmill/internal/vfs"
+)
+
+const metricsSnapshotInterval = 30 * time.Second
+
+// Options 启动 manager 所需的工作区、配置和可选依赖。
+type Options struct {
+	Root       string
+	ConfigPath string
+	File       provider.FileConfig
+	Provider   agent.Provider
+	Output     func(string)
+	OnEvent    event.Handler
+	Logger     *slog.Logger
+}
+
+// Manager 是长命经理，调度相互独立的 task 激活。
+type Manager struct {
+	graph     *coordination.Graph
+	stores    coordination.Stores
+	assemble  coordination.AssembleFunc
+	loop      *agent.Loop
+	tokens    *tokenCounter
+	metrics   *event.Collector
+	events    *event.Bus
+	output    func(string)
+	outputMu  sync.Mutex
+	modelName string
+	startedAt time.Time
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	mu        sync.Mutex
+	inputs    []managerInput
+	pending   int
+	idle      *sync.Cond
+	err       error
+	settling  bool
+	runs      map[string]taskRun
+	closed    bool
+	logFile   io.Closer
+	logger    *slog.Logger
+}
+
+type taskRun struct {
+	activation uint64
+	cancel     context.CancelFunc // nil after this activation settles
+	persistent bool
+}
+
+// managerInput 只保存与 loop FIFO 同步的投影元数据；消息本体由 loop 持有。
+type managerInput struct {
+	projectUserMessage bool
+}
+
+// Open 接线存储、装配经理并启动常驻 Run。
+func Open(parent context.Context, opt Options) (*Manager, error) {
+	if parent == nil {
+		panic("nil context")
+	}
+	if opt.Root == "" {
+		return nil, fmt.Errorf("manager: root is required")
+	}
+	paths, err := openStatePaths(opt.Root)
+	if err != nil {
+		return nil, err
+	}
+	opt.Root = paths.ProjectRoot
+	file := opt.File
+	if file.LLM.Provider == "" {
+		loaded, err := provider.LoadRuntimeConfig(opt.Root, opt.ConfigPath)
+		if err != nil {
+			return nil, err
+		}
+		file = loaded
+	}
+	llm := opt.Provider
+	if llm == nil {
+		got, err := provider.NewResponses(file.LLM, nil)
+		if err != nil {
+			return nil, err
+		}
+		llm = got
+	}
+
+	checkpoints, err := agent.NewDirCheckpointStore(paths.ReactDir)
+	if err != nil {
+		return nil, err
+	}
+	managerCheckpoints, err := agent.NewDirCheckpointStore(paths.ManagerReactDir)
+	if err != nil {
+		return nil, err
+	}
+	progress, err := coordination.NewDirProgressStore(paths.ProgressDir)
+	if err != nil {
+		return nil, err
+	}
+	graph, err := coordination.OpenGraph(paths.GraphFile)
+	if err != nil {
+		return nil, err
+	}
+	memory, err := ctxgraph.OpenStore(paths.MemoryFile)
+	if err != nil {
+		return nil, err
+	}
+	liveRoot := paths.VFSDir
+	if file.VFS.LiveRoot != "" {
+		liveRoot = file.VFS.LiveRoot
+	}
+	files, err := vfs.NewPersistentStoreWithOptions(
+		opt.Root,
+		liveRoot,
+		vfs.Options{Overlay: true},
+	)
+	if err != nil {
+		return nil, err
+	}
+	if file.Memory.SoftMemoryLimitMB > 0 {
+		debug.SetMemoryLimit(int64(file.Memory.SoftMemoryLimitMB) << 20)
+	}
+	// 命令结果缓存跨进程共享：缓存目录挂在项目状态目录下，同一项目的另一个
+	// Threadmill 进程指向同一份产物存储。构造失败不该让整个进程起不来，
+	// 缓存只是加速，不是正确性的一部分。
+	var commandCache *cmdcache.Cache
+	if file.Exec.Cache.Enabled {
+		commandCache, err = cmdcache.New(cmdcache.Config{
+			Dir:              paths.CacheDir,
+			MaxBytes:         file.Exec.Cache.MaxBytes,
+			MaxReadSet:       file.Exec.Cache.MaxReadSet,
+			CacheFailures:    file.Exec.Cache.CacheFailures,
+			VerifySampleRate: file.Exec.Cache.VerifySampleRate,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	s := &Manager{
+		graph:     graph,
+		tokens:    newTokenCounter(),
+		metrics:   event.NewCollector(),
+		output:    opt.Output,
+		modelName: file.LLM.Model,
+		startedAt: time.Now(),
+		runs:      make(map[string]taskRun),
+	}
+	s.idle = sync.NewCond(&s.mu)
+	s.stores = coordination.Stores{
+		Memory: memory,
+		Files:  files,
+		Exec: tmexec.New(tmexec.Config{
+			Slots:                      file.Exec.Slots,
+			Timeout:                    time.Duration(file.Exec.Timeout) * time.Second,
+			OutputCapKB:                file.Exec.OutputCapKB,
+			ContainerImage:             file.Exec.ContainerImage,
+			ExternalSandbox:            file.Exec.ExternalSandbox,
+			ExternalWorkspaceIsolation: file.Exec.ExternalWorkspaceIsolation,
+			Cache:                      commandCache,
+			DisableTrace:               file.Exec.Cache.DisableTrace,
+		}),
+	}
+	if status := s.stores.Exec.Stats(); status.SandboxBackend == "unavailable" || status.WorkspaceIsolation == "unavailable" {
+		return nil, errors.Join(fmt.Errorf("manager: required execution sandbox is unavailable; complete installation preflight before opening a project"), files.Close())
+	}
+	s.graph.SetProgressStore(progress)
+	if err := s.graph.SetTaskSink(s.stores.ProjectManagerTaskInfos); err != nil {
+		return nil, err
+	}
+
+	logger := opt.Logger
+	if logger == nil {
+		f, err := os.OpenFile(paths.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		logger = logging.New(logging.Config{Output: f})
+		s.logFile = f
+	}
+	s.logger = logger
+	fileStats := files.Stats()
+	if fileStats.OverlayAvailable {
+		logger.Info("VFS materialization acceleration available", "backend", fileStats.OverlayBackend)
+
+	}
+	bus := event.NewBus(s.onEvent, s.metrics.Handle, event.Monitor(logger), opt.OnEvent)
+	s.events = bus
+	overlay := agent.FileOverlay{
+		Tools:    file.Tools,
+		Prompts:  file.Prompts,
+		Events:   bus,
+		Curation: file.Memory.Curation,
+	}
+	overlay.NamedTools = s.graph.HelpTools(s.enqueueManager)
+	s.assemble = coordination.Assemble(
+		s.stores,
+		llm,
+		file.Agents,
+		nil,
+		file.LLM.ContextWindow,
+		checkpoints,
+		overlay,
+	)
+	loop, err := coordination.NewManagerLoop(
+		s.graph,
+		s.stores,
+		llm,
+		file.Agents,
+		nil,
+		file.LLM.ContextWindow,
+		overlay,
+	)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(parent)
+	s.cancel = cancel
+	s.graph.SetRunContext(ctx)
+	if err := loop.AddHooks(s.hooks(ctx)); err != nil {
+		cancel()
+		return nil, err
+	}
+	loop.BindCheckpointStore(managerCheckpoints)
+	managerPending, err := loop.HasPendingCheckpoint()
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	if managerPending {
+		s.inputs = append(s.inputs, managerInput{})
+		s.pending++
+	}
+	s.loop = loop
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	if err := loop.AddHooks(agent.Hooks{
+		BeforeRun: []agent.RunHook{func(context.Context) error {
+			readyOnce.Do(func() { close(ready) })
+			return nil
+		}},
+	}); err != nil {
+		cancel()
+		return nil, err
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		for {
+			err := loop.Run(ctx)
+			if !agent.IsRecoverableTurnError(err) {
+				s.setErr(err)
+				return
+			}
+			logger.Warn("manager turn paused by recoverable runtime error; resuming checkpoint", "error", err)
+			s.mu.Lock()
+			// BeforeTurn already consumed this turn's queue metadata. The restored
+			// checkpoint must occupy the same FIFO position without projecting the
+			// user message a second time.
+			s.inputs = append([]managerInput{{}}, s.inputs...)
+			s.mu.Unlock()
+		}
+	}()
+	select {
+	case <-ready:
+	case <-ctx.Done():
+		cancel()
+		s.wg.Wait()
+		return nil, ctx.Err()
+	}
+	if !managerPending {
+		s.runReady(ctx)
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ticker := time.NewTicker(metricsSnapshotInterval)
+		defer ticker.Stop()
+		s.monitorSnapshots(ctx, ticker.C)
+	}()
+	return s, nil
+}
+
+// Send 把用户消息加入 loop FIFO；消息只在对应 turn 开始时进入 manager 记忆。
+func (s *Manager) Send(text string) {
+	s.enqueue(text, true)
+}
+
+// WaitIdle 等到经理队列清空且普通任务完成；独立持久任务可继续运行。
+func (s *Manager) WaitIdle(ctx context.Context) error {
+	if ctx == nil {
+		panic("nil context")
+	}
+	stop := context.AfterFunc(ctx, func() {
+		s.mu.Lock()
+		s.idle.Broadcast()
+		s.mu.Unlock()
+	})
+	defer stop()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for ctx.Err() == nil {
+		waiting := s.pending > 0 || s.foregroundRunningLocked()
+		if !s.settling && (!waiting || s.err != nil) {
+			break
+		}
+		s.idle.Wait()
+	}
+	if s.err != nil && !errors.Is(s.err, context.Canceled) {
+		return s.err
+	}
+	return ctx.Err()
+}
+
+// Snapshot 返回当前协调图。
+func (s *Manager) Snapshot() coordination.Snapshot {
+	return s.graph.Snapshot()
+}
+
+// Cancel 取消普通任务；没有普通任务时抢占经理当前轮。持久任务由会话管理。
+func (s *Manager) Cancel() bool {
+	s.mu.Lock()
+	cancels := make(map[string]context.CancelFunc, len(s.runs))
+	for taskID, run := range s.runs {
+		if run.cancel != nil && !run.persistent {
+			cancels[taskID] = run.cancel
+		}
+	}
+	s.mu.Unlock()
+	for taskID, cancel := range cancels {
+		s.graph.CancelTask(taskID)
+		cancel()
+	}
+	if len(cancels) > 0 {
+		return true
+	}
+	return s.loop.Preempt()
+}
+
+// ModelName 返回配置里的 LLM 模型名。
+func (s *Manager) ModelName() string {
+	return s.modelName
+}
+
+// Busy 表示还有未完成的经理轮或普通任务。
+func (s *Manager) Busy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pending > 0 || s.foregroundRunningLocked() || s.settling
+}
+
+func (s *Manager) foregroundRunningLocked() bool {
+	for _, run := range s.runs {
+		if run.cancel != nil && !run.persistent {
+			return true
+		}
+	}
+	return false
+}
+
+// Metrics 返回 manager、事件、调度器、VFS、记忆图和 Go runtime 的一致近照。
+func (s *Manager) Metrics() Metrics {
+	s.mu.Lock()
+	pending := s.pending
+	running := 0
+	for _, run := range s.runs {
+		if run.cancel != nil {
+			running++
+		}
+	}
+	startedAt := s.startedAt
+	s.mu.Unlock()
+
+	var memoryStats runtime.MemStats
+	runtime.ReadMemStats(&memoryStats)
+	metrics := Metrics{
+		Time:    time.Now(),
+		Uptime:  time.Since(startedAt),
+		Pending: pending,
+		Tasks:   TaskMetrics{Running: running},
+		Events:  s.metrics.Snapshot(),
+		Runtime: RuntimeMetrics{
+			Goroutines:   runtime.NumGoroutine(),
+			HeapAlloc:    memoryStats.HeapAlloc,
+			HeapObjects:  memoryStats.HeapObjects,
+			GCCount:      memoryStats.NumGC,
+			GCPauseTotal: time.Duration(memoryStats.PauseTotalNs),
+		},
+	}
+	if s.stores.Exec != nil {
+		metrics.Exec = s.stores.Exec.Stats()
+	}
+	if s.stores.Files != nil {
+		metrics.VFS = s.stores.Files.Stats()
+	}
+	if s.stores.Memory != nil {
+		metrics.Memory = s.stores.Memory.Stats()
+	}
+	for _, task := range s.graph.Snapshot().Tasks {
+		metrics.Tasks.Total++
+		switch task.Outcome {
+		case coordination.OutcomeActive:
+			metrics.Tasks.Active++
+		case coordination.OutcomeDone:
+			metrics.Tasks.Done++
+		case coordination.OutcomeFailed:
+			metrics.Tasks.Failed++
+		case coordination.OutcomeCanceled:
+			metrics.Tasks.Canceled++
+		case coordination.OutcomeIdle:
+			metrics.Tasks.Idle++
+		case coordination.OutcomeClosed:
+			metrics.Tasks.Closed++
+		}
+	}
+	return metrics
+}
+
+// Close 停止会话，等待实际执行结束后释放存储。
+func (s *Manager) Close() {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.wg.Wait()
+	s.graph.WaitRuns()
+	if s.stores.Files != nil {
+		if err := s.stores.Files.Close(); err != nil && s.logger != nil {
+			s.logger.Warn("close VFS", "error", err)
+		}
+	}
+	if s.logFile != nil {
+		_ = s.logFile.Close()
+	}
+}
+
+func (s *Manager) hooks(session context.Context) agent.Hooks {
+	return agent.Hooks{
+		BeforeTurn: []agent.TurnHook{
+			func(_ context.Context, message agent.UserMessage) error {
+				s.mu.Lock()
+				if len(s.inputs) == 0 {
+					s.mu.Unlock()
+					return errors.New("manager: missing queued input metadata")
+				}
+				input := s.inputs[0]
+				s.inputs[0] = managerInput{}
+				s.inputs = s.inputs[1:]
+				s.mu.Unlock()
+				if !input.projectUserMessage {
+					return nil
+				}
+				return s.stores.ProjectManagerUserMessage(message.Content)
+			},
+		},
+		AfterAssistant: []agent.AfterAssistantHook{
+			func(_ context.Context, message agent.AssistantMessage) error {
+				if len(message.ToolCalls) > 0 {
+					return nil
+				}
+				if message.Content != "" && s.output != nil {
+					s.emitOutput(message.Content)
+				}
+				// The graph is settled for this turn. Ready tasks do not consume
+				// the manager's tail memory and need not wait for its compaction.
+				s.runReady(session)
+				return nil
+			},
+		},
+		AfterTurn: []agent.AfterTurnHook{
+			func(_ context.Context, user agent.UserMessage, result agent.TurnResult) error {
+				if result.Err != nil && !errors.Is(result.Err, context.Canceled) {
+					if agent.IsRecoverableTurnError(result.Err) {
+						return nil
+					}
+					s.setErr(result.Err)
+					return nil
+				}
+				if requestID, ok := coordination.ParseHelpRequestID(user.Content); ok {
+					if err := s.graph.DeclineHelp(requestID); err != nil {
+						s.setErr(err)
+						return err
+					}
+				}
+				s.runReady(session)
+				s.turnDone()
+				return nil
+			},
+		},
+	}
+}
+
+func (s *Manager) runReady(ctx context.Context) {
+	for _, task := range s.graph.Snapshot().Tasks {
+		if task.Outcome != coordination.OutcomeActive || task.RunPolicy == coordination.RunPolicyHeld {
+			continue
+		}
+		s.mu.Lock()
+		if s.closed || ctx.Err() != nil {
+			s.mu.Unlock()
+			return
+		}
+		if run, started := s.runs[task.ID]; started && (run.activation == task.Activation || run.cancel != nil) {
+			s.mu.Unlock()
+			continue
+		}
+		runCtx, cancel := context.WithCancel(ctx)
+		s.runs[task.ID] = taskRun{activation: task.Activation, cancel: cancel, persistent: task.Persistent}
+		s.wg.Add(1)
+		s.mu.Unlock()
+		go func() {
+			defer s.wg.Done()
+			s.runTask(runCtx, cancel, task)
+			// Continue may have queued another activation while this run settled.
+			s.runReady(ctx)
+		}()
+	}
+}
+
+func (s *Manager) runTask(ctx context.Context, cancel context.CancelFunc, task coordination.Task) {
+	defer cancel()
+	started := time.Now()
+	s.events.Publish(ctx, event.TaskStart(task.ID))
+	before := s.tokens.sumPrefix(task.ID + ":")
+	var report string
+	reported := false
+	completed := task
+	_, runErr := s.graph.RunWithReport(
+		ctx, task.ID, task.Info, s.stores, s.assemble,
+		func(finished coordination.Task, output string, taskErr error) error {
+			completed = finished
+			tokens := s.tokens.sumPrefix(task.ID+":") - before
+			report = formatReport(finished, output, taskErr, time.Since(started), tokens)
+			if err := s.stores.ProjectManagerTaskReport(finished, report); err != nil {
+				return err
+			}
+			reported = true
+			return nil
+		},
+	)
+	// Failed persistence can leave this activation active. A newer activation's
+	// state belongs to its own run and must not replace the captured report task.
+	if latest, ok := s.graph.Task(task.ID); ok && latest.Activation == completed.Activation {
+		completed.Outcome = latest.Outcome
+	}
+	s.events.Publish(ctx, event.TaskEnd(task.ID, completed.Outcome, started, runErr))
+	if completed.Outcome == coordination.OutcomeActive || !reported {
+		s.mu.Lock()
+		run := s.runs[task.ID]
+		run.cancel = nil
+		s.runs[task.ID] = run
+		s.mu.Unlock()
+		s.setErr(runErr)
+		return
+	}
+
+	s.emitOutput(report)
+	s.mu.Lock()
+	run := s.runs[task.ID]
+	run.cancel = nil
+	s.runs[task.ID] = run
+	if !s.closed {
+		s.enqueueLocked(report, false)
+	}
+	s.idle.Broadcast()
+	s.mu.Unlock()
+}
+
+func (s *Manager) emitOutput(text string) {
+	if s.output == nil {
+		return
+	}
+	s.outputMu.Lock()
+	defer s.outputMu.Unlock()
+	s.output(text)
+}
+
+func (s *Manager) enqueueManager(text string) {
+	s.enqueue(text, false)
+}
+
+func (s *Manager) enqueue(text string, projectUserMessage bool) {
+	s.mu.Lock()
+	s.enqueueLocked(text, projectUserMessage)
+	s.mu.Unlock()
+}
+
+func (s *Manager) enqueueLocked(text string, projectUserMessage bool) {
+	if s.closed {
+		return
+	}
+	s.inputs = append(s.inputs, managerInput{projectUserMessage: projectUserMessage})
+	s.pending++
+	s.loop.Enqueue(agent.UserMessage{Content: text})
+}
+
+func (s *Manager) turnDone() {
+	s.mu.Lock()
+	s.pending--
+	idle := false
+	if s.pending <= 0 {
+		s.pending = 0
+		idle = !s.foregroundRunningLocked()
+		if idle {
+			s.settling = true
+		}
+	}
+	s.mu.Unlock()
+	if !idle {
+		return
+	}
+	s.logSnapshot()
+	s.mu.Lock()
+	s.settling = false
+	s.idle.Broadcast()
+	s.mu.Unlock()
+}
+
+func (s *Manager) logSnapshot() {
+	if s.logger == nil {
+		return
+	}
+	snapshot := s.Metrics()
+	s.logger.Info("runtime snapshot",
+		"uptime", snapshot.Uptime,
+		"pending", snapshot.Pending,
+		"tasks_running", snapshot.Tasks.Running,
+		"tasks_total", snapshot.Tasks.Total,
+		"tasks_active", snapshot.Tasks.Active,
+		"tasks_idle", snapshot.Tasks.Idle,
+		"tasks_done", snapshot.Tasks.Done,
+		"tasks_failed", snapshot.Tasks.Failed,
+		"tasks_canceled", snapshot.Tasks.Canceled,
+		"tasks_closed", snapshot.Tasks.Closed,
+		"model_completed", snapshot.Events.Model.Completed,
+		"model_errors", snapshot.Events.Model.Errors,
+		"model_active", snapshot.Events.Model.Active,
+		"model_p50", snapshot.Events.Model.Duration.P50,
+		"model_p95", snapshot.Events.Model.Duration.P95,
+		"model_max", snapshot.Events.Model.Duration.Max,
+		"model_ttft_p50", snapshot.Events.Model.TTFT.P50,
+		"model_ttft_p95", snapshot.Events.Model.TTFT.P95,
+		"model_ttft_max", snapshot.Events.Model.TTFT.Max,
+		"model_delta_chunks", snapshot.Events.DeltaChunks,
+		"model_delta_bytes", snapshot.Events.DeltaBytes,
+		"model_stream_chunks", snapshot.Events.StreamChunks,
+		"model_stream_idle", snapshot.Events.ModelStreamIdle,
+		"model_retries", snapshot.Events.ModelRetries,
+		"tokens", snapshot.Events.Tokens,
+		"input_tokens", snapshot.Events.InputTokens,
+		"cached_tokens", snapshot.Events.CachedTokens,
+		"cache_write_tokens", snapshot.Events.CacheWriteTokens,
+		"cache_hit_rate", snapshot.Events.CacheHitRate,
+		"total_cache_hit_rate", snapshot.Events.TotalCacheHitRate,
+		"total_tokens", snapshot.Events.Tokens+snapshot.Events.MemoryTokens,
+		"tool_completed", snapshot.Events.Tool.Completed,
+		"tool_errors", snapshot.Events.Tool.Errors,
+		"tool_active", snapshot.Events.Tool.Active,
+		"tool_p50", snapshot.Events.Tool.Duration.P50,
+		"tool_p95", snapshot.Events.Tool.Duration.P95,
+		"tool_max", snapshot.Events.Tool.Duration.Max,
+		"task_p50", snapshot.Events.Task.Duration.P50,
+		"task_p95", snapshot.Events.Task.Duration.P95,
+		"task_max", snapshot.Events.Task.Duration.Max,
+		"memory_ops_completed", snapshot.Events.Memory.Completed,
+		"memory_ops_errors", snapshot.Events.Memory.Errors,
+		"memory_ops_active", snapshot.Events.Memory.Active,
+		"memory_ops_tokens", snapshot.Events.MemoryTokens,
+		"memory_input_tokens", snapshot.Events.MemoryInputTokens,
+		"memory_cached_tokens", snapshot.Events.MemoryCachedTokens,
+		"memory_cache_write_tokens", snapshot.Events.MemoryCacheWriteTokens,
+		"memory_ops_retries", snapshot.Events.MemoryRetries,
+		"memory_stream_chunks", snapshot.Events.MemoryStreamChunks,
+		"memory_stream_idle", snapshot.Events.MemoryStreamIdle,
+		"memory_ttft_p50", snapshot.Events.Memory.TTFT.P50,
+		"memory_ttft_p95", snapshot.Events.Memory.TTFT.P95,
+		"memory_ttft_max", snapshot.Events.Memory.TTFT.Max,
+		"memory_organizer_runs", snapshot.Events.MemoryOrganizerRuns,
+		"memory_organizer_candidates", snapshot.Events.MemoryOrganizerCandidates,
+		"memory_organizer_selected", snapshot.Events.MemoryOrganizerSelected,
+		"memory_organizer_tokens", snapshot.Events.MemoryOrganizerTokens,
+		"memory_organizer_duration", snapshot.Events.MemoryOrganizerDuration.Total,
+		"memory_organizer_p50", snapshot.Events.MemoryOrganizerDuration.P50,
+		"memory_organizer_p95", snapshot.Events.MemoryOrganizerDuration.P95,
+		"memory_organizer_max", snapshot.Events.MemoryOrganizerDuration.Max,
+		"memory_ops_p50", snapshot.Events.Memory.Duration.P50,
+		"memory_ops_p95", snapshot.Events.Memory.Duration.P95,
+		"memory_ops_max", snapshot.Events.Memory.Duration.Max,
+		"exec_capacity", snapshot.Exec.Capacity,
+		"exec_sandbox_backend", snapshot.Exec.SandboxBackend,
+		"exec_network_isolation", snapshot.Exec.NetworkIsolation,
+		"exec_workspace_isolation", snapshot.Exec.WorkspaceIsolation,
+		"exec_queued", snapshot.Exec.Queued,
+		"exec_active", snapshot.Exec.Active,
+		"exec_peak_queued", snapshot.Exec.PeakQueued,
+		"exec_peak_active", snapshot.Exec.PeakActive,
+		"exec_requests", snapshot.Exec.Requests,
+		"exec_started", snapshot.Exec.Started,
+		"exec_completed", snapshot.Exec.Completed,
+		"exec_errors", snapshot.Exec.Errors,
+		"exec_canceled", snapshot.Exec.Canceled,
+		"exec_timed_out", snapshot.Exec.TimedOut,
+		"exec_wait_duration", snapshot.Exec.WaitDuration,
+		"exec_run_duration", snapshot.Exec.RunDuration,
+		"exec_tracked_process_groups", snapshot.Exec.TrackedProcessGroups,
+		"exec_runtime_dirs", snapshot.Exec.RuntimeDirs,
+		"exec_runtime_cleanup_errors", snapshot.Exec.RuntimeCleanupErrors,
+		"exec_last_runtime_cleanup_error", snapshot.Exec.LastRuntimeCleanupError,
+		"exec_heavy_capacity", snapshot.Exec.HeavyCapacity,
+		"exec_heavy_queued", snapshot.Exec.HeavyQueued,
+		"exec_heavy_active", snapshot.Exec.HeavyActive,
+		"exec_heavy_peak_queued", snapshot.Exec.HeavyPeakQueued,
+		"exec_heavy_peak_active", snapshot.Exec.HeavyPeakActive,
+		"exec_heavy_wait_duration", snapshot.Exec.HeavyWaitDuration,
+		"exec_dependency_tracing", snapshot.Exec.DependencyTracing,
+		"cmdcache_lookups", snapshot.Exec.Cache.Lookups,
+		"cmdcache_hits", snapshot.Exec.Cache.Hits,
+		"cmdcache_stores", snapshot.Exec.Cache.Stores,
+		"cmdcache_rejected", snapshot.Exec.Cache.Rejected,
+		"cmdcache_replay_errors", snapshot.Exec.Cache.ReplayErrors,
+		"cmdcache_artifact_reflinks", snapshot.Exec.Cache.ArtifactReflinks,
+		"cmdcache_reflink_bytes", snapshot.Exec.Cache.ReflinkBytes,
+		"cmdcache_artifact_copies", snapshot.Exec.Cache.ArtifactCopies,
+		"cmdcache_copied_bytes", snapshot.Exec.Cache.CopiedBytes,
+		"cmdcache_verifications", snapshot.Exec.Cache.Verifications,
+		"cmdcache_verify_mismatches", snapshot.Exec.Cache.VerifyMismatches,
+		"cmdcache_saved_duration", snapshot.Exec.Cache.SavedDuration,
+		"vfs_environments", snapshot.VFS.Environments,
+		"vfs_live_dirs", snapshot.VFS.LiveDirs,
+		"vfs_overlay_files", snapshot.VFS.OverlayFiles,
+		"vfs_tombstones", snapshot.VFS.Tombstones,
+		"vfs_overlay_bytes", snapshot.VFS.OverlayBytes,
+		"vfs_materialize_copies", snapshot.VFS.MaterializeCopies,
+		"vfs_materialize_copy_errors", snapshot.VFS.MaterializeCopyErrors,
+		"vfs_materialize_copy_duration", snapshot.VFS.MaterializeCopyDuration,
+		"vfs_publish_attempts", snapshot.VFS.PublishAttempts,
+		"vfs_publish_commits", snapshot.VFS.PublishCommits,
+		"vfs_publish_errors", snapshot.VFS.PublishErrors,
+		"vfs_publish_cleanup_errors", snapshot.VFS.PublishCleanupErrors,
+		"vfs_publish_duration", snapshot.VFS.PublishDuration,
+		"memory_environments", snapshot.Memory.Environments,
+		"memory_subgraphs", snapshot.Memory.Subgraphs,
+		"memory_nodes", snapshot.Memory.Nodes,
+		"memory_edges", snapshot.Memory.Edges,
+		"goroutines", snapshot.Runtime.Goroutines,
+		"heap_alloc", snapshot.Runtime.HeapAlloc,
+		"heap_objects", snapshot.Runtime.HeapObjects,
+		"gc_count", snapshot.Runtime.GCCount,
+		"gc_pause_total", snapshot.Runtime.GCPauseTotal,
+	)
+}
+
+func (s *Manager) monitorSnapshots(ctx context.Context, ticks <-chan time.Time) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-ticks:
+			if !ok {
+				return
+			}
+			if s.Busy() {
+				s.logSnapshot()
+			}
+		}
+	}
+}
+
+func (s *Manager) setErr(err error) {
+	s.mu.Lock()
+	if err == nil || errors.Is(err, context.Canceled) {
+		s.pending = 0
+		s.idle.Broadcast()
+		s.mu.Unlock()
+		return
+	}
+	if s.err != nil {
+		s.pending = 0
+		s.idle.Broadcast()
+		s.mu.Unlock()
+		return
+	}
+	s.err = err
+	s.pending = 0
+	s.settling = true
+	s.mu.Unlock()
+	s.logSnapshot()
+	s.mu.Lock()
+	s.settling = false
+	s.idle.Broadcast()
+	s.mu.Unlock()
+}
+
+func (s *Manager) onEvent(_ context.Context, ev event.RuntimeEvent) {
+	if ev.Kind == event.KindModel && ev.Phase == event.PhaseEnd && ev.Tokens > 0 {
+		s.tokens.add(ev.AgentID, ev.Tokens)
+	}
+}
+
+func formatReport(task coordination.Task, output string, err error, took time.Duration, tokens int) string {
+	body := output
+	label := "verifier 输出"
+	if err != nil {
+		body = err.Error()
+		label = "流程错误"
+		if errors.Is(err, coordination.ErrRoleStalled) {
+			label = "可恢复僵局"
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "[任务报告] %s · %s · 耗时 %s\n", task.ID, task.Outcome, took.Truncate(time.Second))
+	fmt.Fprintf(&b, "目标: %s\n", task.Info)
+	if tokens > 0 {
+		fmt.Fprintf(&b, "token: %d\n", tokens)
+	}
+	fmt.Fprintf(&b, "%s:\n%s", label, body)
+	return b.String()
+}
+
+type tokenCounter struct {
+	mu      sync.Mutex
+	byAgent map[string]int
+}
+
+func newTokenCounter() *tokenCounter {
+	return &tokenCounter{byAgent: make(map[string]int)}
+}
+
+func (c *tokenCounter) add(agentID string, n int) {
+	c.mu.Lock()
+	c.byAgent[agentID] += n
+	c.mu.Unlock()
+}
+
+func (c *tokenCounter) sumPrefix(prefix string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	total := 0
+	for id, n := range c.byAgent {
+		if strings.HasPrefix(id, prefix) {
+			total += n
+		}
+	}
+	return total
+}

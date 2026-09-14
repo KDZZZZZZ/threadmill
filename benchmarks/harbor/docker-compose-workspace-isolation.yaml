@@ -1,0 +1,11 @@
+services:
+  main:
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor=unconfined
+    volumes:
+      - threadmill-vfs:/threadmill-vfs
+
+volumes:
+  threadmill-vfs:

@@ -1,0 +1,89 @@
+package exec
+
+import (
+	"context"
+	"os"
+	osexec "os/exec"
+	"path/filepath"
+
+	"github.com/KDZZZZZZ/threadmill/internal/env"
+)
+
+const bwrapWorkspace = "/workspace"
+
+func probeBwrap() bool {
+	if _, err := osexec.LookPath("bwrap"); err != nil {
+		return false
+	}
+	dir, err := os.MkdirTemp("", "threadmill-bwrap-probe-")
+	if err != nil {
+		return false
+	}
+	defer os.RemoveAll(dir)
+	if err := os.Mkdir(filepath.Join(dir, "tmp"), 0o750); err != nil {
+		return false
+	}
+	cmd := osexec.Command(
+		"bwrap",
+		"--unshare-user",
+		"--unshare-pid",
+		"--die-with-parent",
+		"--tmpfs", "/",
+		"--dir", bwrapWorkspace,
+		"--bind", dir, bwrapWorkspace,
+		"--bind", filepath.Join(dir, "tmp"), "/tmp",
+		"--ro-bind-try", "/usr", "/usr",
+		"--ro-bind-try", "/bin", "/bin",
+		"--ro-bind-try", "/lib", "/lib",
+		"--ro-bind-try", "/lib64", "/lib64",
+		"--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf",
+		"--ro-bind-try", "/etc/hosts", "/etc/hosts",
+		"--ro-bind-try", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
+		"--ro-bind-try", "/etc/ssl/certs", "/etc/ssl/certs",
+		"--ro-bind-try", "/etc/pki", "/etc/pki",
+		"--dev", "/dev",
+		"--proc", "/proc",
+		"--chdir", bwrapWorkspace,
+		"--",
+		"bash", "-c", "true",
+	)
+	return cmd.Run() == nil
+}
+
+func runBwrap(
+	ctx context.Context,
+	live, tempDir, command string,
+	capBytes int,
+	track func(int),
+	trace *traceRun,
+) (env.ExecResult, error) {
+	// 追踪器跑在沙箱内，作为该 PID 命名空间的 1 号进程追踪自己的后代；
+	// Yama ptrace_scope=1 允许这种父子关系。
+	args := trace.wrap(bashArgs(command))
+	bwrapArgs := []string{
+		"--unshare-user",
+		"--unshare-pid",
+		"--die-with-parent",
+		"--tmpfs", "/",
+		"--dir", bwrapWorkspace,
+		"--bind", live, bwrapWorkspace,
+		"--bind", tempDir, "/tmp",
+		"--ro-bind-try", "/usr", "/usr",
+		"--ro-bind-try", "/bin", "/bin",
+		"--ro-bind-try", "/lib", "/lib",
+		"--ro-bind-try", "/lib64", "/lib64",
+		"--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf",
+		"--ro-bind-try", "/etc/hosts", "/etc/hosts",
+		"--ro-bind-try", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
+		"--ro-bind-try", "/etc/ssl/certs", "/etc/ssl/certs",
+		"--ro-bind-try", "/etc/pki", "/etc/pki",
+		"--dev", "/dev",
+		"--proc", "/proc",
+		"--chdir", bwrapWorkspace,
+		"--",
+	}
+	bwrapArgs = append(bwrapArgs, args...)
+	cmd := osexec.CommandContext(ctx, "bwrap", bwrapArgs...)
+	cmd.Env = networkSandboxEnv("/tmp", "/tmp")
+	return collect(ctx, cmd, capBytes, track)
+}

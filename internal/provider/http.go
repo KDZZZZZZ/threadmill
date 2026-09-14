@@ -1,0 +1,277 @@
+package provider
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/KDZZZZZZ/threadmill/internal/event"
+)
+
+const (
+	maxResponseBody      = 16 << 20
+	maxRequestRetries    = 5
+	defaultRetryInterval = time.Second
+	providerUserAgent    = "threadmill"
+)
+
+// transport 保存 OpenAI-compatible Provider 共用的 HTTP 配置。
+type transport struct {
+	client        *http.Client
+	endpoint      string
+	apiKey        string
+	model         string
+	retryInterval time.Duration
+	maxRetries    int
+}
+
+// newTransport 校验协议类型并构造对应 API 端点。
+func newTransport(
+	config LLMConfig,
+	expectedProvider string,
+	endpointPath string,
+	client *http.Client,
+) (transport, error) {
+	if err := config.validate(); err != nil {
+		return transport{}, err
+	}
+	if config.Provider != expectedProvider {
+		return transport{}, fmt.Errorf(
+			"%w: llm.provider must be %q",
+			ErrInvalidConfig,
+			expectedProvider,
+		)
+	}
+
+	apiKey, err := config.resolveAPIKey()
+	if err != nil {
+		return transport{}, err
+	}
+	client, err = httpClientWithProxy(client, config.ProxyURL)
+	if err != nil {
+		return transport{}, err
+	}
+
+	maxRetries, retryInterval := maxRequestRetries, defaultRetryInterval
+	if config.MaxRetries > 0 {
+		maxRetries = config.MaxRetries
+	}
+	if config.RetryIntervalSeconds > 0 {
+		retryInterval = time.Duration(config.RetryIntervalSeconds) * time.Second
+	}
+	baseURL, _ := url.Parse(config.BaseURL)
+	baseURL.Path = strings.TrimRight(baseURL.Path, "/") + endpointPath
+	baseURL.RawPath = ""
+	return transport{
+		client:        client,
+		endpoint:      baseURL.String(),
+		apiKey:        strings.TrimSpace(apiKey),
+		model:         config.Model,
+		retryInterval: retryInterval,
+		maxRetries:    maxRetries,
+	}, nil
+}
+
+func httpClientWithProxy(client *http.Client, rawProxyURL string) (*http.Client, error) {
+	if rawProxyURL == "" {
+		if client == nil {
+			return &http.Client{}, nil
+		}
+		return client, nil
+	}
+	proxyURL, err := url.Parse(rawProxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("%w: parse llm.proxy_url: %v", ErrInvalidConfig, err)
+	}
+	if client == nil {
+		client = &http.Client{}
+	} else {
+		clone := *client
+		client = &clone
+	}
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	baseTransport, ok := base.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf(
+			"%w: llm.proxy_url requires an HTTP transport",
+			ErrInvalidConfig,
+		)
+	}
+	transport := baseTransport.Clone()
+	transport.Proxy = http.ProxyURL(proxyURL)
+	client.Transport = transport
+	return client, nil
+}
+
+// post 发送 JSON 请求并解码有大小上限的 JSON 响应。
+func (transport transport) post(ctx context.Context, payload any, output any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode provider request: %w", err)
+	}
+
+	retries := 0
+	for {
+		response, err := transport.do(ctx, body, "", &retries)
+		if err != nil {
+			return err
+		}
+
+		responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBody+1))
+		closeErr := response.Body.Close()
+		if readErr != nil {
+			readErr = fmt.Errorf("read provider response: %w", readErr)
+		}
+		if closeErr != nil {
+			closeErr = fmt.Errorf("close provider response: %w", closeErr)
+		}
+		if responseErr := errors.Join(readErr, closeErr); responseErr != nil {
+			if ctx.Err() != nil || retries >= transport.maxRetries {
+				return responseErr
+			}
+			retries++
+			notifyRetry(ctx, "response_read")
+			if err := waitRetry(ctx, retryDelay(response, transport.retryInterval)); err != nil {
+				return err
+			}
+			continue
+		}
+		if len(responseBody) > maxResponseBody {
+			return errors.New("provider response exceeds 16 MiB")
+		}
+		if err := json.Unmarshal(responseBody, output); err != nil {
+			return fmt.Errorf("decode provider response: %w", err)
+		}
+		return nil
+	}
+}
+
+// do 从共享预算中重试尚未开始交付响应体的瞬时请求失败。
+func (transport transport) do(ctx context.Context, body []byte, accept string, retries *int) (*http.Response, error) {
+	for {
+		retryReason := "transport"
+		request, err := http.NewRequestWithContext(
+			ctx,
+			http.MethodPost,
+			transport.endpoint,
+			bytes.NewReader(body),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("create provider request: %w", err)
+		}
+		request.Header.Set("Authorization", "Bearer "+transport.apiKey)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("User-Agent", providerUserAgent)
+		if accept != "" {
+			request.Header.Set("Accept", accept)
+		}
+
+		response, err := transport.client.Do(request)
+		if err == nil && response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
+			return response, nil
+		}
+		if err != nil {
+			err = fmt.Errorf("send provider request: %w", err)
+			if ctx.Err() != nil || *retries >= transport.maxRetries {
+				return nil, err
+			}
+		} else {
+			retryReason = retryReasonForStatus(response.StatusCode)
+			responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBody+1))
+			response.Body.Close()
+			if readErr != nil {
+				return nil, fmt.Errorf("read provider response: %w", readErr)
+			}
+			if len(responseBody) > maxResponseBody {
+				return nil, errors.New("provider response exceeds 16 MiB")
+			}
+			err = decodeHTTPError(response.Status, responseBody)
+			if !retryableStatus(response.StatusCode) || *retries >= transport.maxRetries {
+				return nil, err
+			}
+		}
+		(*retries)++
+		notifyRetry(ctx, retryReason)
+		if err := waitRetry(ctx, retryDelay(response, transport.retryInterval)); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func notifyRetry(ctx context.Context, reason string) {
+	if sink := event.RetrySink(ctx); sink != nil {
+		sink(reason)
+	}
+}
+
+func retryReasonForStatus(status int) string {
+	switch status {
+	case http.StatusRequestTimeout:
+		return "http_timeout"
+	case http.StatusConflict:
+		return "http_conflict"
+	case http.StatusTooManyRequests:
+		return "http_rate_limit"
+	default:
+		return "http_server_error"
+	}
+}
+
+func retryableStatus(status int) bool {
+	return status == http.StatusRequestTimeout ||
+		status == http.StatusConflict ||
+		status == http.StatusTooManyRequests ||
+		status >= http.StatusInternalServerError
+}
+
+// retryDelay honors Retry-After's seconds and HTTP-date forms without shortening
+// the configured interval. See RFC 9110 section 10.2.3.
+func retryDelay(response *http.Response, minimum time.Duration) time.Duration {
+	if response == nil {
+		return minimum
+	}
+	value := strings.TrimSpace(response.Header.Get("Retry-After"))
+	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil {
+		const maxSeconds = (1<<63 - 1) / uint64(time.Second)
+		return max(minimum, time.Duration(min(seconds, maxSeconds))*time.Second)
+	}
+	if deadline, err := http.ParseTime(value); err == nil {
+		return max(minimum, time.Until(deadline))
+	}
+	return minimum
+}
+
+func waitRetry(ctx context.Context, interval time.Duration) error {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("wait to retry provider request: %w", ctx.Err())
+	case <-timer.C:
+		return nil
+	}
+}
+
+// decodeHTTPError 提取兼容 OpenAI 错误信封的消息，但不暴露请求密钥。
+func decodeHTTPError(status string, body []byte) error {
+	var envelope struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &envelope) == nil && envelope.Error.Message != "" {
+		return fmt.Errorf("provider API %s: %s", status, envelope.Error.Message)
+	}
+	return fmt.Errorf("provider API %s", status)
+}

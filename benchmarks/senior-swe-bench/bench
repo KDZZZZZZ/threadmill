@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly UPSTREAM_URL="https://github.com/snorkel-ai/senior-swe-bench-v2026.06.git"
+readonly UPSTREAM_REVISION="1212f23a662d2e8d3f321b174735a80be1fdf2e2"
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+benchmark_dir="$(cd -- "$script_dir/.." && pwd)"
+work_root="${THREADMILL_BENCHMARK_HOME:-$benchmark_dir/.work}"
+source_dir="$work_root/senior-swe-bench/source"
+harbor_tools="$benchmark_dir/harbor"
+
+usage() {
+  printf 'Usage: ./bench doctor|fetch|path|list|validate [task|all]|run <task|all> <provider/model> [Harbor args...]\n'
+}
+
+check_source() {
+  [[ -d "$source_dir/.git" ]] &&
+    [[ "$(git -C "$source_dir" rev-parse HEAD)" == "$UPSTREAM_REVISION" ]] &&
+    [[ -z "$(git -C "$source_dir" status --porcelain)" ]] || {
+      printf 'senior-swe-bench: missing, unpinned, or modified checkout; run fetch\n' >&2
+      exit 1
+    }
+}
+
+task_path() {
+  if [[ "$1" == all ]]; then printf '%s\n' "$source_dir/tasks"; return; fi
+  [[ "$1" != */* && -d "$source_dir/tasks/$1" ]] || {
+    printf 'senior-swe-bench: unknown task: %s\n' "$1" >&2; exit 1;
+  }
+  printf '%s\n' "$source_dir/tasks/$1"
+}
+
+case "${1:-}" in
+  doctor) "$harbor_tools/bench" doctor ;;
+  fetch) "$harbor_tools/fetch-pinned" "$UPSTREAM_URL" "$UPSTREAM_REVISION" "$source_dir" ;;
+  path) check_source; printf '%s\n' "$source_dir" ;;
+  list) check_source; find "$source_dir/tasks" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort ;;
+  validate)
+    check_source; target="${2:-all}"
+    if [[ "$target" == all ]]; then
+      while IFS= read -r task; do harbor tasks check "$task"; done < <(
+        find "$source_dir/tasks" -mindepth 1 -maxdepth 1 -type d | sort
+      )
+    else harbor tasks check "$(task_path "$target")"; fi
+    ;;
+  run)
+    [[ $# -ge 3 ]] || { usage >&2; exit 2; }; check_source
+    target="$(task_path "$2")"; shift 2
+    THREADMILL_BENCHMARK_NAME=senior-swe-bench "$harbor_tools/bench" run-path "$target" "$@"
+    ;;
+  -h|--help|help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

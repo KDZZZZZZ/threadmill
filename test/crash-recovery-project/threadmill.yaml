@@ -1,0 +1,11 @@
+llm:
+  provider: openai-responses
+  base_url: https://sub2api.oopsbox.cn/v1
+  credential: threadmill-real-acceptance
+  model: gpt-5.6-luna
+  context_window: 128000
+exec:
+  slots: 3
+  timeout: 60
+  output_cap_kb: 256
+  container_image: golang:1.26.5-alpine

@@ -1,0 +1,488 @@
+openapi: 3.1.1
+info:
+  title: Threadmill UI Backend API
+  version: 0.1.0-draft
+  description: >-
+    Planned UI adapter contract for the TUI and future Web UI. None of these
+    HTTP routes is implemented by the current CLI. The adapter projects existing
+    in-process capabilities and must not move scheduling or agent policy out of
+    Manager. All JSON objects below are snake_case adapter DTOs, not direct
+    serialization of coordination.Graph objects. Duration values are integer
+    nanoseconds. UI text is a separate presentation channel, not runtime telemetry.
+servers:
+  - url: http://localhost:8080
+    description: Local adapter (planned)
+tags:
+  - name: sessions
+  - name: events
+  - name: graph
+  - name: artifacts
+paths:
+  /v1/sessions:
+    post:
+      tags: [sessions]
+      operationId: createSession
+      summary: Open a manager session for a registered workspace
+      description: >-
+        At most one live Manager may own a workspace. A duplicate live workspace
+        returns 409; creating a session does not create a second isolated copy of
+        the workspace's persisted runtime state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSessionRequest' }
+      responses:
+        '201':
+          description: Session created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/sessions/{sessionId}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [sessions]
+      operationId: getSession
+      summary: Read session status
+      responses:
+        '200':
+          description: Current status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [sessions]
+      operationId: closeSession
+      summary: Close a session and release its resources
+      description: >-
+        Invoke Manager.Close and wait for cleanup. All running activations,
+        including persistent ones, are canceled. Durable task identity remains;
+        this is not the close_task graph action. Disconnecting an SSE client
+        does not close the session.
+      responses:
+        '204': { description: Session closed }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/sessions/{sessionId}/messages:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [sessions]
+      operationId: sendMessage
+      summary: Queue one user message
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MessageRequest' }
+      responses:
+        '202':
+          description: Message queued; this receipt is not a Manager turn or task ID
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AcceptedMessage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    get:
+      tags: [sessions]
+      operationId: listSessionMessages
+      summary: Read retained user messages and complete UI outputs
+      description: >-
+        Presentation history comes from accepted user messages and Manager.Options.Output,
+        never from runtime telemetry logs. It excludes transient text deltas. The
+        opaque cursor pins a bounded history window. A retention gap returns 410;
+        a fresh request reports history_complete=false when earlier text was lost.
+        Clients must show that gap; graph/session snapshots cannot recover lost chat.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Retained presentation history
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessagePage' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/ResyncRequired' }
+
+  /v1/sessions/{sessionId}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [sessions]
+      operationId: cancelSessionWork
+      summary: Cancel foreground work or preempt the manager turn
+      responses:
+        '200':
+          description: Whether anything was canceled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [canceled]
+                properties:
+                  canceled: { type: boolean }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/sessions/{sessionId}/events:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - name: Last-Event-ID
+        in: header
+        required: false
+        schema: { type: string }
+        description: Resume position; events are replayed only when retained.
+    get:
+      tags: [events]
+      operationId: streamSessionEvents
+      summary: Stream UI output and runtime metadata on distinct SSE event types
+      description: >-
+        SSE event names are runtime, ui_delta, ui_output and resync_required.
+        Each data line contains the corresponding schema below. The SSE id is a
+        session-local monotonically increasing adapter sequence, ordered at enqueue,
+        not a backend turn ID or global causal clock. runtime contains metadata only;
+        manager text deltas go to ui_delta and complete Manager.Options.Output text
+        goes to ui_output. UI text must not be copied into telemetry logs. Deltas
+        are transient and may be coalesced; complete outputs are authoritative.
+        All producers enqueue into bounded adapter buffers without network I/O.
+        A slow client must not block agents: disconnect it and require replay or
+        resynchronization. If Last-Event-ID is no longer retained, send one
+        resync_required control event and close; the client reloads session,
+        paged graph and retained message history, showing any history gap.
+      responses:
+        '200':
+          description: Event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE framing; data is JSON, with the schema selected by event name.
+              examples:
+                output:
+                  value: |
+                    id: 42
+                    event: ui_output
+                    data: {"message_id":"m-7","role":"assistant","output_type":"manager_reply","text":"Completed.","time":"2026-09-11T12:00:00Z"}
+
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-sse-data-schemas:
+        runtime: { $ref: '#/components/schemas/RuntimeEvent' }
+        ui_delta: { $ref: '#/components/schemas/UIDelta' }
+        ui_output: { $ref: '#/components/schemas/Message' }
+        resync_required: { $ref: '#/components/schemas/ResyncNotice' }
+
+  /v1/sessions/{sessionId}/graph:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [graph]
+      operationId: getCoordinationGraph
+      summary: Read one bounded page of graph metadata at a fixed revision
+      description: >-
+        The first request captures Manager.Snapshot once. The adapter projects a
+        deterministic sequence of task, node, edge and output metadata records,
+        excluding full Task Info and report text. Every cursor binds the revision
+        and next position in this retained snapshot. Never combine pages captured
+        from different revisions. The adapter bounds retained snapshots by bytes,
+        count and lifetime; an expired cursor returns 410. This read projection is
+        planned adapter work; the current Manager API still returns a whole snapshot.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A page from one detached graph snapshot
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GraphPage' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/ResyncRequired' }
+
+  /v1/sessions/{sessionId}/metrics:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [sessions]
+      operationId: getSessionMetrics
+      summary: Read bounded operational metrics
+      responses:
+        '200':
+          description: Metrics snapshot
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Metrics' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/sessions/{sessionId}/artifacts:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - name: path
+        in: query
+        required: true
+        schema: { type: string, minLength: 1 }
+        description: >-
+          Relative path in the current real project directory, encoded as a
+          query value so nested paths are unambiguous. This is not files_ref or a
+          host path. Resolve within the registered workspace and reject absolute
+          paths, traversal and symlink escape.
+    get:
+      tags: [artifacts]
+      operationId: readPublishedArtifact
+      summary: Read a user-visible artifact
+      responses:
+        '200':
+          description: Artifact bytes
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+            text/plain: { schema: { type: string } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  parameters:
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string, minLength: 1 }
+      description: Opaque cursor for a retained fixed read window; omit to start a fresh read.
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      description: Maximum metadata records or complete messages in this page.
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/Error' } }
+    Conflict:
+      description: Operation conflicts with current lifecycle state
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/Error' } }
+    NotFound:
+      description: Session, task or artifact not found
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/Error' } }
+    ResyncRequired:
+      description: The requested retained read window is unavailable; start a fresh read.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/ResyncNotice' } }
+  schemas:
+    CreateSessionRequest:
+      type: object
+      required: [workspace]
+      additionalProperties: false
+      properties:
+        workspace: { type: string, minLength: 1, description: Server-side workspace identifier or path policy token. }
+        config: { type: string, description: Optional server-side config identifier. }
+    Session:
+      type: object
+      required: [id, state, model]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        state: { type: string, enum: [ready, busy, idle, closed, failed] }
+        model: { type: string }
+        created_at: { type: string, format: date-time }
+        task_counts:
+          $ref: '#/components/schemas/TaskMetrics'
+    MessageRequest:
+      type: object
+      required: [request_id, message]
+      additionalProperties: false
+      properties:
+        request_id: { type: string, minLength: 1, description: Client-generated request correlation ID; not a Manager turn ID. }
+        message: { type: string, minLength: 1 }
+    AcceptedMessage:
+      type: object
+      required: [request_id, message_id]
+      additionalProperties: false
+      properties:
+        request_id: { type: string, description: Echo of the client's request ID. }
+        message_id: { type: string, description: Adapter-assigned ID of the queued user message. }
+      description: >-
+        Correlates HTTP acceptance with presentation history only. Manager.Send
+        returns no turn ID and outputs carry no request correlation. This draft
+        does not promise exactly-once retries or attach invented IDs to task results.
+    Message:
+      type: object
+      required: [message_id, role, text, time]
+      additionalProperties: false
+      properties:
+        message_id: { type: string, description: Adapter-assigned stable presentation record ID; deduplicate replay by this ID. }
+        request_id: { type: string, description: Present on accepted user messages only. }
+        role: { type: string, enum: [user, assistant] }
+        output_type: { type: string, enum: [manager_reply, task_report], description: Present on complete assistant outputs. }
+        text: { type: string }
+        time: { type: string, format: date-time }
+    MessagePage:
+      type: object
+      required: [items, history_complete, stream_cursor]
+      properties:
+        items: { type: array, maxItems: 500, items: { $ref: '#/components/schemas/Message' } }
+        next_cursor: { type: string, description: Omitted when this fixed history window has no more pages. }
+        history_complete: { type: boolean, description: False if any earlier complete messages were evicted or were never recorded by this adapter. }
+        stream_cursor: { type: string, description: SSE position captured with the history window; resume here after fetching all pages. }
+    UIDelta:
+      type: object
+      required: [text, time]
+      additionalProperties: false
+      properties:
+        text: { type: string, description: Transient manager-visible text only; not tool arguments or another agent's model text. }
+        time: { type: string, format: date-time }
+      description: >-
+        Presentation only; not authoritative history. A complete manager_reply
+        replaces the pending manager text, while task_report appends independently.
+        Resynchronization discards any pending partial text. No backend turn ID is inferred.
+    ResyncNotice:
+      type: object
+      required: [code, message, reason]
+      additionalProperties: false
+      properties:
+        code: { type: string, const: resync_required }
+        message: { type: string }
+        reason: { type: string, enum: [cursor_expired, retention_gap, slow_consumer] }
+      description: Used as HTTP 410 JSON or the data of an SSE resync_required control event.
+    RuntimeEvent:
+      type: object
+      required: [time, kind, phase]
+      additionalProperties: false
+      properties:
+        time: { type: string, format: date-time }
+        agent_id: { type: string }
+        kind: { type: string, enum: [model, tool, task, memory] }
+        phase: { type: string, enum: [start, end, delta, retry] }
+        name: { type: string }
+        call_id: { type: string }
+        duration: { type: integer, format: int64, minimum: 0, description: 'Elapsed nanoseconds, matching Go time.Duration JSON.' }
+        error: { type: string }
+        is_error: { type: boolean }
+        messages: { type: integer, minimum: 0 }
+        tools: { type: integer, minimum: 0 }
+        tool_calls: { type: integer, minimum: 0 }
+        tokens: { type: integer, minimum: 0 }
+        input_tokens: { type: integer, minimum: 0 }
+        cached_tokens: { type: integer, minimum: 0 }
+        cache_write_tokens: { type: integer, minimum: 0 }
+        retries: { type: integer, minimum: 0 }
+        retry_reason: { type: string }
+        stream_text: { type: boolean }
+        memory_organized: { type: boolean }
+        memory_candidates: { type: integer, minimum: 0 }
+        memory_selected: { type: integer, minimum: 0 }
+      description: >-
+        Metadata projection of event.RuntimeEvent. Always omit Delta; eligible
+        manager text is routed separately to UIDelta and never logged as telemetry.
+    GraphPage:
+      type: object
+      required: [revision, executing, entries]
+      additionalProperties: false
+      properties:
+        revision: { type: integer, format: int64, minimum: 0, description: The fixed captured graph revision shared by every page in this cursor chain. }
+        executing: { type: boolean }
+        project_task_id: { type: string }
+        entries: { type: array, maxItems: 500, items: { $ref: '#/components/schemas/GraphEntry' } }
+        next_cursor: { type: string, description: Omitted after the final page; expired cursors return 410. }
+    GraphEntry:
+      oneOf:
+        - type: object
+          required: [kind, task]
+          additionalProperties: false
+          properties:
+            kind: { const: task }
+            task: { $ref: '#/components/schemas/Task' }
+        - type: object
+          required: [kind, node]
+          additionalProperties: false
+          properties:
+            kind: { const: node }
+            node: { $ref: '#/components/schemas/Node' }
+        - type: object
+          required: [kind, edge]
+          additionalProperties: false
+          properties:
+            kind: { const: edge }
+            edge: { $ref: '#/components/schemas/Edge' }
+        - type: object
+          required: [kind, output]
+          additionalProperties: false
+          properties:
+            kind: { const: output }
+            output: { $ref: '#/components/schemas/Output' }
+    Task:
+      type: object
+      required: [id, outcome, run_policy, persistent, activation]
+      properties:
+        id: { type: string }
+        info_preview: { type: string, maxLength: 256, description: Bounded display preview; not the complete Task Info contract. }
+        outcome: { type: string, enum: [active, done, canceled, failed, idle, closed] }
+        run_policy: { type: string, enum: [enabled, held] }
+        persistent: { type: boolean }
+        real_directory: { type: boolean, description: Selected only when the task is created; edits are immediately visible in the real directory. }
+        activation: { type: integer, minimum: 1 }
+    Node:
+      type: object
+      required: [id, task_id, role]
+      properties:
+        id: { type: string }
+        task_id: { type: string }
+        role: { type: string, enum: [planner, executor, verifier] }
+    Edge:
+      type: object
+      required: [from, to]
+      properties:
+        from: { type: string }
+        to: { type: string }
+    Output:
+      type: object
+      required: [node, files_ref, memory_ref]
+      properties:
+        node: { $ref: '#/components/schemas/Node' }
+        files_ref: { type: string, description: 'Opaque logical snapshot identifier, never a host filesystem path or artifact download path.' }
+        memory_ref: { type: string, description: 'Opaque logical memory snapshot identifier, not a host path.' }
+      description: Metadata only; full reports are excluded from graph pages.
+    TaskMetrics:
+      type: object
+      properties:
+        total: { type: integer, minimum: 0 }
+        active: { type: integer, minimum: 0 }
+        running: { type: integer, minimum: 0 }
+        idle: { type: integer, minimum: 0 }
+        done: { type: integer, minimum: 0 }
+        failed: { type: integer, minimum: 0 }
+        canceled: { type: integer, minimum: 0 }
+        closed: { type: integer, minimum: 0 }
+    Metrics:
+      type: object
+      required: [time, uptime, pending, tasks, events, runtime]
+      properties:
+        time: { type: string, format: date-time }
+        uptime: { type: integer, format: int64, minimum: 0, description: Elapsed nanoseconds. }
+        pending: { type: integer, minimum: 0 }
+        tasks: { $ref: '#/components/schemas/TaskMetrics' }
+        events: { type: object, additionalProperties: true }
+        exec: { type: object, additionalProperties: true }
+        vfs: { type: object, additionalProperties: true }
+        memory: { type: object, additionalProperties: true }
+        runtime: { type: object, additionalProperties: true }
+      description: Nested Go duration fields also retain integer nanoseconds; metric DTOs contain no UI text.
+    Error:
+      type: object
+      required: [code, message]
+      additionalProperties: false
+      properties:
+        code: { type: string, enum: [invalid_request, not_found, conflict, internal_error] }
+        message: { type: string }
+        request_id: { type: string }

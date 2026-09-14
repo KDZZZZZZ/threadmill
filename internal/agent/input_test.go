@@ -1,0 +1,564 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"reflect"
+	"strings"
+	"testing"
+
+	ctxgraph "github.com/KDZZZZZZ/threadmill/internal/context"
+	"github.com/KDZZZZZZ/threadmill/internal/env"
+	"github.com/KDZZZZZZ/threadmill/internal/event"
+	agenttool "github.com/KDZZZZZZ/threadmill/internal/tool"
+)
+
+func TestAssembleRequestInjectsUnionMemoryFromSubscribedSubgraphs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var request Request
+	model := ignoreOrganize(func(_ context.Context, got Request) (AssistantMessage, error) {
+		request = got
+		return AssistantMessage{Content: "done"}, nil
+	})
+
+	loop, err := NewLoop(Config{
+		Provider: model,
+		Hooks: Hooks{
+			AfterTurn: []AfterTurnHook{
+				func(context.Context, UserMessage, TurnResult) error {
+					cancel()
+					return nil
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAddMemoryHooks(t, loop)
+
+	store := ctxgraph.NewStore()
+	bindEnvGraph(t, loop, store, "env-1", ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{
+			{
+				ID:          "shared",
+				Statement:   "shared fact",
+				SubgraphIDs: []string{"sg-a", "sg-b"},
+			},
+			{
+				ID:          "only-a",
+				Statement:   "only in a",
+				SubgraphIDs: []string{"sg-a"},
+			},
+			{
+				ID:          "only-c",
+				Statement:   "only in c",
+				SubgraphIDs: []string{"sg-c"},
+			},
+			{
+				ID:          "empty",
+				Statement:   "",
+				SubgraphIDs: []string{"sg-a"},
+			},
+		},
+	})
+	loop.SetSubscribedSubgraphs([]string{"sg-b", "sg-a"})
+	loop.Enqueue(UserMessage{Content: "start"})
+
+	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+
+	wantMemory := "记忆：\n- shared fact\n- only in a"
+	if got := blockText(request, "memory"); got != wantMemory {
+		t.Fatalf("memory block = %q, want %q", blockText(request, "memory"), wantMemory)
+	}
+	if request.SystemPrompt != DefaultSystemPrompt {
+		t.Fatalf("system prompt = %q, want the bare default prompt", request.SystemPrompt)
+	}
+	if strings.Contains(request.WirePrompt(), "only in c") {
+		t.Fatal("wire prompt included a node from an unsubscribed subgraph")
+	}
+	if len(request.Messages) != 2 || request.Messages[0].Content != "start" ||
+		request.Messages[1].ContextBlockID != "memory" {
+		t.Fatalf("messages = %#v, want user message plus materialized memory", request.Messages)
+	}
+}
+
+// blockText 返回请求里指定 ID 的最新状态文本；兼容 hook 尚未物化和
+// Loop 已经把状态追加进历史两种观察点。
+func blockText(request Request, id string) string {
+	for i := len(request.Messages) - 1; i >= 0; i-- {
+		if request.Messages[i].ContextBlockID == id {
+			return request.Messages[i].Content
+		}
+	}
+	for _, block := range request.StateBlocks {
+		if block.ID == id {
+			return block.Text
+		}
+	}
+	return ""
+}
+
+func TestAssembleRequestUsesCurrentSubgraphSubscriptions(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var loop *Loop
+	memories := make([]string, 0, 2)
+	model := ignoreOrganize(func(_ context.Context, request Request) (AssistantMessage, error) {
+		memories = append(memories, blockText(request, "memory"))
+		if len(memories) == 1 {
+			return AssistantMessage{ToolCalls: []agenttool.Call{{
+				ID:        "call-1",
+				Name:      "lookup",
+				Arguments: json.RawMessage(`{}`),
+			}}}, nil
+		}
+		return AssistantMessage{Content: "done"}, nil
+	})
+
+	lookup := &testTool{
+		definition: agenttool.Definition{
+			Name:        "lookup",
+			Description: "Look up a value",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		execute: func(context.Context, agenttool.Call) (agenttool.Output, error) {
+			loop.SetSubscribedSubgraphs([]string{"sg-b"})
+			return agenttool.Output{Content: "ok"}, nil
+		},
+	}
+
+	var err error
+	loop, err = NewLoop(Config{
+		Provider: model,
+		Tools:    []agenttool.Tool{lookup},
+		Hooks: Hooks{
+			AfterTurn: []AfterTurnHook{
+				func(context.Context, UserMessage, TurnResult) error {
+					cancel()
+					return nil
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAddMemoryHooks(t, loop)
+
+	store := ctxgraph.NewStore()
+	bindEnvGraph(t, loop, store, "env-1", ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{
+			{ID: "a", Statement: "memory a", SubgraphIDs: []string{"sg-a"}},
+			{ID: "b", Statement: "memory b", SubgraphIDs: []string{"sg-b"}},
+		},
+	})
+	loop.SetSubscribedSubgraphs([]string{"sg-a"})
+	loop.Enqueue(UserMessage{Content: "start"})
+
+	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if len(memories) != 2 {
+		t.Fatalf("model request count = %d, want 2", len(memories))
+	}
+
+	wantFirst := "记忆：\n- memory a"
+	if memories[0] != wantFirst {
+		t.Fatalf("first memory block = %q, want %q", memories[0], wantFirst)
+	}
+	wantSecond := "记忆：\n- memory b"
+	if memories[1] != wantSecond {
+		t.Fatalf("second memory block = %q, want %q", memories[1], wantSecond)
+	}
+}
+
+func TestAssembleRequestReadsLiveSubscribedSubgraphContent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := ctxgraph.NewStore()
+	store.Save("env-1", ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{{
+			ID:          "n1",
+			Statement:   "old memory",
+			SubgraphIDs: []string{"sg-a"},
+		}},
+	})
+
+	memories := make([]string, 0, 2)
+	model := ignoreOrganize(func(_ context.Context, request Request) (AssistantMessage, error) {
+		memories = append(memories, blockText(request, "memory"))
+		if len(memories) == 1 {
+			return AssistantMessage{ToolCalls: []agenttool.Call{{
+				ID:        "call-1",
+				Name:      "refresh",
+				Arguments: json.RawMessage(`{}`),
+			}}}, nil
+		}
+		return AssistantMessage{Content: "done"}, nil
+	})
+
+	refresh := &testTool{
+		definition: agenttool.Definition{
+			Name:        "refresh",
+			Description: "Refresh memory",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		execute: func(context.Context, agenttool.Call) (agenttool.Output, error) {
+			// 生产写路径（memory 工具、compact、organizer）都会递增 revision。
+			store.Save("env-1", ctxgraph.Graph{
+				Revision: store.Revision("env-1") + 1,
+				Nodes: []ctxgraph.Node{{
+					ID:          "n1",
+					Statement:   "new memory",
+					SubgraphIDs: []string{"sg-a"},
+				}},
+			})
+			return agenttool.Output{Content: "ok"}, nil
+		},
+	}
+
+	loop, err := NewLoop(Config{
+		Provider: model,
+		Tools:    []agenttool.Tool{refresh},
+		Hooks: Hooks{
+			AfterTurn: []AfterTurnHook{
+				func(context.Context, UserMessage, TurnResult) error {
+					cancel()
+					return nil
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAddMemoryHooks(t, loop)
+	if err := loop.Bind(env.Open("env-1", store.View("env-1"))); err != nil {
+		t.Fatalf("Bind() error = %v", err)
+	}
+	loop.SetSubscribedSubgraphs([]string{"sg-a"})
+	loop.Enqueue(UserMessage{Content: "start"})
+
+	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if len(memories) != 2 {
+		t.Fatalf("model request count = %d, want 2", len(memories))
+	}
+
+	wantFirst := "记忆：\n- old memory"
+	if memories[0] != wantFirst {
+		t.Fatalf("first memory block = %q, want %q", memories[0], wantFirst)
+	}
+	wantSecond := "记忆：\n- new memory"
+	if memories[1] != wantSecond {
+		t.Fatalf("second memory block = %q, want %q", memories[1], wantSecond)
+	}
+}
+
+func TestLoopRunReadsBoundMemory(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var memory string
+	reader, err := NewLoop(Config{
+		Provider: ignoreOrganize(func(_ context.Context, request Request) (AssistantMessage, error) {
+			memory = blockText(request, "memory")
+			return AssistantMessage{Content: "done"}, nil
+		}),
+		Hooks: Hooks{
+			AfterTurn: []AfterTurnHook{
+				func(context.Context, UserMessage, TurnResult) error {
+					cancel()
+					return nil
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAddMemoryHooks(t, reader)
+
+	store := ctxgraph.NewStore()
+	bindEnvGraph(t, reader, store, "env-1", ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{{
+			ID:          "n1",
+			Statement:   "shared fact",
+			SubgraphIDs: []string{"sg-a"},
+		}},
+	})
+	reader.SetSubscribedSubgraphs([]string{"sg-a"})
+	reader.Enqueue(UserMessage{Content: "start"})
+
+	if err := reader.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+
+	want := "记忆：\n- shared fact"
+	if memory != want {
+		t.Fatalf("reader memory block = %q, want %q", memory, want)
+	}
+}
+
+func TestBoundAgentEnvironmentsStayIsolated(t *testing.T) {
+	loopA, err := NewLoop(Config{
+		AgentID: "agent-a",
+		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+			return AssistantMessage{Content: "unused"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loopB, err := NewLoop(Config{
+		AgentID: "agent-b",
+		Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+			return AssistantMessage{Content: "unused"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := ctxgraph.NewStore()
+	graph := ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{{
+			ID:          "n1",
+			Statement:   "only a",
+			SubgraphIDs: []string{"sg-a"},
+		}},
+	}
+	bindEnvGraph(t, loopA, store, "env-a", graph)
+	if err := loopB.Bind(env.Open("env-b", store.View("env-b"))); err != nil {
+		t.Fatalf("Bind() error = %v", err)
+	}
+
+	nodesA := store.Load("env-a").NodesInSubgraphs([]string{"sg-a"})
+	if len(nodesA) != 1 || nodesA[0].Statement != "only a" {
+		t.Fatalf("env-a = %#v, want only a", nodesA)
+	}
+	nodesB := store.Load("env-b").NodesInSubgraphs([]string{"sg-a"})
+	if len(nodesB) != 0 {
+		t.Fatalf("env-b = %#v, want empty unique copy", nodesB)
+	}
+}
+
+func bindEnvGraph(t *testing.T, loop *Loop, store *ctxgraph.Store, envID string, graph ctxgraph.Graph) {
+	t.Helper()
+	store.Save(envID, graph)
+	if err := loop.Bind(env.Open(envID, store.View(envID))); err != nil {
+		t.Fatalf("Bind() error = %v", err)
+	}
+}
+
+func TestInjectSubscribedMemoryReusesUnchangedProjection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	injections := 0
+	memorySeen := make([]string, 0, 2)
+	bus := event.NewBus(func(_ context.Context, ev event.RuntimeEvent) {
+		if ev.Kind == event.KindMemory && ev.Phase == event.PhaseStart &&
+			ev.Name == injectSubscribedMemoryToolName {
+			injections++
+		}
+	})
+
+	store := ctxgraph.NewStore()
+	var loop *Loop
+	saveBumpedGraph := func(context.Context, agenttool.Call) (agenttool.Output, error) {
+		store.Save("env-1", ctxgraph.Graph{
+			Revision: store.Revision("env-1") + 1,
+			Nodes: []ctxgraph.Node{{
+				ID:          "n2",
+				Statement:   "fresh fact",
+				SubgraphIDs: []string{"sg-a"},
+			}},
+		})
+		return agenttool.Output{Content: "ok"}, nil
+	}
+	refresh := &testTool{
+		definition: agenttool.Definition{
+			Name:        "refresh",
+			Description: "Refresh memory",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		execute: saveBumpedGraph,
+	}
+	mark := &testTool{
+		definition: agenttool.Definition{
+			Name:        "mark",
+			Description: "Touch nothing",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		execute: func(context.Context, agenttool.Call) (agenttool.Output, error) {
+			return agenttool.Output{Content: "ok"}, nil
+		},
+	}
+
+	memorySeen = make([]string, 0, 3)
+	model := modelFunc(func(_ context.Context, request Request) (AssistantMessage, error) {
+		memorySeen = append(memorySeen, blockText(request, "memory"))
+		switch len(memorySeen) {
+		case 1:
+			return AssistantMessage{ToolCalls: []agenttool.Call{{
+				ID:        "call-1",
+				Name:      "refresh",
+				Arguments: json.RawMessage(`{}`),
+			}}}, nil
+		case 2:
+			return AssistantMessage{ToolCalls: []agenttool.Call{{
+				ID:        "call-2",
+				Name:      "mark",
+				Arguments: json.RawMessage(`{}`),
+			}}}, nil
+		}
+		return AssistantMessage{Content: "done"}, nil
+	})
+	loop, err := NewLoop(Config{
+		Provider: model,
+		Tools:    []agenttool.Tool{refresh, mark},
+		Events:   bus,
+		Hooks: Hooks{AfterTurn: []AfterTurnHook{
+			func(context.Context, UserMessage, TurnResult) error {
+				cancel()
+				return nil
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := MemoryHooks(loop)
+	if err := loop.AddHooks(Hooks{AssembleRequest: hooks.AssembleRequest}); err != nil {
+		t.Fatal(err)
+	}
+	bindEnvGraph(t, loop, store, "env-1", ctxgraph.Graph{
+		Nodes: []ctxgraph.Node{{
+			ID:          "n1",
+			Statement:   "shared fact",
+			SubgraphIDs: []string{"sg-a"},
+		}},
+	})
+	loop.SetSubscribedSubgraphs([]string{"sg-a"})
+	loop.Enqueue(UserMessage{Content: "start"})
+
+	if err := loop.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if len(memorySeen) != 3 {
+		t.Fatalf("model requests = %d, want 3", len(memorySeen))
+	}
+	wantProjections := []string{"记忆：\n- shared fact", "记忆：\n- fresh fact", "记忆：\n- fresh fact"}
+	if !reflect.DeepEqual(memorySeen, wantProjections) {
+		t.Fatalf("memory blocks = %q, want %q", memorySeen, wantProjections)
+	}
+	if injections != 2 {
+		t.Fatalf("hidden injections = %d, want one per distinct projection", injections)
+	}
+}
+
+// TestSubscribedMemoryBlockInvalidatesOnBind 锁定跨环境隔离：快照恢复出的环境可以与当前环境
+// 图 revision 相同，若 memo 不随 Bind 失效，
+// 订阅列表未变时会把上一个环境的记忆文本泄漏给新环境。
+func TestSubscribedMemoryBlockInvalidatesOnBind(t *testing.T) {
+	ctx := context.Background()
+
+	loop, err := NewLoop(Config{Provider: modelFunc(func(context.Context, Request) (AssistantMessage, error) {
+		return AssistantMessage{Content: "done"}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAddMemoryHooks(t, loop)
+
+	store := ctxgraph.NewStore()
+	graph := ctxgraph.Graph{
+		Revision:  7,
+		Subgraphs: []ctxgraph.Subgraph{{ID: "sg"}},
+		Nodes:     []ctxgraph.Node{{ID: "a", Statement: "parent secret", SubgraphIDs: []string{"sg"}}},
+	}
+	bindEnvGraph(t, loop, store, "env-parent", graph)
+	loop.SetSubscribedSubgraphs([]string{"sg"})
+
+	first, err := loop.subscribedMemoryBlock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "记忆：\n- parent secret"; first != want {
+		t.Fatalf("parent memory block = %q, want %q", first, want)
+	}
+
+	// 快照保留 revision，目标环境节点不同但 revision 相同、订阅列表未变。
+	child := graph.Clone()
+	child.Nodes = []ctxgraph.Node{{ID: "b", Statement: "child fact", SubgraphIDs: []string{"sg"}}}
+	if err := store.SaveSnapshot("ready", child); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Restore("env-child", "ready"); err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.Bind(env.Open("env-child", store.View("env-child"))); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := loop.subscribedMemoryBlock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "记忆：\n- child fact"; second != want {
+		t.Fatalf("child memory block = %q, want %q", second, want)
+	}
+}
+
+func TestFormatSubscribedMemoryAnnotatesSourceAndMultiMembership(t *testing.T) {
+	t.Parallel()
+
+	graph := ctxgraph.Graph{
+		Subgraphs: []ctxgraph.Subgraph{
+			{ID: "sg-a", Name: "ABI 等价"},
+			{ID: "sg-b", Name: "源码覆盖"},
+		},
+		Nodes: []ctxgraph.Node{
+			{
+				ID:          "mem-1",
+				Kind:        ctxgraph.NodeKindFact,
+				Status:      ctxgraph.NodeStatusAccepted,
+				Statement:   "对象构建证据",
+				SubgraphIDs: []string{"sg-a", "sg-b"},
+			},
+			{
+				ID:          "mem-2",
+				Kind:        ctxgraph.NodeKindFact,
+				Status:      ctxgraph.NodeStatusDisputed,
+				Statement:   "仅覆盖侧证据",
+				SubgraphIDs: []string{"sg-b"},
+			},
+		},
+	}
+	subs := []string{"sg-a", "sg-b"}
+
+	flat := FormatSubscribedMemory(graph, subs, false)
+	if strings.Contains(flat, "sg-a") {
+		t.Fatalf("flat projection = %q, want no attribution", flat)
+	}
+
+	grouped := FormatSubscribedMemory(graph, subs, true)
+	for _, want := range []string{"[sg-a ABI 等价]", "[sg-b 源码覆盖]", "（另属 sg-b）", "仅覆盖侧证据"} {
+		if !strings.Contains(grouped, want) {
+			t.Fatalf("grouped projection = %q, want %q", grouped, want)
+		}
+	}
+	if got := strings.Count(grouped, "对象构建证据"); got != 1 {
+		t.Fatalf("shared node listed %d times, want once", got)
+	}
+}

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  printf 'Usage: %s <git-url> <commit> <destination>\n' "$0" >&2
+  exit 2
+}
+
+[[ $# -eq 3 ]] || usage
+readonly upstream_url="$1"
+readonly revision="$2"
+readonly destination="$3"
+
+command -v git >/dev/null 2>&1 || {
+  printf 'fetch-pinned: missing command: git\n' >&2
+  exit 1
+}
+
+mkdir -p -- "$(dirname -- "$destination")"
+if [[ ! -d "$destination/.git" ]]; then
+  [[ ! -e "$destination" ]] || {
+    printf 'fetch-pinned: destination exists but is not a Git checkout: %s\n' "$destination" >&2
+    exit 1
+  }
+  git clone --filter=blob:none --no-checkout "$upstream_url" "$destination"
+fi
+
+origin="$(git -C "$destination" remote get-url origin)"
+[[ "$origin" == "$upstream_url" ]] || {
+  printf 'fetch-pinned: unexpected origin %s in %s\n' "$origin" "$destination" >&2
+  exit 1
+}
+[[ -z "$(git -C "$destination" status --porcelain)" ]] || {
+  printf 'fetch-pinned: refusing to overwrite modified checkout: %s\n' "$destination" >&2
+  exit 1
+}
+
+git -C "$destination" fetch --depth=1 origin "$revision"
+git -C "$destination" checkout --detach --force "$revision"
+actual="$(git -C "$destination" rev-parse HEAD)"
+[[ "$actual" == "$revision" ]] || {
+  printf 'fetch-pinned: got %s, expected %s\n' "$actual" "$revision" >&2
+  exit 1
+}
+printf '%s\n' "$destination"
