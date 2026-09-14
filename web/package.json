@@ -1,0 +1,40 @@
+{
+  "name": "threadmill-webui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint --deny-warnings src",
+    "preview": "vite preview",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "e2e": "node e2e/frontend-e2e.mjs",
+    "docs:heroui": "node scripts/heroui-docs.mjs"
+  },
+  "dependencies": {
+    "@heroui/react": "3.2.4",
+    "@heroui/styles": "3.2.4",
+    "@tanstack/react-query": "5.102.8",
+    "dompurify": "3.4.15",
+    "lucide-react": "1.40.0",
+    "marked": "18.0.12",
+    "motion": "13.2.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-router-dom": "7.18.3",
+    "zustand": "5.0.15"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "6.1.0",
+    "oxlint": "1.79.0",
+    "playwright-core": "1.62.1",
+    "tailwindcss": "4.3.3",
+    "typescript": "6.0.2",
+    "vite": "8.2.2"
+  }
+}

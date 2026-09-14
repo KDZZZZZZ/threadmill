@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -28,7 +29,11 @@ import (
 
 func TestWebStreamsManagerMessagesAndDeduplicatesSubmissions(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	timeout := 5 * time.Second
+	if os.Getenv("THREADMILL_BROWSER_E2E") == "1" {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var calls atomic.Int32
 	gateway, err := newWebGateway(ctx, "", "", func(ctx context.Context, opts manager.Options) (*manager.Manager, error) {
@@ -162,6 +167,15 @@ func TestWebStreamsManagerMessagesAndDeduplicatesSubmissions(t *testing.T) {
 		a := item.(map[string]any)
 		if a["id"] == "task-1:executor" && (a["state"] != "running" || a["can_message"] != false) {
 			t.Fatalf("worker state = %#v", a)
+		}
+	}
+	if os.Getenv("THREADMILL_BROWSER_E2E") == "1" {
+		command := exec.CommandContext(ctx, "node", "../../web/e2e/gateway-e2e.mjs")
+		command.Env = append(os.Environ(), "WEBUI_URL="+server.URL)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("browser against real gateway: %v\n%s", err, output)
+		} else {
+			t.Log(string(output))
 		}
 	}
 }
@@ -450,7 +464,7 @@ func TestRunWebRejectsNonLocalBindingWithoutOpeningProject(t *testing.T) {
 		t.Fatalf("exit=%d opens=%d", code, opens)
 	}
 	opts, err := parse([]string{"-web"}, io.Discard)
-	if err != nil || !opts.web || opts.listen != "127.0.0.1:8787" || opts.webUI != "docs/webui-demo.html" {
+	if err != nil || !opts.web || opts.listen != "127.0.0.1:8787" || opts.webUI != "" {
 		t.Fatalf("defaults = %#v %v", opts, err)
 	}
 }

@@ -2,13 +2,13 @@ name: Publish installer
 
 on:
   push:
-    branches: [dev-native]
+    branches: [main]
     paths:
       - scripts/install.sh
       - scripts/install_test.sh
       - .github/workflows/installer-pages.yml
   pull_request:
-    branches: [dev-native]
+    branches: [main]
     paths:
       - scripts/install.sh
       - scripts/install_test.sh
@@ -34,12 +34,12 @@ jobs:
       - name: Prepare download
         run: install -Dm755 scripts/install.sh _site/install.sh
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
-        if: github.ref == 'refs/heads/dev-native'
+        if: github.ref == 'refs/heads/main'
         with:
           path: _site
 
   deploy:
-    if: github.ref == 'refs/heads/dev-native'
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     permissions:

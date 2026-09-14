@@ -1,6 +1,6 @@
 # 本地 WebUI · Project Harness 接口
 
-`openapi.yaml` 记录当前本地 HTTP + SSE 契约，`webui-demo.html` 是接入同源 API 的正式 WebUI 设计稿。
+`openapi.yaml` 记录当前本地 HTTP + SSE 契约，`web/src` 是接入同源 API 的 React WebUI；构建资源内置到 Go 程序。`webui-demo.html` 保留为迁移前的视觉回归基准。
 HTTP 网关由 `internal/cli/web.go` 适配现有 Manager；项目注册表、显示消息和事件序号目前只保存在网关进程内。
 历史分页、事件回放以及跨进程 Manager 互斥尚未实现。
 Manager 失败不代表所有 worker 已结束；error 项目仍可读取快照和 SSE。其 busy 只反映实际 task/model/tool/memory 活动，pending 可能保留无法处理的报告。重新打开前应确认旧运行已结束。
@@ -33,7 +33,7 @@ Manager 失败不代表所有 worker 已结束；error 项目仍可读取快照�
 在仓库目录运行：
 
 ```sh
-go run ./cmd/threadmill -web -web-ui docs/webui-demo.html
+go run ./cmd/threadmill -web
 ```
 
 默认地址为 `http://127.0.0.1:8787/`，可用 `-listen 127.0.0.1:8788` 指定其他本地端口。
@@ -42,7 +42,7 @@ go run ./cmd/threadmill -web -web-ui docs/webui-demo.html
 
 开发者可用 `http://127.0.0.1:8787/?demo=1` 强制加载 fixture 预览；界面没有演示模式开关。
 这些 fixture 不表示项目已在后端启动。
-`-web-ui` 只指定要提供的 HTML 文件，不把项目目录作为静态网站公开。
+默认提供内置前端；`-web-ui` 可覆盖为独立 HTML 文件，不把项目目录作为静态网站公开。
 
 ### 通过 Tailscale 使用
 
@@ -120,7 +120,7 @@ JSON 请求上限 64 KiB，拒绝未知字段和尾随数据；网关接受本�
 
 聊天中的用户消息、Manager正文和任务报告按Markdown渲染，支持GFM列表、表格、删除线、代码围栏等；思考与工具详情仍保留原始文本。页面内嵌固定版本的Marked与DOMPurify，原始HTML作为文字显示，解析产物经白名单清理，危险链接被移除。表格和代码块可在消息内横向滚动；按消息对象缓存结果，内容变化时重新渲染，覆盖流式未闭合语法。版本、完整许可证和校验值见[第三方记录](webui-third-party.md)。
 
-渲染回归可用 `python3 test/webui-markdown-check.py /tmp/threadmill-markdown-check.html` 生成离线检查页，再在浏览器打开；检查页直接抽取交付HTML中的库和渲染函数，不另造一份实现。设计依据为[Marked安全说明](https://marked.js.org/using_advanced)与[DOMPurify](https://github.com/cure53/DOMPurify)。Pi `71dca871` 的 `packages/tui/src/components/markdown.ts` 及对应测试同样使用Marked并覆盖流式代码围栏；它输出终端内容，此处另外处理浏览器HTML安全。Eino没有对应WebUI，deepseek-harness仍未取得可访问实现。
+当前回归运行 `npm --prefix web run e2e`，使用构建后的实际 UI 和模拟 HTTP/SSE 检查 Markdown、消息顺序及 Help 恢复；旧 Python 生成器仅验证迁移前的视觉基准。设计依据为[Marked安全说明](https://marked.js.org/using_advanced)与[DOMPurify](https://github.com/cure53/DOMPurify)。Pi `71dca871` 的 `packages/tui/src/components/markdown.ts` 及对应测试同样使用Marked并覆盖流式代码围栏；它输出终端内容，此处另外处理浏览器HTML安全。Eino没有对应WebUI，deepseek-harness仍未取得可访问实现。
 图标瀑布流汇集所有 Agent 的活动；未交互时只显示图标，hover/focus/click 后查看已有详情。
 每个 Agent 列独立布局；GraphTask.Outcome 为 done、failed、canceled 时整体移除任务。Outcome=active 的任务（包括 RunPolicy=held）保留各角色已接收的完整轨迹，不按动作终态筛选，也不以固定条数截断存活任务。Manager 轨迹保留到当前 busy 周期结束。task 终态同时清除对应悬浮详情。页面重载或断连时未接收的事件不能补回。
 真实连接只显示有数据来源的字段；只有 Manager 接收用户消息。

@@ -1,179 +1,147 @@
 # Threadmill
 
-Threadmill 是轻量级 Agent OS。
+**把任务交给 Manager，在真实工作目录里验收结果。**
 
-## 安装
+Threadmill 是运行在个人电脑上的轻量级 Agent OS。你描述目标，Manager 组织任务；Planner 调查与规划，Executor 实施，Verifier 独立验收。文件版本、记忆和命令执行由运行时管理，你可以在 WebUI 中查看进展，也可以通过终端使用。
 
-在 Linux 项目目录执行：
+![Threadmill WebUI：Manager 对话、协作任务图与 Agent 活动时间线](docs/images/webui.png)
+
+*WebUI 内置演示场景截图：左侧切换项目，中间与 Manager 对话，右侧查看任务和工具活动。*
+
+## 开始使用
+
+在 Linux 项目目录执行这一条命令：
 
 ```sh
 curl -fsSL https://kdzzzzzz.github.io/threadmill/install.sh | sh
 ```
 
-安装器会自动检查系统、文件系统和目录权限，并在需要时请求 `sudo` 准备依赖。所有检查通过后再安装 Threadmill，无需手动安装 Go 或填写环境变量。
-
-<details>
-<summary>系统要求与备用下载地址</summary>
-
-支持 Linux x86-64/ARM64。项目与 VFS 状态目录必须能够进行 reflink 克隆，普通 ext4 或跨文件系统克隆不满足要求；不提供普通复制降级。安装检查以当前用户实际执行，并验证 bwrap 沙箱。切换项目或自定义 `vfs.live_root` 时，启动会重新检查实际路径。
-
-Threadmill、必要的私有 Go 工具链和构建缓存放在 `~/.threadmill`，安装器将 `~/.threadmill/bin` 加入 shell 启动文件。默认 VFS 状态路径为 `~/.threadmill/projects/<项目路径哈希>/vfs`。可用 `THREADMILL_PROJECT_DIR` 指定要预检的项目。
-
-备用 GitHub 下载地址：
+安装器先验证文件系统与权限，申请所需管理员权限，准备并验证命令沙箱，检查通过后再安装 Threadmill。无需预装 Go。打开新终端后运行：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/KDZZZZZZ/threadmill/dev-native/scripts/install.sh | sh
+threadmill
 ```
+
+首次启动会引导设置模型 API 地址、模型名和凭据，并用无回显输入读取 API key。之后直接向 Manager 描述目标，例如：
+
+> 为这个项目实现文件上传功能，补充验证，并在当前工作目录启动服务供我验收。
+
+<details>
+<summary>备用安装地址与自定义安装位置</summary>
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/KDZZZZZZ/threadmill/main/scripts/install.sh | sh
+```
+
+默认安装到 `~/.threadmill/bin`，自动配置 shell 的 PATH。`THREADMILL_INSTALL_DIR` 可以调整程序安装位置，`THREADMILL_PROJECT_DIR` 可以指定预检项目；它们不改变运行时默认的 VFS 状态目录。日常安装无需设置这些变量。
 
 </details>
 
-安装不会读取或写入模型密钥。打开新终端后，在通过准入的项目目录首次运行：
+## 产品特性
+
+| 特性 | 你可以得到什么 |
+| --- | --- |
+| Manager 统一协调 | 用自然语言提出目标、补充约束、查看报告，由 Manager 编排后续工作。 |
+| 规划、执行、独立验收 | 每个任务经过 Planner、Executor、Verifier，保留计划、工具证据和验收结论。 |
+| 显式依赖与并行任务 | 有依赖的任务等待输入，无关任务可以并行推进；逻辑任务数量与实际执行槽位分开管理。 |
+| 隔离文件版本 | 普通任务使用 VFS 快照与增量，按共同状态和差异合入，避免多个 Agent 直接争写同一个工作目录。 |
+| 在真实目录交付 | 新阶段可由一个任务持有真实目录，在其中运行、调试和验收；Manager 与持有者在运行中双向交流。 |
+| 持久任务与记忆 | 任务可以跨多轮激活保留身份与检查点；记忆图按当前任务组织和提供相关上下文。 |
+| 可见的工作过程 | WebUI 展示项目、Manager 对话、任务图和 Agent 活动；TUI 与无交互命令复用同一运行时。 |
+| 受控的命令执行 | Agent 的文件和命令操作经过统一 Tool 层，命令按槽位排队，在所选隔离边界内运行。 |
+
+用户要求“运行当前工作区”时，Manager 会创建新的真实目录任务。已有任务不能临时切换成真实目录持有者；同一时间只有一个任务拥有真实目录，其他任务继续隔离。
+
+## 系统与权限要求
+
+Threadmill **不提供普通复制降级**。支持条件由实际操作验证，不能仅凭文件系统名称或拥有 sudo 判断。
+
+| 项目 | 要求与用途 |
+| --- | --- |
+| 操作系统 | 一键安装支持 Linux x86-64 / ARM64。 |
+| 文件系统 | 项目到 VFS 存储必须支持 reflink（CoW）克隆；通常要求同一个启用 reflink 的 Btrfs / XFS 文件系统。普通 ext4、tmpfs 和跨文件系统克隆不满足要求。 |
+| 安装权限 | 普通用户需要 sudo，安装器提前请求，用于安装依赖和必要的发行版 AppArmor 配置。以日后实际运行程序的用户执行安装命令，不要给整条命令加 sudo。 |
+| 目录权限 | 当前用户须能读写项目、创建项目旁的私有命令目录，并写入状态、安装、缓存目录和 shell 启动文件；项目与运行目录须允许执行文件。 |
+| 命令沙箱 | 默认使用 bwrap，需要系统允许其创建用户、挂载和 PID namespace。安装会真实运行沙箱命令，不能运行则拒绝安装。 |
+| 网络 | 安装需要访问 GitHub 和所需依赖源；运行需要访问配置的模型 API。默认 bwrap 共享宿主网络，不提供域名或端口白名单。 |
+| 模型凭据 | 需要可用的模型接口与 API key；密钥保存在 `~/.threadmill/credentials.yaml`，权限必须为 `0600`。 |
+
+文件快照默认存放在 `~/.threadmill/projects/<项目路径哈希>/vfs`。自定义 `vfs.live_root` 或打开新项目时，会对实际路径重新检查准入。Docker 或外部沙箱也不能绕过 reflink 要求。
+
+安装时的 sudo 用于系统准备；正常运行不要求始终以 root 身份执行。更严格的出站网络策略由宿主防火墙、代理或外层沙箱实施。
+
+## 使用方法
+
+### WebUI
+
+WebUI 由 React 前端和本地 Go 网关组成，可以实际打开项目、向 Manager 发送任务，并通过事件流实时展示执行进展。前端已内置到程序中，安装后直接启动：
 
 ```sh
+threadmill -web
+```
+
+浏览器打开 **http://127.0.0.1:8787**，点击 **Open project**，输入项目绝对路径，然后向 Manager 发送任务。先通过 `threadmill` 完成模型配置；WebUI 不负责首次凭据配置。
+
+左侧切换项目，中间查看对话和发送补充要求，右侧跟踪各 Agent 的执行状态。默认只监听本机；网关不是面向公网的多用户服务。
+
+正常访问连接真实运行时；地址加上 `?demo=1` 才会使用内置示例数据展示界面。
+
+### 终端与脚本
+
+```sh
+# 当前项目，交互式 TUI
 threadmill
-```
 
-TUI 会询问 API 地址、模型、上下文窗口和凭据名，并用无回显输入读取 API key。配置保存到 `~/.threadmill/config.yaml`，密钥单独保存到权限为 `0600` 的 `~/.threadmill/credentials.yaml`。
-
-在源码仓库中开发时仍可直接安装当前工作区版本：
-
-```sh
-GOBIN="$HOME/.threadmill/bin" go install ./cmd/threadmill
-```
-
-## 打开 CLI
-
-在满足文件系统和权限要求的项目目录运行即可进入 TUI：
-
-```sh
-threadmill
-```
-
-首次交互配置完成后，也可以指定其他工作区，或执行一次无交互任务：
-
-```sh
+# 指定项目
 threadmill -C /path/to/project
-threadmill -C /path/to/project -p "修复失败的测试"
+
+# 发送一条任务，完成后退出
+threadmill -C /path/to/project -p "检查失败的测试，修复问题并验证"
+
+# 使用额外的配置覆盖
 threadmill -C /path/to/project -config /path/to/override.yaml
 ```
 
-`-p` 不会启动首次配置交互；用于脚本前，请先运行一次 `threadmill`，或手动写好下面的配置和凭据文件。
+`-p` 不会启动首次配置向导，使用前先完成模型与凭据设置。
 
-## 任务、依赖与持久线程
+### 阶段交付与验收
 
-每个 task 都有 Planner → Executor → Verifier 三个角色。角色之间和 task 之间都使用普通的 `from → to` 依赖，不设 root 类别，也不按创建顺序串行或隐式继承上一个 task。目标读取全部前驱的固定文件与记忆快照；共同部分直接取，先处理文件差异，再整理记忆差异。只有一个前驱时直接继承，不调用记忆整理。
+1. 向 Manager 说明目标、约束和验收方式。
+2. Manager 创建阶段任务，现有真实目录内容与上游成果按文件优先、记忆随后处理。
+3. 持有真实目录的任务在当前工作区推进和验证；你可以继续通过 Manager 补充运行要求。
+4. 查看 Verifier 的结论、执行证据与真实目录结果，再提出下一阶段目标。
 
-task 可以没有向其他 task 的出边。没有任务需要它的输出时，它的运行或等待不会阻塞无关任务。持久 task 完成一轮后进入 `idle`，继续时保留 task ID，创建新的激活、环境和角色节点，并显式继承上一轮 verifier 输出；关闭只停止这个 task 的当前激活。多个 task 仍共享有限的模型和命令资源。
+真实目录的修改即时可见，任务失败不会自动回滚。文件可见、任务完成与 Verifier 的 `PASS` 是不同的事实。
 
-新阶段开始时，Manager 创建 `real_directory=true` 的新 task。真实目录现有内容作为额外来源进入 pending，按原有文件优先流程合入后，由该 task 直接在真实目录推进、调试和验收。运行中 Manager 与持有者可以双向交流；用户要求运行当前工作区时也创建新 task。已有 task 不能切换目录模式，其他 task 继续隔离。真实改动即时可见，失败不会自动回滚；文件可见、任务完成和 Verifier PASS 是不同的事实。项目在会话间发生变化时，新任务可使用新的只读 floor，旧快照继续引用原来的文件事实。归档在 reflink 后端可能保留磁盘文件；当前没有新增快照垃圾回收。
+## 配置与运行边界
 
-升级到统一边实现时，协调图和激活进度使用版本 `1`，会拒绝旧 root/Join 状态，**没有自动转换器**。切换前保留旧状态与匹配的旧程序；需要接续旧工作时，先用旧版完成，或从人工核对后的项目状态建立新图，不能把旧 `Finished`/`Merged` 标志当成新输入已就绪。接口、恢复边界与测试入口见 [统一边设计](docs/unified-edge-design.md)。
+默认提示词和工具配置已内置，普通项目无需携带 `threadmill.yaml`。模型配置保存在 `~/.threadmill/config.yaml`，与密钥文件分开；项目和命令行配置可以覆盖默认值。
 
-## 配置分层
+完整说明见 [配置与隔离](docs/configuration.md)，包括配置优先级、凭据权限、Docker / 外部沙箱与角色提示词。
 
-提示词、Agent、工具和执行配置已经内置在二进制中，普通使用不再要求项目根目录存在 `threadmill.yaml`。模型设置按以下顺序覆盖，越靠后优先级越高：
+目前变更文件吸收有单文件 50 MiB、总量 200 MiB 的限制；持久快照与旧基线没有自动垃圾回收。统一边状态格式不自动迁移旧 root/Join 状态，升级前应保留需要接续的旧状态和匹配程序。详见 [统一边设计](docs/unified-edge-design.md)。
 
-1. 二进制内置默认值
-2. 用户配置 `~/.threadmill/config.yaml`
-3. 兼容旧项目的 `<workspace>/threadmill.yaml`
-4. 项目配置 `<workspace>/.threadmill/config.yaml`
-5. `-config` 指定的额外覆盖文件
+## 开发与文档
 
-用户配置由首次启动自动写入，格式如下：
-
-```yaml
-llm:
-  provider: openai-responses
-  base_url: https://api.openai.com/v1
-  credential: personal
-  model: gpt-5
-  context_window: 272000
-```
-
-项目配置只需写要覆盖的字段，例如：
-
-```yaml
-# .threadmill/config.yaml
-llm:
-  model: another-model
-  context_window: 200000
-```
-
-## 凭据配置
-
-模型配置只保存凭据名，不保存 API key：
-
-```yaml
-llm:
-  credential: opencode
-```
-
-密钥统一保存在用户目录的 `~/.threadmill/credentials.yaml`，同名字段对应模型配置中的凭据名：
-
-```yaml
-opencode: sk-your-key
-```
-
-在 Unix 系统上，该文件必须只有当前用户可访问：
+`main` 是唯一集成与发布分支，所有修改通过 PR 合入。
 
 ```sh
-mkdir -p ~/.threadmill
-chmod 700 ~/.threadmill
-chmod 600 ~/.threadmill/credentials.yaml
+go build -o threadmill ./cmd/threadmill
+
+# 修改前端后，重新生成内置资源（需要 Node.js 24）
+npm --prefix web ci
+npm --prefix web run build
+
+# 将 TMPDIR 指向可写、支持 reflink 的测试卷
+TMPDIR=/path/to/reflink-volume/tmp go test ./...
+
+# 安装器验收
+sh scripts/install_test.sh
 ```
 
-## 命令隔离
-
-Threadmill 默认只在可用的 `bwrap` 沙箱中执行 Agent 命令，不会静默降级到宿主执行。`bwrap` 保持挂载、用户和 PID 隔离，但默认共享宿主网络，并透传明确列出的代理、CA 与工具链配置；需要限制出站目标时，应由宿主防火墙或外层代理执行策略。如果宿主不能创建所需 namespace，可以为项目显式选择一个本地已有的 Docker 镜像：
-
-```yaml
-exec:
-  container_image: golang:1.26.5-alpine
-```
-
-Docker 后端不会自动拉取镜像；容器禁用网络、使用只读根文件系统，并且只把当前 task 的 live workspace 挂载为可写目录。
-
-如果 Threadmill 本身已经运行在 Pier 等可信的外层隔离边界中，并由外层负责进程、文件和出站网络策略，可以显式复用该边界：
-
-```yaml
-exec:
-  external_sandbox: true
-```
-
-这不是宿主执行的自动降级。该模式仍为每个环境分配独立的 `HOME`/`TMPDIR`，并沿用相同的环境变量透传名单，不继承任意变量。不要在没有外层隔离的宿主上启用。
-
-外层容器中的多 Agent 运行还应开启绝对路径隔离：
-
-```yaml
-exec:
-  external_sandbox: true
-  external_workspace_isolation: true
-```
-
-该选项只支持 Linux，要求外层容器向 Threadmill 进程授予 `SYS_ADMIN`
-并放行 mount namespace。Threadmill 为每条命令创建私有 mount/PID
-namespace，把项目的规范绝对路径映射到当前 VFS live，然后在执行模型命令前丢弃
-`SYS_ADMIN`。权限或 namespace 不可用时以 `WORKSPACE_ISOLATION_UNAVAILABLE`
-失败，不会回退到可绕过 VFS 的执行。命令结束时该 PID namespace 一并销毁，
-因此该模式不用于跨多次 `bash` 调用保留后台进程。Harbor adapter 会自动提供这一最小权限和独立 VFS volume。
-
-## 提示词结构
-
-`threadmill.yaml` 目前有 10 份可配置提示词。角色提示词只描述职责、授权边界、工作方式和输出契约；工具参数与行为由 `tools` 的 description/schema 负责，避免重复。
-
-| 配置项 | 使用者 | 负责内容 | 必须说明 |
-| --- | --- | --- | --- |
-| `prompts.default` | 未配置专用提示词的 Agent | 通用 ReAct 回退行为 | 何时调查/修改、工具真实性、授权边界、完成条件 |
-| `prompts.compact` | 记忆整理调用 | 对话压缩为记忆节点 | 保留/丢弃范围、秘密过滤、节点类型/状态、归属和 JSON 契约 |
-| `prompts.compact_json_reminder` | 压缩格式重试 | 修复不可解析输出 | 只输出完整 JSON 及唯一格式 |
-| `prompts.drop_context_pressure` | 接近窗口上限的 Agent | 提醒释放当前上下文 | 不丢目标/约束/证据、操作可恢复 |
-| `prompts.organize_query` | 子图整理请求 | 约束一次记忆检索 | 查询是数据、最小相关集合、目标 ID 和节点 ID 不得编造 |
-| `agents.manager.system_prompt` | manager | 用户对话、协调图编排与真实目录阶段任务 | 创建阶段 task、运行中交流、真实目录验收、报告审计 |
-| `agents.planner.system_prompt` | planner | 在任务工作区调查并产出执行计划 | 项目约束、执行图、验证和风险；隔离 task 的实验不保留，真实目录实验自行清理 |
-| `agents.executor.system_prompt` | executor | 在任务工作区实施任务 | 目标优先级、最小改动、真实工具结果、验证、授权和结果报告 |
-| `agents.verifier.system_prompt` | verifier | 在任务工作区独立验收 | PASS/FAIL/INCONCLUSIVE、逐项证据；阶段验收在真实目录，实验不得冒充持久修复 |
-| `agents.subgraph_organizer.system_prompt` | subgraph organizer | 选择并挂接记忆节点 | 查询数据边界、搜索范围、最小集合和目标子图 |
-
-运行时还会注入 manager 的最新协调图、用户消息与 task 报告、受保护的 task package、上游输出与 Input 阶段信息，以及压缩所需的已有记忆和对话。每个 task package 只包含分配给它的 Task Info 和明确关联的用户请求；创建关系和继承记忆不扩大授权。文件差异处理使用独立会话，原始候选材料不会作为正常角色的当前记忆提前注入。当前模块与接口映射见 [统一边设计](docs/unified-edge-design.md)。修改提示词应在固定任务集上比较成功率、工具误用、证据完整性、token、延迟和费用，不能只凭文案判断。
-
-开发验证同样需要支持 reflink 的测试卷；例如将 `TMPDIR` 指向该卷上的可写目录后运行 `go test ./...`。安装验收：`sh scripts/install_test.sh`；在支持 reflink 与 bwrap 的 Linux 上加 `THREADMILL_TEST_REAL_PROBES=1` 可运行真实文件系统／沙箱探针（下载、包管理与 Go 安装仍用测试替身）。
+- [架构与模块边界](docs/architecture-governance.md)
+- [任务依赖、输入合入与持久激活](docs/unified-edge-design.md)
+- [WebUI API](docs/openapi.yaml)
+- [前端开发、构建与回归](web/README.md)
+- [评测入口与环境条件](benchmarks/README.md)
+- [贡献与 PR 规则](AGENTS.md)

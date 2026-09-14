@@ -219,6 +219,11 @@ func (g *webGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, g.uiPath)
 		return
 	}
+	if g.uiPath == "" && (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+		(r.URL.Path == "/" || strings.HasPrefix(r.URL.Path, "/assets/")) {
+		serveWebAsset(w, r)
+		return
+	}
 	if r.URL.Path == "/healthz" && r.Method == http.MethodGet {
 		webJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "threadmill-webui"})
 		return

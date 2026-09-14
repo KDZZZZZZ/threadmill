@@ -47,8 +47,8 @@ EOF
 cat >"$fake_bin/git" <<'EOF'
 #!/bin/sh
 set -eu
-test "$*" = "ls-remote --exit-code https://github.com/KDZZZZZZ/threadmill refs/heads/dev-native"
-printf '1111111111111111111111111111111111111111\trefs/heads/dev-native\n'
+test "$*" = "ls-remote --exit-code https://github.com/KDZZZZZZ/threadmill refs/heads/main"
+printf '1111111111111111111111111111111111111111\trefs/heads/main\n'
 EOF
 cat >"$fake_bin/bwrap" <<'EOF'
 #!/bin/sh

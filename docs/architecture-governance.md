@@ -109,3 +109,9 @@ Agent Self-Claimed：使用 `real_directory` 与 `project_task_id` 字段；额�
 2026-09-14 安装准入：Human Design：禁止普通复制降级，仅允许具备完整能力的用户使用，安装前探测并申请所需权限。Agent Self-Claimed：项目到不可变 floor 必须通过非空 FICLONE 探针，工作树克隆、Gradle 种子、发布替换保留和命令缓存产物不再回退普通复制；安装器先检查实际用户与默认项目状态路径的读写、执行、符号链接、rename 和全树 reflink，再申请 sudo 准备依赖并真实运行 bwrap，之后才安装主程序。启动对新目录重新准入并拒绝不可用沙箱；不为 reflink 可用的默认路径安装无用的 FUSE 依赖。无新增模块间依赖。安装时不能替未来新增项目、外部挂载或后来变更的权限担保。
 
 准入实现参照已检查的 Pi `0c7bb7c5` `packages/coding-agent/examples/extensions/sandbox/index.ts`、`test/restore-sandbox-env.test.ts`（运行边界与环境恢复）；deepseek-harness `c291e796` `docs/subsystems/sandbox.md`、`packages/shell/bash-sandbox/tests/bwrap.e2e.ts`（真实 bwrap 操作验证）；Eino `9d983b36` `adk/filesystem/backend.go`、`adk/middlewares/filesystem/filesystem_test.go`（后端能力边界）。这些实现不提供 Threadmill 的 reflink 安装准入协议，严格准入来自本项目人类要求。克隆语义依据 GNU coreutils `cp --help` 的 `--reflink=always` 契约及 Linux FICLONE；拒绝复制无需增加权限后门。
+
+## WebUI 工程化（2026-09-14）
+
+Human Design：按指定 FRONTEND-STACK.md 重构前端，以现有 WebUI 为视觉基线，不做破坏性删减；重写 README、加入宣传图，停止使用 dev-native，统一通过 PR 合入 main。
+
+Agent Self-Claimed：采用规范的 A 级目录结构、锁定 React/TypeScript/Vite/HeroUI/Query/zustand 等依赖；页面、展示组件、HTTP/SSE 资源模块和本地主题分离。保持既有 UI → adapter → Manager 边界，不新增调度或文件访问权限。Vite 生成资源纳入版本控制并由 Go embed 内置，安装后直接 threadmill -web；保留独立 HTML 覆盖与旧视觉基准。迁移原消息/Help 回归、补充浏览器交互及资源交付测试，具体工程目录、缓存结构、CI 和文档拆分由 Agent 选择。框架依据与横向实现参考见 web/README.md。

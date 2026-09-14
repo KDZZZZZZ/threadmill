@@ -331,7 +331,7 @@ func parse(args []string, errOut io.Writer) (options, error) {
 	fs.StringVar(&opts.message, "p", "", "send one message and exit")
 	fs.BoolVar(&opts.web, "web", false, "serve the local WebUI; open projects from the browser")
 	fs.StringVar(&opts.listen, "listen", "127.0.0.1:8787", "WebUI loopback address")
-	fs.StringVar(&opts.webUI, "web-ui", "docs/webui-demo.html", "WebUI HTML file (relative to launch directory)")
+	fs.StringVar(&opts.webUI, "web-ui", "", "override the bundled WebUI with a standalone HTML file")
 	fs.StringVar(&opts.webOrigin, "web-origin", "", "additional exact WebUI origin behind a trusted local proxy (scheme://host[:port])")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err

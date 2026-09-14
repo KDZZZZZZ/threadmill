@@ -19,16 +19,15 @@ Agents must not treat the host checkout as private scratch space. They issue too
 
 ## Baseline branch
 
-- Current baseline: `dev-native`.
-- Every other branch must land on `dev-native`.
-- `dev-native` is the only integration branch until a human explicitly changes this file.
+- Current baseline: `main`.
+- Every other branch must land on `main`.
+- `main` is the only integration branch until a human explicitly changes this file.
 
 ## Merge policy
 
-- Code may enter `dev-native` only through a pull request.
-- Direct push, local merge, rebase-onto-baseline, cherry-pick-onto-baseline, and `git merge` into `dev-native` are forbidden.
-- Do not merge into `main` unless a human explicitly asks for that in writing.
-- Do not fast-forward `dev-native` locally and push. Open a PR.
+- Code may enter `main` only through a pull request.
+- Direct push, local merge, rebase-onto-baseline, cherry-pick-onto-baseline, and `git merge` into `main` are forbidden.
+- Do not fast-forward `main` locally and push. Open a PR.
 
 ## PR authorship split
 
