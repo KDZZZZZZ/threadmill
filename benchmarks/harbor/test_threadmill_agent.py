@@ -170,6 +170,7 @@ class ThreadmillAgentTest(unittest.TestCase):
                 logs,
                 model_name="deepseek/deepseek-v4-flash",
                 binary=binary,
+                workspace="/app",
             )
 
             asyncio.run(agent.run("do it", object(), AgentContext()))
@@ -177,6 +178,8 @@ class ThreadmillAgentTest(unittest.TestCase):
             self.assertEqual(len(agent.calls), 1)
             call = agent.calls[0]
             self.assertEqual(call.get("timeout_sec"), 22200)
+            self.assertEqual(call.get("cwd"), "/app")
+            self.assertIn("-C /app ", str(call["command"]))
             command = str(call["command"])
             self.assertIn("vfs-state.tar", command)
             self.assertIn(".threadmill-exec-*", command)

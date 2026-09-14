@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -618,34 +617,20 @@ func TestNewManagerLoopReplacePendingMutatesGraph(t *testing.T) {
 	}
 }
 
-func TestNewManagerLoopPublishesSelectedCompletedTask(t *testing.T) {
+func TestNewManagerLoopCreatesRealDirectoryTask(t *testing.T) {
 	graph := New()
-	task := graph.AddTask()
-	base := t.TempDir()
-	files := vfs.NewStore(base)
-	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
-	_, err := graph.Run(context.Background(), task.ID, "publish", stores, func(task Task) (Roles, error) {
-		roles := instantRoles()
-		roles.Executor = askerFunc(func(context.Context, string) (string, error) {
-			return "created", files.View(task.Env.ID).Write("selected.txt", []byte("published"))
-		})
-		return roles, nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	stores := Stores{Memory: ctxgraph.NewStore()}
 	calls := 0
 	provider := stubProvider(func(_ context.Context, request agent.Request) (agent.AssistantMessage, error) {
 		calls++
 		if calls == 1 {
-			if !hasTool(request.Tools, coordPublishTaskName) {
-				t.Fatal("manager missing publishTask")
+			if !hasTool(request.Tools, coordOrchestrateName) {
+				t.Fatal("manager missing orchestration tool")
 			}
 			return agent.AssistantMessage{ToolCalls: []agenttool.Call{{
 				ID:        "publish-1",
-				Name:      coordPublishTaskName,
-				Arguments: json.RawMessage(`{"task_id":"` + task.ID + `"}`),
+				Name:      coordOrchestrateName,
+				Arguments: json.RawMessage(`{"action":"replace_pending","tasks":[{"info":"debug in the real directory","real_directory":true}]}`),
 			}}}, nil
 		}
 		return agent.AssistantMessage{Content: "delivered"}, nil
@@ -656,7 +641,7 @@ func TestNewManagerLoopPublishesSelectedCompletedTask(t *testing.T) {
 		provider,
 		agent.FileAgents{Manager: agent.FileAgent{
 			SystemPrompt: "yaml manager",
-			Tools:        []string{coordPublishTaskName},
+			Tools:        []string{coordOrchestrateName},
 		}},
 		nil,
 		0,
@@ -665,16 +650,16 @@ func TestNewManagerLoopPublishesSelectedCompletedTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answer, err := loop.Ask(context.Background(), "publish the accepted task")
+	answer, err := loop.Ask(context.Background(), "create a task for the real directory")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if answer != "delivered" {
 		t.Fatalf("manager answer = %q", answer)
 	}
-	got, err := os.ReadFile(filepath.Join(base, "selected.txt"))
-	if err != nil || string(got) != "published" {
-		t.Fatalf("published file = %q, %v", got, err)
+	state := graph.Snapshot()
+	if len(state.Tasks) != 1 || !state.Tasks[0].RealDirectory || state.ProjectTaskID != state.Tasks[0].ID {
+		t.Fatalf("created real-directory task=%+v", state)
 	}
 }
 

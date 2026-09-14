@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -200,180 +198,7 @@ func TestGraphToolNilGraph(t *testing.T) {
 	}
 }
 
-func TestPublishTaskToolCommitsSelectedCompletedSnapshot(t *testing.T) {
-	t.Parallel()
-	graph := New()
-	first, second := graph.AddTask(), graph.AddTask()
-	base := t.TempDir()
-	stores := Stores{Memory: ctxgraph.NewStore(), Files: vfs.NewStore(base)}
-	t.Cleanup(func() { _ = stores.Files.Close() })
-	runPublishTask(t, graph, first, stores, "choice.txt", "first", nil)
-	runPublishTask(t, graph, second, stores, "choice.txt", "second", nil)
-	for _, choice := range []struct {
-		task    Task
-		content string
-	}{{first, "first"}, {second, "second"}, {first, "first"}} {
-		result, err := executeGraphTool(t, GraphTools(graph, stores), coordPublishTaskName, `{"task_id":"`+choice.task.ID+`"}`)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(result.Content, `"published":true`) || !strings.Contains(result.Content, `"choice.txt"`) {
-			t.Fatalf("publish result = %s", result.Content)
-		}
-		got, err := os.ReadFile(filepath.Join(base, "choice.txt"))
-		if err != nil || string(got) != choice.content {
-			t.Fatalf("published file = %q, %v, want %s", got, err, choice.content)
-		}
-	}
-}
-
-func TestPublishTaskToolUsesLastCommittedOutputAfterFailure(t *testing.T) {
-	t.Parallel()
-	graph := New()
-	task := graph.AddTask()
-	base := t.TempDir()
-	stores := Stores{Memory: ctxgraph.NewStore(), Files: vfs.NewStore(base)}
-	t.Cleanup(func() { _ = stores.Files.Close() })
-	runPublishTask(t, graph, task, stores, "recovered.txt", "kept", errors.New("verification failed"))
-	result, err := executeGraphTool(t, GraphTools(graph, stores), coordPublishTaskName, `{"task_id":"`+task.ID+`"}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(result.Content, `"outcome":"failed"`) {
-		t.Fatalf("publish result = %s", result.Content)
-	}
-	if got, err := os.ReadFile(filepath.Join(base, "recovered.txt")); err != nil || string(got) != "kept" {
-		t.Fatalf("recovered file = %q, %v", got, err)
-	}
-}
-
-func TestPublishTaskToolRejectsActiveTask(t *testing.T) {
-	t.Parallel()
-	graph := New()
-	task := graph.AddTask()
-	stores := Stores{Memory: ctxgraph.NewStore(), Files: vfs.NewStore(t.TempDir())}
-	t.Cleanup(func() { _ = stores.Files.Close() })
-	_, err := executeGraphTool(t, GraphTools(graph, stores), coordPublishTaskName, `{"task_id":"`+task.ID+`"}`)
-	if err == nil || !strings.Contains(err.Error(), "not completed") {
-		t.Fatalf("publish error = %v, want active task rejection", err)
-	}
-}
-
-func TestPublishTaskToolDoesNotRecordIntentWithoutCommittedOutput(t *testing.T) {
-	t.Parallel()
-	graph := New()
-	task := graph.AddTask()
-	stores := Stores{Memory: ctxgraph.NewStore(), Files: vfs.NewStore(t.TempDir())}
-	t.Cleanup(func() { _ = stores.Files.Close() })
-	_, _ = graph.Run(context.Background(), task.ID, "", stores, func(Task) (Roles, error) {
-		return Roles{}, errors.New("assembly failed")
-	})
-	_, err := executeGraphTool(t, GraphTools(graph, stores), coordPublishTaskName, `{"task_id":"`+task.ID+`"}`)
-	if err == nil || !strings.Contains(err.Error(), "no committed file output") {
-		t.Fatalf("publish error = %v, want missing committed output", err)
-	}
-	if got := graph.Snapshot().PublishingTaskID; got != "" {
-		t.Fatalf("recorded publication intent %q without output", got)
-	}
-}
-
-func TestPublishTaskToolRendersWhileAnotherTaskRuns(t *testing.T) {
-	t.Parallel()
-	graph := New()
-	completed := graph.AddTask()
-	graph.AddTask()
-	base := t.TempDir()
-	stores := Stores{Memory: ctxgraph.NewStore(), Files: vfs.NewStore(base)}
-	t.Cleanup(func() { _ = stores.Files.Close() })
-	runPublishTask(t, graph, completed, stores, "progress.txt", "stage one", nil)
-	if _, err := executeGraphTool(t, GraphTools(graph, stores), coordPublishTaskName, `{"task_id":"`+completed.ID+`"}`); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := os.ReadFile(filepath.Join(base, "progress.txt")); err != nil || string(got) != "stage one" {
-		t.Fatalf("published file = %q, %v", got, err)
-	}
-}
-
-func TestPublishTaskToolPersistsIdempotentReference(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	graphPath := filepath.Join(dir, "graph.json")
-	graph, err := OpenGraph(graphPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	task := graph.AddTask()
-	base := filepath.Join(dir, "project")
-	state := filepath.Join(dir, "vfs")
-	if err := os.Mkdir(base, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	files, err := vfs.NewPersistentStore(base, state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stores := Stores{Memory: ctxgraph.NewStore(), Files: files}
-	runPublishTask(t, graph, task, stores, "delivered.txt", "done", nil)
-	if _, err := executeGraphTool(t, GraphTools(graph, stores), coordPublishTaskName, `{"task_id":"`+task.ID+`"}`); err != nil {
-		t.Fatal(err)
-	}
-	if err := files.Close(); err != nil {
-		t.Fatal(err)
-	}
-	restored, err := OpenGraph(graphPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	restoredFiles, err := vfs.NewPersistentStore(base, state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = restoredFiles.Close() })
-	result, err := executeGraphTool(t, GraphTools(restored, Stores{Files: restoredFiles}), coordPublishTaskName, `{"task_id":"`+task.ID+`"}`)
-	if err != nil || !strings.Contains(result.Content, `"changed":0`) {
-		t.Fatalf("idempotent publication = %s, %v", result.Content, err)
-	}
-	if got, err := os.ReadFile(filepath.Join(base, "delivered.txt")); err != nil || string(got) != "done" {
-		t.Fatalf("delivered file = %q, %v", got, err)
-	}
-	next, err := restored.ReplacePending(context.Background(), PendingSubgraph{Tasks: []PendingTask{{ID: "next", Info: "next"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if next.PublishedTaskID != task.ID || next.PublishingTaskID != "" {
-		t.Fatalf("publication reference = %+v", next)
-	}
-}
-
-func TestPublishTaskToolPersistsIntentWithoutLockingSelection(t *testing.T) {
-	t.Parallel()
-	graphPath := filepath.Join(t.TempDir(), "graph.json")
-	graph, err := OpenGraph(graphPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, second := graph.AddTask(), graph.AddTask()
-	stores := Stores{Memory: ctxgraph.NewStore(), Files: vfs.NewStore(filepath.Join(t.TempDir(), "missing-project"))}
-	t.Cleanup(func() { _ = stores.Files.Close() })
-	runPublishTask(t, graph, first, stores, "first.txt", "first", nil)
-	runPublishTask(t, graph, second, stores, "second.txt", "second", nil)
-	if _, err := executeGraphTool(t, GraphTools(graph, stores), coordPublishTaskName, `{"task_id":"`+first.ID+`"}`); err == nil {
-		t.Fatal("publishing to missing project succeeded")
-	}
-	restored, err := OpenGraph(graphPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := restored.Snapshot(); got.PublishingTaskID != first.ID || got.PublishedTaskID != "" {
-		t.Fatalf("publication intent = %+v", got)
-	}
-	_, err = executeGraphTool(t, GraphTools(restored, stores), coordPublishTaskName, `{"task_id":"`+second.ID+`"}`)
-	if err == nil || strings.Contains(err.Error(), first.ID) {
-		t.Fatalf("another selection blocked by first intent: %v", err)
-	}
-}
-
-func runPublishTask(t *testing.T, graph *Graph, task Task, stores Stores, path, content string, failure error) {
+func runFileTask(t *testing.T, graph *Graph, task Task, stores Stores, path, content string, failure error) {
 	t.Helper()
 	_, err := graph.Run(context.Background(), task.ID, "produce checkpoint", stores, func(Task) (Roles, error) {
 		roles := instantRoles()
@@ -440,19 +265,16 @@ func TestGraphToolsContinueAndClosePersistentTask(t *testing.T) {
 	base := t.TempDir()
 	stores := Stores{Memory: ctxgraph.NewStore(), Files: vfs.NewStore(base)}
 	t.Cleanup(func() { _ = stores.Files.Close() })
-	tools := GraphTools(graph, stores)
+	tools := GraphTools(graph)
 	if _, err := executeGraphTool(t, tools, coordOrchestrateName, `{
 		"action":"replace_pending","tasks":[{"id":"ongoing","info":"first request","persistent":true}]
 	}`); err != nil {
 		t.Fatal(err)
 	}
 	first, _ := graph.Task("ongoing")
-	runPublishTask(t, graph, first, stores, "progress.txt", "first", nil)
+	runFileTask(t, graph, first, stores, "progress.txt", "first", nil)
 	if task, _ := graph.Task(first.ID); task.Outcome != OutcomeIdle {
 		t.Fatalf("persistent task outcome = %q, want idle", task.Outcome)
-	}
-	if _, err := executeGraphTool(t, tools, coordPublishTaskName, `{"task_id":"ongoing"}`); err != nil {
-		t.Fatalf("publish idle persistent task: %v", err)
 	}
 	if _, err := executeGraphTool(t, tools, coordOrchestrateName, `{
 		"action":"continue_task","task_id":"ongoing","input":"follow-up request"
@@ -491,10 +313,8 @@ func TestGraphToolsContinueAndClosePersistentTask(t *testing.T) {
 	if task, _ := graph.Task(first.ID); task.Outcome != OutcomeClosed {
 		t.Fatalf("closed task outcome = %q", task.Outcome)
 	}
-	if _, err := executeGraphTool(t, tools, coordPublishTaskName, `{"task_id":"ongoing"}`); err != nil {
-		t.Fatalf("publish closed task checkpoint: %v", err)
-	}
-	if got, err := os.ReadFile(filepath.Join(base, "progress.txt")); err != nil || string(got) != "second" {
+	latest, _ := graph.Output(continued.Verifier.ID)
+	if got, err := stores.Files.View(latest.FilesRef).Read("progress.txt"); err != nil || string(got) != "second" {
 		t.Fatalf("published continuation = %q, %v", got, err)
 	}
 	if _, err := executeGraphTool(t, tools, coordOrchestrateName, `{"action":"continue_task","task_id":"ongoing","input":"late"}`); err == nil {

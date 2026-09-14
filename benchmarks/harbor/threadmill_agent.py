@@ -87,7 +87,7 @@ def _last_runtime_snapshot(logs_dir: Path) -> dict[str, Any] | None:
     return latest
 
 
-class Threadmill(BaseInstalledAgent):
+class ThreadmillRunner:
     """Run Threadmill inside a Harbor task without changing its grader."""
 
     SUPPORTS_CONFIG = True
@@ -101,6 +101,7 @@ class Threadmill(BaseInstalledAgent):
         context_window: int = 272_000,
         exec_slots: int | None = None,
         model_proxy: str | None = None,
+        workspace: str = "/workspace/repo",
         **kwargs: Any,
     ) -> None:
         candidate = binary or os.environ.get("THREADMILL_BINARY")
@@ -120,6 +121,9 @@ class Threadmill(BaseInstalledAgent):
         self._exec_slots = None if exec_slots is None else int(exec_slots)
         if self._exec_slots is not None and self._exec_slots <= 0:
             raise ValueError("exec_slots must be positive")
+        self._workspace = PurePosixPath(workspace)
+        if not self._workspace.is_absolute():
+            raise ValueError("workspace must be an absolute container path")
         self._model_proxy = model_proxy
         super().__init__(*args, **kwargs)
 
@@ -133,6 +137,7 @@ class Threadmill(BaseInstalledAgent):
         await environment.upload_file(self._binary, _REMOTE_BINARY.as_posix())
         if self._tracer is not None:
             await environment.upload_file(self._tracer, _REMOTE_TRACER.as_posix())
+        workspace = shlex.quote(self._workspace.as_posix())
         tracer_chmod = (
             f"chmod 0755 {shlex.quote(_REMOTE_TRACER.as_posix())}; "
             if self._tracer is not None
@@ -156,10 +161,10 @@ class Threadmill(BaseInstalledAgent):
                 "printf 'strace='; command -v strace || printf 'unavailable\\n'; "
                 "printf 'fuse_overlayfs='; command -v fuse-overlayfs || printf 'unavailable\\n'; "
                 "printf 'fusermount3='; command -v fusermount3 || printf 'unavailable\\n'; "
-                "printf 'devices='; stat -c '/workspace/repo:%d /tmp:%d' "
-                "/workspace/repo /tmp; "
+                "printf 'devices='; stat -c '%n:%d' "
+                f"{workspace} /tmp; "
                 f"stat -c '{_REMOTE_VFS.as_posix()}:%d' {_REMOTE_VFS.as_posix()}; "
-                "printf 'filesystems\\n'; df -T /workspace/repo /tmp; "
+                f"printf 'filesystems\\n'; df -T {workspace} /tmp; "
                 f"df -T {_REMOTE_VFS.as_posix()}; "
                 "printf 'cgroup_cpu='; cat /sys/fs/cgroup/cpu.max 2>/dev/null || printf 'unknown\\n'; "
                 "printf 'cgroup_memory='; cat /sys/fs/cgroup/memory.max 2>/dev/null || printf 'unknown\\n'; "
@@ -180,7 +185,7 @@ class Threadmill(BaseInstalledAgent):
                 "\"$probe/lower\" \"$probe/merged\" 2>/dev/null; then "
                 "printf 'mount_namespace=yes\\n'; "
                 "else printf 'mount_namespace=no\\n'; fi; "
-                "if cp --reflink=always /workspace/repo/README.markdown "
+                f"if cp --reflink=always {workspace}/.git/HEAD "
                 "\"$probe/reflink\" 2>/dev/null; then printf 'repo_to_vfs_reflink=yes\\n'; "
                 "else printf 'repo_to_vfs_reflink=no\\n'; fi; "
                 f"}} >{shlex.quote((_REMOTE_LOGS / 'setup.txt').as_posix())} 2>&1; "
@@ -283,7 +288,7 @@ class Threadmill(BaseInstalledAgent):
         command = (
             "set +e; "
             f"{shlex.quote(_REMOTE_BINARY.as_posix())} "
-            "-C /workspace/repo "
+            f"-C {shlex.quote(self._workspace.as_posix())} "
             f"-config {shlex.quote(_REMOTE_CONFIG.as_posix())} "
             f"-p {shlex.quote(instruction)} "
             f"2>&1 | tee {logs}/console.log; "
@@ -312,7 +317,7 @@ class Threadmill(BaseInstalledAgent):
             "--exclude='./.tmp-*' --exclude='./.overlay-tmp-*' "
             # .floor is a full clone of the repo and .replaced holds displaced
             # publication content; neither is state worth shipping per trial.
-            "--exclude='./.floor' --exclude='./.replaced' "
+            "--exclude='./.floor' --exclude='./.floors' --exclude='./.replaced' "
             f"-cpf {logs}/vfs-state.tar . || collect_status=$?; fi; "
             "if [ \"$status\" -eq 0 ] && [ \"$collect_status\" -ne 0 ]; then "
             "status=$collect_status; fi; "
@@ -325,7 +330,7 @@ class Threadmill(BaseInstalledAgent):
                 "HOME": _REMOTE_HOME.as_posix(),
                 "TMPDIR": _REMOTE_TMP.as_posix(),
             },
-            cwd="/workspace/repo",
+            cwd=self._workspace.as_posix(),
             timeout_sec=self._run_timeout_sec(),
         )
 
@@ -344,3 +349,7 @@ class Threadmill(BaseInstalledAgent):
             snapshot.get("memory_ops_tokens", 0)
         )
         context.metadata = {"threadmill_runtime_snapshot": snapshot}
+
+
+class Threadmill(ThreadmillRunner, BaseInstalledAgent):
+    """Harbor entry point."""

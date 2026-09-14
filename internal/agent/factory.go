@@ -36,10 +36,10 @@ const (
 	fileFindToolName  = "find"
 	bashToolName      = "bash"
 
-	coordOrchestrateToolName = "coordination_orchestrate"
-	coordPublishTaskToolName = "coordination_publishTask"
-	coordRequestHelpToolName = "coordination_requestHelp"
-	coordInputToolName       = "input"
+	coordOrchestrateToolName    = "coordination_orchestrate"
+	coordRequestHelpToolName    = "coordination_requestHelp"
+	coordMessageManagerToolName = "coordination_messageManager"
+	coordInputToolName          = "input"
 
 	hookInjectSubscribedMemory      = "inject_subscribed_memory"
 	hookCompactOnOverflow           = "compact_on_overflow"
@@ -78,8 +78,8 @@ var knownFileTools = map[string]struct{}{
 	fileFindToolName:              {},
 	bashToolName:                  {},
 	coordOrchestrateToolName:      {},
-	coordPublishTaskToolName:      {},
 	coordRequestHelpToolName:      {},
+	coordMessageManagerToolName:   {},
 	coordInputToolName:            {},
 }
 
@@ -98,11 +98,11 @@ var knownFileHooks = map[string]struct{}{
 
 var managerOnlyTools = map[string]struct{}{
 	coordOrchestrateToolName: {},
-	coordPublishTaskToolName: {},
 }
 
 var taskRoleOnlyTools = map[string]struct{}{
-	coordInputToolName: {},
+	coordMessageManagerToolName: {},
+	coordInputToolName:          {},
 }
 
 // FileAgent 是 threadmill.yaml 里单个 Agent 的配置。

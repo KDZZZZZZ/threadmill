@@ -36,8 +36,12 @@ func (s blobStore) putFile(source string) (string, error) {
 	staged := temp.Name()
 	defer os.Remove(staged)
 
+	if err := cloneArtifact(temp, file); err != nil {
+		temp.Close()
+		return "", fmt.Errorf("cmdcache: stage artifact %q: %w", source, err)
+	}
 	hasher := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(temp, hasher), file); err != nil {
+	if _, err := io.Copy(hasher, temp); err != nil {
 		temp.Close()
 		return "", fmt.Errorf("cmdcache: stage artifact %q: %w", source, err)
 	}

@@ -33,7 +33,7 @@ func (t bashTool) BindEnv(e env.Env) Tool {
 func (t bashTool) Definition() Definition {
 	return Definition{
 		Name:        bashName,
-		Description: "在工作区里执行 bash 命令。启用追踪时会等待所有后代进程；临时后台任务须在调用内终止并回收。可选 timeout 是秒数。非零退出码会写在输出里，不是工具错误。",
+		Description: "在工作区根目录执行 bash。工作区内文件必须使用相对路径；系统工具和外部依赖可用绝对路径。不执行 git commit 或 git push；保留文件修改，由 Threadmill 保存快照；真实目录 task 的改动直接可见。启用追踪时会等待所有后代进程；临时后台任务须在调用内终止并回收。可选 timeout 是秒数。非零退出码会写在输出里，不是工具错误。",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"要执行的 bash 命令"},"timeout":{"type":"integer","description":"超时秒数"}},"required":["command"],"additionalProperties":false}`),
 	}
 }

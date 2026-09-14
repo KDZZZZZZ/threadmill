@@ -182,6 +182,9 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 			DisableTrace:               file.Exec.Cache.DisableTrace,
 		}),
 	}
+	if status := s.stores.Exec.Stats(); status.SandboxBackend == "unavailable" || status.WorkspaceIsolation == "unavailable" {
+		return nil, errors.Join(fmt.Errorf("manager: required execution sandbox is unavailable; complete installation preflight before opening a project"), files.Close())
+	}
 	s.graph.SetProgressStore(progress)
 	if err := s.graph.SetTaskSink(s.stores.ProjectManagerTaskInfos); err != nil {
 		return nil, err
@@ -200,11 +203,7 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 	fileStats := files.Stats()
 	if fileStats.OverlayAvailable {
 		logger.Info("VFS materialization acceleration available", "backend", fileStats.OverlayBackend)
-	} else if !vfs.ReflinkSupported(liveRoot) {
-		// The read floor lives under the live root, so only the filesystem
-		// decides this now; the old cross-device case cannot arise.
-		logger.Warn("materialize cannot use reflink clones (live root not on a reflink filesystem); each environment will full-copy the repo",
-			"live_root", liveRoot)
+
 	}
 	bus := event.NewBus(s.onEvent, s.metrics.Handle, event.Monitor(logger), opt.OnEvent)
 	s.events = bus

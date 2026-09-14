@@ -8,7 +8,7 @@ Threadmill is a lightweight **Agent OS**.
 
 The agent itself only thinks and calls tools. Every file read, file write, code edit, and command execution must go through a single **Tool layer**. The Tool layer connects the agent to an isolated virtual environment:
 
-- The virtual filesystem shares file versions through snapshot + delta. Edges do not require a private project copy; durable checkpoints may retain copy/reflink backing files, and retained floors currently have no automatic garbage collector.
+- The virtual filesystem shares file versions through snapshot + delta. Edges do not require a private project copy; durable checkpoints may retain reflink backing files, and retained floors currently have no automatic garbage collector.
 - The virtual execution system queues commands such as `cargo test`, `pytest`, and shell, then maps them onto a limited set of CPU, memory, and execution slots.
 - A coordination graph schedules ordinary tasks from explicit `From`/`To` dependencies. It has no root task category or global serial execution rule; a task without outgoing dependencies does not hold up unrelated tasks.
 - A memory graph decides which context that agent sees while it runs.

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -509,7 +508,7 @@ func (c *Cache) replayFile(live string, change Change) error {
 	}
 	staged := temp.Name()
 	defer os.Remove(staged)
-	reflinked, materializeErr := cloneOrCopy(temp, source)
+	materializeErr := cloneArtifact(temp, source)
 	if err := errors.Join(materializeErr, source.Close(), temp.Close()); err != nil {
 		return fmt.Errorf("cmdcache: replay %q: %w", change.Path, err)
 	}
@@ -526,34 +525,17 @@ func (c *Cache) replayFile(live string, change Change) error {
 		return fmt.Errorf("cmdcache: replay %q: %w", change.Path, err)
 	}
 	c.mu.Lock()
-	if reflinked {
-		c.stats.ArtifactReflinks++
-		c.stats.ReflinkBytes += uint64(sourceInfo.Size())
-	} else {
-		c.stats.ArtifactCopies++
-		c.stats.CopiedBytes += uint64(sourceInfo.Size())
-	}
+	c.stats.ArtifactReflinks++
+	c.stats.ReflinkBytes += uint64(sourceInfo.Size())
 	c.mu.Unlock()
 	return nil
 }
 
-func cloneOrCopy(target, source *os.File) (bool, error) {
-	if err := unix.IoctlFileClone(int(target.Fd()), int(source.Fd())); err == nil {
-		return true, nil
+func cloneArtifact(target, source *os.File) error {
+	if err := unix.IoctlFileClone(int(target.Fd()), int(source.Fd())); err != nil {
+		return fmt.Errorf("reflink artifact required; ordinary copying is disabled: %w", err)
 	}
-	if err := target.Truncate(0); err != nil {
-		return false, fmt.Errorf("reset copy target: %w", err)
-	}
-	if _, err := target.Seek(0, io.SeekStart); err != nil {
-		return false, fmt.Errorf("seek copy target: %w", err)
-	}
-	if _, err := source.Seek(0, io.SeekStart); err != nil {
-		return false, fmt.Errorf("seek artifact: %w", err)
-	}
-	if _, err := io.Copy(target, source); err != nil {
-		return false, fmt.Errorf("copy artifact: %w", err)
-	}
-	return false, nil
+	return nil
 }
 
 // RecordVerification 记一次抽样对账。

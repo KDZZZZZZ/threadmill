@@ -99,8 +99,8 @@ func (s *Store) Materialize(envID string) (live string, retErr error) {
 	copyBackend, copyErr := copyTree(base, live)
 	s.mu.Lock()
 	s.materializeCopies++
-	s.materializeReflinks += boolCount(copyBackend == materializeReflink)
-	s.materializeFullCopies += boolCount(copyBackend == materializeFullCopy)
+	s.materializeReflinks += boolCount(copyErr == nil && copyBackend == materializeReflink)
+	s.materializeFullCopies += boolCount(copyErr == nil && copyBackend == materializeFullCopy)
 	s.materializeCopyDuration += time.Since(copyStarted)
 	if copyErr != nil {
 		s.materializeCopyErrors++
@@ -247,6 +247,9 @@ func (s *Store) Absorb(envID string) error {
 		applyBlob(dst, path, blob{tombstone: true})
 	}
 	for path := range beforeFiles {
+		if _, nowDirectory := liveDirectories[path]; nowDirectory {
+			continue
+		}
 		if hasPathAncestor(deletedDirectorySet, path) {
 			continue
 		}
@@ -316,6 +319,12 @@ func (s *Store) recordAbsorbScan(start time.Time, err error) {
 
 // Release 先把 live 收进 overlay，再删掉 live 目录。未物化则是空操作。
 func (s *Store) Release(envID string) error {
+	s.mu.Lock()
+	project := s.projectEnv == envID && envID != ""
+	s.mu.Unlock()
+	if project {
+		return s.Freeze(envID)
+	}
 	aerr := s.Absorb(envID)
 	if s.liveRoot != "" {
 		return aerr
@@ -341,7 +350,7 @@ func (s *Store) Release(envID string) error {
 
 // Freeze absorbs an environment and releases its live workspace while keeping
 // the logical snapshot available for later reads or publication. Persistent
-// copy/reflink workspaces stay on disk because they are the snapshot; persistent
+// reflink workspaces stay on disk because they are the snapshot; persistent
 // OverlayFS workspaces keep only their upper/work state after unmounting.
 func (s *Store) Freeze(envID string) error {
 	if envID == "" {
@@ -352,7 +361,20 @@ func (s *Store) Freeze(envID string) error {
 	}
 	s.mu.Lock()
 	live := s.lives[envID]
+	project := s.projectEnv == envID
+	if project {
+		s.projectEnv = ""
+		delete(s.lives, envID)
+		delete(s.liveBaselines, envID)
+	}
 	s.mu.Unlock()
+	if project {
+		// Keep a private, durable state before another task can use the project.
+		if _, err := s.Materialize(envID); err != nil {
+			return err
+		}
+		return s.Freeze(envID)
+	}
 	if live == "" {
 		return nil
 	}
@@ -438,6 +460,10 @@ func (s *Store) Discard(envID string) error {
 	}
 	s.mu.Lock()
 	live := s.lives[envID]
+	if s.projectEnv == envID {
+		s.projectEnv = ""
+		live = ""
+	}
 	s.mu.Unlock()
 	if live == "" && s.liveRoot != "" {
 		live = s.persistentLivePath(envID)
@@ -515,7 +541,6 @@ func walkRegularFiles(
 	var contentComparisons uint64
 	compareA := make([]byte, 32*1024)
 	compareB := make([]byte, len(compareA))
-	ignored := gitIgnoredPaths(root)
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -532,20 +557,17 @@ func walkRegularFiles(
 		if filepath.IsAbs(rel) || !filepath.IsLocal(rel) || escapesRoot(root, path) {
 			return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
 		}
-		if directory, ok := ignored[rel]; ok {
-			retainIgnoredBase(out, before, rel)
-			retainIgnoredDirectories(directories, beforeDirectories, rel)
-			if directory && d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
 		mode := d.Type()
 		if d.IsDir() {
 			directories[rel] = struct{}{}
 			return nil
 		}
 		if mode&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			out[rel] = fileSnapshot{data: []byte(target), mode: fs.ModeSymlink}
 			return nil
 		}
 		// 校验是否为普通文件（非 FIFO、Socket、Device 等特殊文件）
@@ -615,63 +637,6 @@ func walkRegularFiles(
 		return nil, nil, contentComparisons, err
 	}
 	return out, directories, contentComparisons, nil
-}
-
-func gitIgnoredPaths(root string) map[string]bool {
-	cmd := osexec.Command(
-		"git",
-		"-c", "core.fsmonitor=false",
-		"-c", "core.excludesFile="+os.DevNull,
-		"-C", root,
-		"ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory",
-	)
-	output, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-	ignored := make(map[string]bool)
-	for _, item := range bytes.Split(output, []byte{0}) {
-		if len(item) == 0 {
-			continue
-		}
-		directory := item[len(item)-1] == '/'
-		rel := filepath.ToSlash(strings.TrimSuffix(string(item), "/"))
-		if rel == "" || filepath.IsAbs(rel) || !filepath.IsLocal(rel) {
-			continue
-		}
-		ignored[rel] = directory
-	}
-	return ignored
-}
-
-func retainIgnoredBase(
-	out, before map[string]fileSnapshot,
-	rel string,
-) {
-	if old, ok := before[rel]; ok && old.source != "" {
-		out[rel] = old
-	}
-	prefix := rel + "/"
-	for path, old := range before {
-		if old.source != "" && strings.HasPrefix(path, prefix) {
-			out[path] = old
-		}
-	}
-}
-
-func retainIgnoredDirectories(
-	out, before map[string]struct{},
-	rel string,
-) {
-	if _, ok := before[rel]; ok {
-		out[rel] = struct{}{}
-	}
-	prefix := rel + "/"
-	for path := range before {
-		if strings.HasPrefix(path, prefix) {
-			out[path] = struct{}{}
-		}
-	}
 }
 
 func (s *Store) visibleRegularFiles(envID string) (map[string]fileSnapshot, error) {
@@ -750,6 +715,11 @@ func (s *Store) cachedBaseRegularFiles() (map[string]fileSnapshot, error) {
 				return nil
 			}
 			if mode&os.ModeSymlink != 0 {
+				target, err := os.Readlink(path)
+				if err != nil {
+					return err
+				}
+				files[rel] = fileSnapshot{data: []byte(target), mode: fs.ModeSymlink}
 				return nil
 			}
 			if mode.Type() != 0 {
@@ -861,11 +831,15 @@ func (s *Store) regularFileSnapshot(envID, rel string) (fileSnapshot, bool) {
 	if s.hasOverlayChildren(envID, rel) {
 		return fileSnapshot{}, false
 	}
-	host, err := s.resolveHost(rel)
+	host, err := createLivePath(s.floorDir, rel)
 	if err != nil {
 		return fileSnapshot{}, false
 	}
-	fi, err := os.Stat(host)
+	fi, err := os.Lstat(host)
+	if err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+		target, err := os.Readlink(host)
+		return fileSnapshot{data: []byte(target), mode: fs.ModeSymlink}, err == nil
+	}
 	if err != nil || fi.IsDir() || fi.Mode().Type() != 0 {
 		return fileSnapshot{}, false
 	}
@@ -978,7 +952,27 @@ func writeLive(live, rel string, data []byte) error {
 	}
 	mode := fs.FileMode(0o640)
 	if info, statErr := os.Lstat(dest); statErr == nil {
-		if info.Mode().IsRegular() {
+		if info.Mode()&fs.ModeSymlink != 0 {
+			root, rootErr := confinedRoot(live)
+			if rootErr != nil {
+				return rootErr
+			}
+			target, resolveErr := resolveLinks(root, rel, func(path string) (string, bool, error) {
+				return readLinkNode(filepath.Join(root, filepath.FromSlash(path)))
+			})
+			if resolveErr != nil {
+				return resolveErr
+			}
+			dest, err = createLivePath(root, target)
+			if err != nil {
+				return err
+			}
+			info, statErr = os.Stat(dest)
+			if statErr != nil && !os.IsNotExist(statErr) {
+				return statErr
+			}
+		}
+		if info != nil && info.Mode().IsRegular() {
 			mode = info.Mode().Perm()
 		}
 	} else if !os.IsNotExist(statErr) {
@@ -1002,6 +996,9 @@ func writeLiveModeAt(dest string, data []byte, mode fs.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
 		return err
 	}
+	if mode&fs.ModeSymlink != 0 {
+		return os.Symlink(string(data), dest)
+	}
 	if err := os.WriteFile(dest, data, mode); err != nil {
 		return err
 	}
@@ -1013,7 +1010,7 @@ func deleteLive(live, rel string) error {
 	if err != nil {
 		return err
 	}
-	dest, err := liveCandidate(root, rel)
+	dest, err := createLivePath(root, rel)
 	if err != nil {
 		return err
 	}
@@ -1171,90 +1168,17 @@ const (
 	materializeReflink
 )
 
+// --reflink=always fails when CoW cloning is unavailable; never copy bytes as
+// a fallback. Source: GNU coreutils cp invocation, --reflink.
 func copyTree(src, dst string) (materializeCopyBackend, error) {
-	clone := osexec.Command("cp", "--reflink=always", "-a", src+"/.", dst)
-	if err := clone.Run(); err == nil {
-		return materializeReflink, nil
+	clone := osexec.Command("cp", "--reflink=always", "-a", "--", src+"/.", dst)
+	if output, err := clone.CombinedOutput(); err != nil {
+		return materializeReflink, fmt.Errorf(
+			"vfs: reflink required from %q to %q (ordinary copying is disabled): %w: %s",
+			src, dst, err, strings.TrimSpace(string(output)),
+		)
 	}
-	if err := resetCopyDestination(dst); err != nil {
-		return materializeFullCopy, err
-	}
-	copyCmd := osexec.Command("cp", "--reflink=never", "-a", src+"/.", dst)
-	if err := copyCmd.Run(); err == nil {
-		return materializeFullCopy, nil
-	}
-	if err := resetCopyDestination(dst); err != nil {
-		return materializeFullCopy, err
-	}
-	return materializeFullCopy, copyWalk(src, dst)
-}
-
-func resetCopyDestination(dst string) error {
-	if err := os.RemoveAll(dst); err != nil {
-		return fmt.Errorf("vfs: reset materialization: %w", err)
-	}
-	if err := os.Mkdir(dst, 0o700); err != nil {
-		return fmt.Errorf("vfs: reset materialization: %w", err)
-	}
-	return nil
-}
-
-func copyWalk(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		if filepath.IsAbs(rel) || !filepath.IsLocal(rel) {
-			return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
-		}
-		target := filepath.Join(dst, rel)
-		if escapesRoot(dst, target) {
-			return fmt.Errorf("%w: %q", ErrInvalidPath, rel)
-		}
-		if d.Type()&os.ModeSymlink != 0 {
-			link, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			return os.Symlink(link, target)
-		}
-		if d.IsDir() {
-			info, err := d.Info()
-			if err != nil {
-				return err
-			}
-			if err := os.MkdirAll(target, info.Mode().Perm()); err != nil {
-				return err
-			}
-			return os.Chmod(target, info.Mode().Perm())
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-			return err
-		}
-		if err := os.WriteFile(
-			target,
-			data,
-			info.Mode().Perm(),
-		); err != nil {
-			return err
-		}
-		return os.Chmod(target, info.Mode().Perm())
-	})
+	return materializeReflink, nil
 }
 
 func boolCount(ok bool) uint64 {

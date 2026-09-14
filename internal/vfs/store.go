@@ -88,6 +88,7 @@ type Store struct {
 	liveRoot      string
 	envs          map[string]*layer
 	lives         map[string]string
+	projectEnv    string
 	liveBaselines map[string]*liveFingerprint // 物化完成时的分桶 stat 向量；恢复目录首次仍做内容扫描
 	materializing map[string]*materializeCall
 	ioSlots       chan struct{}
@@ -202,14 +203,14 @@ func NewStore(dir string) *Store {
 	}
 }
 
-// WorkspaceRoot returns the canonical host path backing every environment: the
-// read floor, not the display surface. Execution backends use it only as a mount
-// target; agents never receive the backing tree directly.
+// WorkspaceRoot returns the public project path. Execution backends bind the
+// task's live view here inside its mount namespace, without changing the display
+// directory outside that namespace or exposing the internal read floor.
 func (s *Store) WorkspaceRoot() (string, error) {
 	if s == nil {
 		return "", fmt.Errorf("vfs: nil store")
 	}
-	return confinedRoot(s.floorDir)
+	return confinedRoot(s.displayDir)
 }
 
 // NewPersistentStore keeps materialized environments under liveRoot so another
@@ -232,6 +233,24 @@ func NewPersistentStoreWithOptions(
 	root, err := confinedRoot(liveRoot)
 	if err != nil {
 		return nil, fmt.Errorf("vfs: open persistent live root: %w", err)
+	}
+	projectRoot, err := confinedRoot(projectDir)
+	if err != nil {
+		return nil, err
+	}
+	if !escapesRoot(projectRoot, root) {
+		return nil, fmt.Errorf("vfs: persistent state must be outside the project directory")
+	}
+	// Commands for a real-directory task keep their private runtime beside it.
+	probe, err := os.MkdirTemp(filepath.Dir(projectRoot), ".threadmill-runtime-probe-")
+	if err != nil {
+		return nil, fmt.Errorf("vfs: project parent must permit private command directories: %w", err)
+	}
+	if err := os.Remove(probe); err != nil {
+		return nil, fmt.Errorf("vfs: remove runtime permission probe: %w", err)
+	}
+	if err := requireReflink(projectDir, root); err != nil {
+		return nil, err
 	}
 	floor, err := prepareFloor(projectDir, root)
 	if err != nil {
@@ -639,11 +658,18 @@ func (s *Store) lookupContent(envID, rel string) content {
 }
 
 func (s *Store) lookupHost(rel string) content {
-	host, err := s.resolveHost(rel)
+	host, err := createLivePath(s.floorDir, rel)
+	if rel == "." {
+		host, err = confinedRoot(s.floorDir)
+	}
 	if err != nil {
 		return content{}
 	}
-	info, err := os.Stat(host)
+	info, err := os.Lstat(host)
+	if err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		target, err := os.Readlink(host)
+		return content{exists: err == nil, mode: fs.ModeSymlink, data: []byte(target)}
+	}
 	if err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
 		return content{}
 	}
@@ -786,6 +812,10 @@ func (v *View) Read(path string) ([]byte, error) {
 	}
 	v.store.mu.Lock()
 	defer v.store.mu.Unlock()
+	rel, err = v.store.resolveViewLinks(v.envID, rel)
+	if err != nil {
+		return nil, err
+	}
 
 	if b, found := v.store.lookupBlobValue(v.envID, rel); found {
 		if b.mode.IsDir() {
@@ -834,6 +864,10 @@ func (v *View) Write(path string, data []byte) error {
 	}
 	v.store.mu.Lock()
 	defer v.store.mu.Unlock()
+	rel, err = v.store.resolveViewLinks(v.envID, rel)
+	if err != nil {
+		return err
+	}
 	current := v.store.lookupContent(v.envID, rel)
 	mode := fs.FileMode(0o640)
 	if current.exists && !current.tombstone && !current.mode.IsDir() && current.maskFrom == "" {
@@ -865,6 +899,11 @@ func (v *View) Delete(path string) error {
 	}
 	v.store.mu.Lock()
 	defer v.store.mu.Unlock()
+	parent, err := v.store.resolveViewLinks(v.envID, filepath.ToSlash(filepath.Dir(rel)))
+	if err != nil {
+		return err
+	}
+	rel = filepath.ToSlash(filepath.Join(parent, filepath.Base(rel)))
 	v.store.ensure(v.envID).files[rel] = blob{tombstone: true}
 	return nil
 }
@@ -880,6 +919,10 @@ func (v *View) Stat(path string) (FileInfo, error) {
 	}
 	v.store.mu.Lock()
 	defer v.store.mu.Unlock()
+	rel, err = v.store.resolveViewLinks(v.envID, rel)
+	if err != nil {
+		return FileInfo{}, err
+	}
 
 	if info, handled, err := v.store.lookupStat(v.envID, rel); handled {
 		return info, err
@@ -907,6 +950,10 @@ func (v *View) List(path string) ([]DirEnt, error) {
 	}
 	v.store.mu.Lock()
 	defer v.store.mu.Unlock()
+	rel, err = v.store.resolveViewLinks(v.envID, rel)
+	if err != nil {
+		return nil, err
+	}
 
 	if b, found := v.store.lookupBlobValue(v.envID, rel); found {
 		if b.tombstone {

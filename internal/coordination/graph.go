@@ -58,16 +58,17 @@ type Env struct{ ID string }
 
 // Task keeps its identity across activations; its three role nodes describe the current activation.
 type Task struct {
-	ID         string
-	Info       string
-	Env        Env
-	Planner    Node
-	Executor   Node
-	Verifier   Node
-	Outcome    string
-	RunPolicy  string
-	Persistent bool
-	Activation uint64
+	ID            string
+	Info          string
+	Env           Env
+	Planner       Node
+	Executor      Node
+	Verifier      Node
+	Outcome       string
+	RunPolicy     string
+	Persistent    bool
+	RealDirectory bool
+	Activation    uint64
 }
 
 // Sequence returns planner, executor and verifier in execution order.
@@ -92,26 +93,24 @@ type TaskSink func([]Task) error
 
 // Graph is safe for concurrent callers. Each running activation has its own runner.
 type Graph struct {
-	mu         sync.Mutex
-	tasks      []Task
-	nodes      []Node
-	edges      []Edge
-	outputs    map[string]Output
-	nextID     uint64
-	helps      []helpState
-	progress   ProgressStore
-	help       *helpCoordinator
-	taskSink   TaskSink
-	statePath  string
-	runners    map[string]*runner
-	changed    chan struct{}
-	runContext context.Context
-	runWG      sync.WaitGroup
-	revision   int64
-	publishing publicationState
-	published  publicationState
-	// Publication serializes display updates without blocking task execution.
-	publishMu sync.Mutex
+	mu              sync.Mutex
+	tasks           []Task
+	nodes           []Node
+	edges           []Edge
+	outputs         map[string]Output
+	nextID          uint64
+	helps           []helpState
+	progress        ProgressStore
+	help            *helpCoordinator
+	taskSink        TaskSink
+	statePath       string
+	runners         map[string]*runner
+	changed         chan struct{}
+	runContext      context.Context
+	runWG           sync.WaitGroup
+	revision        int64
+	projectTaskID   string
+	projectMessages []ProjectMessage
 }
 
 // SetProgressStore sets the durable progress store for task activations.
@@ -158,38 +157,32 @@ func (g *Graph) AddTask() Task {
 
 // Snapshot is a detached copy of tasks, dependencies and immutable history.
 type Snapshot struct {
-	Revision         int64    `json:"revision"`
-	Executing        bool     `json:"executing"`
-	PublishingTaskID string   `json:"publishing_task_id,omitempty"`
-	PublishedTaskID  string   `json:"published_task_id,omitempty"`
-	PublishingNodeID string   `json:"publishing_node_id,omitempty"`
-	PublishedNodeID  string   `json:"published_node_id,omitempty"`
-	Tasks            []Task   `json:"tasks"`
-	Nodes            []Node   `json:"nodes"`
-	Edges            []Edge   `json:"edges"`
-	Outputs          []Output `json:"outputs"`
+	Revision        int64            `json:"revision"`
+	Executing       bool             `json:"executing"`
+	ProjectTaskID   string           `json:"project_task_id,omitempty"`
+	ProjectMessages []ProjectMessage `json:"project_messages,omitempty"`
+	Tasks           []Task           `json:"tasks"`
+	Nodes           []Node           `json:"nodes"`
+	Edges           []Edge           `json:"edges"`
+	Outputs         []Output         `json:"outputs"`
 }
 
 // PromptProjection omits request-varying revision and execution flags.
 func (s Snapshot) PromptProjection() ([]byte, error) {
 	return json.Marshal(struct {
-		PublishingTaskID string   `json:"publishing_task_id,omitempty"`
-		PublishedTaskID  string   `json:"published_task_id,omitempty"`
-		PublishingNodeID string   `json:"publishing_node_id,omitempty"`
-		PublishedNodeID  string   `json:"published_node_id,omitempty"`
-		Tasks            []Task   `json:"tasks"`
-		Nodes            []Node   `json:"nodes"`
-		Edges            []Edge   `json:"edges"`
-		Outputs          []Output `json:"outputs"`
+		ProjectTaskID   string           `json:"project_task_id,omitempty"`
+		ProjectMessages []ProjectMessage `json:"project_messages,omitempty"`
+		Tasks           []Task           `json:"tasks"`
+		Nodes           []Node           `json:"nodes"`
+		Edges           []Edge           `json:"edges"`
+		Outputs         []Output         `json:"outputs"`
 	}{
-		PublishingTaskID: s.PublishingTaskID,
-		PublishedTaskID:  s.PublishedTaskID,
-		PublishingNodeID: s.PublishingNodeID,
-		PublishedNodeID:  s.PublishedNodeID,
-		Tasks:            s.Tasks,
-		Nodes:            s.Nodes,
-		Edges:            s.Edges,
-		Outputs:          s.Outputs,
+		ProjectTaskID:   s.ProjectTaskID,
+		ProjectMessages: s.ProjectMessages,
+		Tasks:           s.Tasks,
+		Nodes:           s.Nodes,
+		Edges:           s.Edges,
+		Outputs:         s.Outputs,
 	})
 }
 
@@ -202,16 +195,14 @@ func (g *Graph) Snapshot() Snapshot {
 
 func (g *Graph) snapshotLocked() Snapshot {
 	return Snapshot{
-		Revision:         g.revision,
-		Executing:        len(g.runners) > 0,
-		PublishingTaskID: g.publishing.TaskID,
-		PublishedTaskID:  g.published.TaskID,
-		PublishingNodeID: g.publishing.NodeID,
-		PublishedNodeID:  g.published.NodeID,
-		Tasks:            append([]Task{}, g.tasks...),
-		Nodes:            append([]Node{}, g.nodes...),
-		Edges:            append([]Edge{}, g.edges...),
-		Outputs:          g.outputListLocked(),
+		Revision:        g.revision,
+		Executing:       len(g.runners) > 0,
+		ProjectTaskID:   g.projectTaskID,
+		ProjectMessages: append([]ProjectMessage(nil), g.projectMessages...),
+		Tasks:           append([]Task{}, g.tasks...),
+		Nodes:           append([]Node{}, g.nodes...),
+		Edges:           append([]Edge{}, g.edges...),
+		Outputs:         g.outputListLocked(),
 	}
 }
 
@@ -430,6 +421,9 @@ func (g *Graph) Continue(taskID, info string) (Task, error) {
 	}
 	if !task.Persistent || task.Outcome != OutcomeIdle {
 		return Task{}, fmt.Errorf("coordination: task %q must be persistent and idle to continue", taskID)
+	}
+	if task.RealDirectory && g.projectTaskID != task.ID {
+		return Task{}, fmt.Errorf("coordination: a newer task owns the real directory")
 	}
 	if g.runners[taskID] != nil {
 		return Task{}, ErrGraphBusy

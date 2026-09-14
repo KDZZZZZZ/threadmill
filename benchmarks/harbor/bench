@@ -52,8 +52,12 @@ run_adapter() {
 
   local version
   version="$(git -C "$repo_root" describe --always --dirty)"
+  local -a adapter_args=(--agent benchmarks.harbor.threadmill_agent:Threadmill)
+  if [[ "${runtime##*/}" == pier ]]; then
+    adapter_args=(--agent-import-path benchmarks.harbor.threadmill_pier_agent:Threadmill)
+  fi
   local -a agent_args=(
-    --agent benchmarks.harbor.threadmill_agent:Threadmill
+    "${adapter_args[@]}"
     --model "$model"
     --agent-kwarg "binary=$binary"
     --agent-kwarg "version=$version"
@@ -63,6 +67,12 @@ run_adapter() {
   )
   if [[ -n "${THREADMILL_BUILD_PROXY:-}" ]]; then
     compose_args+=(--extra-docker-compose "$build_proxy_compose")
+  fi
+  if [[ "${runtime##*/}" == pier ]]; then
+    compose_args=(--environment-import-path benchmarks.harbor.threadmill_pier_environment:ThreadmillDockerEnvironment)
+  fi
+  if [[ -n "${THREADMILL_BENCH_WORKSPACE:-}" ]]; then
+    agent_args+=(--agent-kwarg "workspace=$THREADMILL_BENCH_WORKSPACE")
   fi
   if [[ -n "${THREADMILL_CONTEXT_WINDOW:-}" ]]; then
     agent_args+=(--agent-kwarg "context_window=$THREADMILL_CONTEXT_WINDOW")
@@ -98,7 +108,11 @@ case "${1:-}" in
     harbor_entry="$(readlink -f -- "$(command -v "$runtime")")"
     harbor_python="$(dirname -- "$harbor_entry")/python"
     [[ -x "$harbor_python" ]] || die "cannot locate Harbor's Python interpreter"
-    (cd "$repo_root" && "$harbor_python" -m unittest benchmarks.harbor.test_threadmill_agent -v)
+    test_module=benchmarks.harbor.test_threadmill_agent
+    if [[ "${runtime##*/}" == pier ]]; then
+      test_module=benchmarks.harbor.test_threadmill_pier_agent
+    fi
+    (cd "$repo_root" && "$harbor_python" -m unittest "$test_module" -v)
     ;;
   run-path)
     [[ $# -ge 3 ]] || { usage >&2; exit 2; }

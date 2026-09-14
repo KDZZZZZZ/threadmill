@@ -227,7 +227,7 @@ paths:
         required: true
         schema: { type: string, minLength: 1 }
         description: >-
-          Relative path in the current published/display surface, encoded as a
+          Relative path in the current real project directory, encoded as a
           query value so nested paths are unambiguous. This is not files_ref or a
           host path. Resolve within the registered workspace and reject absolute
           paths, traversal and symlink escape.
@@ -392,10 +392,7 @@ components:
       properties:
         revision: { type: integer, format: int64, minimum: 0, description: The fixed captured graph revision shared by every page in this cursor chain. }
         executing: { type: boolean }
-        publishing_task_id: { type: string }
-        published_task_id: { type: string }
-        publishing_node_id: { type: string }
-        published_node_id: { type: string }
+        project_task_id: { type: string }
         entries: { type: array, maxItems: 500, items: { $ref: '#/components/schemas/GraphEntry' } }
         next_cursor: { type: string, description: Omitted after the final page; expired cursors return 410. }
     GraphEntry:
@@ -433,6 +430,7 @@ components:
         outcome: { type: string, enum: [active, done, canceled, failed, idle, closed] }
         run_policy: { type: string, enum: [enabled, held] }
         persistent: { type: boolean }
+        real_directory: { type: boolean, description: Selected only when the task is created; edits are immediately visible in the real directory. }
         activation: { type: integer, minimum: 1 }
     Node:
       type: object

@@ -157,7 +157,7 @@ SSE `id` 等于十进制字符串 `seq`。**seq 仅在当前网关进程、当�
 
 - Busy 包括排队、执行和 settling，不能把所有 worker 都标成 running。
 - task 的 active 不等于某个角色正在执行；角色状态依据事件与快照，缺失时显示 unknown。
-- done 是流程终态，不自动等于验证通过或文件已发布；发布状态以 published_task_id 为准。
+- done 是流程终态，不自动等于验证通过；project_task_id 标识真实目录归属，真实目录 task 的改动即时可见，可能包括未通过验收的改动。
 - 无可验证总量时 total_steps=null，展示阶段和活动，不生成百分比。
 - Go time.Duration 是纳秒；秒数为 ns / 1e9。图内 ID/TaskID/From/To 保留 PascalCase。
 - Cancel 请求停止后仍需等待终态；它不会清空 FIFO，排队消息可能启动下一轮，也不是针对某个 worker 的取消 API。

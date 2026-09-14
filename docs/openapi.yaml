@@ -626,10 +626,9 @@ components:
         executing:
           type: boolean
           description: Run 期间为 true。
-        publishing_task_id:
+        project_task_id:
           type: string
-        published_task_id:
-          type: string
+          description: 创建时指定使用真实目录的当前 task。
         tasks:
           type: array
           items:
@@ -642,10 +641,6 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/GraphNode'
-        publishing_node_id:
-          type: string
-        published_node_id:
-          type: string
     GraphTask:
       type: object
       description: planner → executor → verifier 的固定三角色序列。
@@ -679,6 +674,9 @@ components:
           - held
         Persistent:
           type: boolean
+        RealDirectory:
+          type: boolean
+          description: 仅创建时可选；使用真实目录运行，改动即时可见。
         Activation:
           type: integer
           minimum: 1

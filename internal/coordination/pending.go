@@ -15,10 +15,11 @@ var ErrInvalidPending = errors.New("coordination: invalid pending subgraph")
 // Omitted IDs allocate task-N; existing IDs preserve omitted info and run policy.
 // Persistent tasks keep that property until closed through CloseTask.
 type PendingTask struct {
-	ID         string `json:"id,omitempty"`
-	Info       string `json:"info,omitempty"`
-	RunPolicy  string `json:"run_policy,omitempty"`
-	Persistent bool   `json:"persistent,omitempty"`
+	ID            string `json:"id,omitempty"`
+	Info          string `json:"info,omitempty"`
+	RunPolicy     string `json:"run_policy,omitempty"`
+	Persistent    bool   `json:"persistent,omitempty"`
+	RealDirectory bool   `json:"real_directory,omitempty"`
 }
 
 // PendingSubgraph is the complete desired pending task and dependency set.
@@ -55,6 +56,12 @@ func (g *Graph) applyPendingLocked(next PendingSubgraph) error {
 	candidate.applyStateLocked(g.stateLocked())
 	if err := candidate.replacePendingLocked(next); err != nil {
 		return err
+	}
+	if candidate.projectTaskID != g.projectTaskID && g.projectTaskID != "" {
+		previous, retained := candidate.taskByIDLocked(g.projectTaskID)
+		if g.runners[g.projectTaskID] != nil || (retained && previous.Outcome == OutcomeActive) {
+			return fmt.Errorf("%w: real directory task %q has not finished", ErrGraphBusy, g.projectTaskID)
+		}
 	}
 	if err := immutableHistoryUnchanged(g, candidate); err != nil {
 		return err
@@ -103,6 +110,7 @@ func (g *Graph) replacePendingLocked(next PendingSubgraph) error {
 		oldSet[edge] = true
 	}
 	wanted := make(map[string]PendingTask, len(next.Tasks))
+	newProjectTask := ""
 	for _, want := range next.Tasks {
 		want.Info = strings.TrimSpace(want.Info)
 		want.RunPolicy = strings.TrimSpace(want.RunPolicy)
@@ -115,12 +123,24 @@ func (g *Graph) replacePendingLocked(next PendingSubgraph) error {
 		if _, duplicate := wanted[want.ID]; duplicate && want.ID != "" {
 			return fmt.Errorf("%w: duplicate task %q", ErrInvalidPending, want.ID)
 		}
-		if _, exists := g.taskByIDLocked(want.ID); !exists {
+		if existing, exists := g.taskByIDLocked(want.ID); exists {
+			if want.RealDirectory && !existing.RealDirectory {
+				return fmt.Errorf("%w: real_directory can only be selected when creating a task", ErrInvalidPending)
+			}
+		} else {
 			if want.Info == "" {
 				return fmt.Errorf("%w: task info is required", ErrInvalidPending)
 			}
 			task := g.addTaskLocked(want.ID)
 			want.ID = task.ID
+			if want.RealDirectory {
+				if newProjectTask != "" {
+					return fmt.Errorf("%w: only one new task may own the real directory", ErrInvalidPending)
+				}
+				newProjectTask = task.ID
+				g.projectTaskID = task.ID
+				g.tasks[len(g.tasks)-1].RealDirectory = true
+			}
 		}
 		wanted[want.ID] = want
 	}
@@ -144,6 +164,9 @@ func (g *Graph) replacePendingLocked(next PendingSubgraph) error {
 		tasks = append(tasks, task)
 	}
 	g.tasks = tasks
+	if _, exists := g.taskByIDLocked(g.projectTaskID); !exists {
+		g.projectTaskID = ""
+	}
 	nodes := make([]Node, 0, len(g.nodes))
 	for _, node := range g.nodes {
 		if _, keep := wanted[node.TaskID]; keep {

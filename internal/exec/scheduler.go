@@ -624,7 +624,7 @@ func (s *Scheduler) runSandboxed(
 	}
 	switch s.sandbox {
 	case sandboxBwrap:
-		runtimeDir, err := s.runtimeDir(envID, live)
+		runtimeDir, err := s.runtimeDir(ctx, envID, live)
 		if err != nil {
 			return env.ExecResult{}, nil, err
 		}
@@ -661,7 +661,7 @@ func (s *Scheduler) runSandboxed(
 				return env.ExecResult{}, nil, err
 			}
 		}
-		runtimeDir, err := s.runtimeDir(envID, live)
+		runtimeDir, err := s.runtimeDir(ctx, envID, live)
 		if err != nil {
 			return env.ExecResult{}, nil, err
 		}
@@ -689,16 +689,26 @@ func (s *Scheduler) runSandboxed(
 	}
 }
 
-func (s *Scheduler) runtimeDir(envID, live string) (string, error) {
+func (s *Scheduler) runtimeDir(ctx context.Context, envID, live string) (string, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if dir := s.runtimes[envID]; dir != "" {
-		return dir, nil
+	existing := s.runtimes[envID]
+	s.mu.Unlock()
+	if existing != "" {
+		return existing, nil
 	}
 	dir, err := os.MkdirTemp(filepath.Dir(live), ".threadmill-exec-")
 	if err != nil {
 		return "", fmt.Errorf("exec: create runtime dir: %w", err)
 	}
+	if err := seedGradleHome(ctx, dir); err != nil {
+		return "", errors.Join(fmt.Errorf("exec: prepare Gradle home: %w", err), removeRuntimeDir(dir))
+	}
+	s.mu.Lock()
+	if existing := s.runtimes[envID]; existing != "" {
+		s.mu.Unlock()
+		return existing, removeRuntimeDir(dir)
+	}
+	defer s.mu.Unlock()
 	if s.runtimes == nil {
 		s.runtimes = make(map[string]string)
 	}

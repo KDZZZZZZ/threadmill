@@ -2,13 +2,13 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 / 状态 | v0.6 / 已实现，本地验证通过（范围见 §10） |
-| 日期 | 2026-09-10 |
+| 版本 / 状态 | v0.7 / 已实现，本地验证通过（范围见 §10） |
+| 日期 | 2026-09-14 |
 | 责任角色 / 读者 | Coordination、Tool、VFS、Memory、Manager 与 Agent 运行时维护者 |
 | 形成方式 | 人类需求驱动；本版按实现增量维护设计与验证入口 |
 | 历史基准 | `dbcd2a092d6a1bb76471c8fdcb672454afaf35ac` 为迁移前 `dev-native` 基线，仅用于 §2 的历史说明 |
 | 实现基准 | 本文件与同一 PR 中的源码、测试共同定义当前实现；模块与验证入口见 §10 |
-| 修订记录 | v0.1：统一入口与文件优先；v0.2：交集直接取、差异才处理；v0.3：取消 root，允许无合出边和持久线程；v0.4：同步实现、协议版本与恢复限制；v0.5：删除无生产调用的旧设计与专属状态；v0.6：VFS 输入原语统一命名并移除旧文件名 |
+| 修订记录 | v0.1：统一入口与文件优先；v0.2：交集直接取、差异才处理；v0.3：取消 root，允许无合出边和持久线程；v0.4：同步实现、协议版本与恢复限制；v0.5：删除无生产调用的旧设计与专属状态；v0.6：VFS 输入原语统一命名并移除旧文件名；v0.7：新建真实目录 task 与现有文件来源合入 |
 
 所有协调边都表达同一件事：**把全部入边 `from` 的完整记忆图和文件状态交给 `to` 的入口缓冲区。相同的部分直接取，差异才处理；先处理文件差异，再依据最终文件证据整理记忆差异。单入边直接继承，不整理记忆。**
 
@@ -31,12 +31,17 @@
 | H9 | 不需要 root，也不保留 root 串行规则 |
 | H10 | 确定改动面后实施，使用 TDD，重构后的代码保持干净 |
 | H11 | 核查旧设计是否清理，并继续减少无用代码 |
+| H12 | 将发布改为新建 task 时指定真实目录，由 task 在真实目录运行与调试；已有 task 不切换目录 |
+| H13 | 真实目录现有内容作为新合入源进入 pending，复用原有文件与记忆合入逻辑 |
+| H14 | Manager 与真实目录持有 Agent 仅在运行中双向交流 |
+| H15 | 新阶段开始就使用真实目录；阶段成果展示与阶段验收均在真实目录进行 |
+| H16 | 用户要求运行当前工作区时创建新的 task 处理 |
 
 ### Agent Self-Claimed
 
 不可变 `Output`、精确交集规则、激活编号、`input` 工具及阶段名称、Help 暂停/恢复节点、版本 1 格式、拒绝旧状态、具体证据边界和测试形状，都是 Agent 为落实上述要求选择的实现默认值。它们已经落到本分支代码，不代表人类逐项指定了这些名称或数据结构。
 
-固定 Planner → Executor → Verifier 职责、Tool 统一入口、隔离写入、每项交付唯一 integration owner 和 Manager 选择发布继续适用。H7～H9 替代旧的 root 串行、同树依赖、helper 层专属并行和必须返回创建者的限制。helper 只描述用途，不是 task 类别。
+固定 Planner → Executor → Verifier 职责、Tool 统一入口、隔离写入、每项交付唯一 integration owner 继续适用；H12/H13 替代 Manager 手动发布。H7～H9 替代旧的 root 串行、同树依赖、helper 层专属并行和必须返回创建者的限制。helper 只描述用途，不是 task 类别。
 
 本次覆盖协调图、入口文件/记忆处理、独立生命周期和恢复；不增加业务角色、自动文本合并器、外部服务或依赖，也不实现旧状态转换器和新的快照垃圾回收。
 
@@ -120,7 +125,7 @@ flowchart TD
 | VFS | 完整可见文件比较、隔离候选、safe/replace、archive 与旧 floor 保留 | [vfs/input.go](../internal/vfs/input.go)、[input_changes.go](../internal/vfs/input_changes.go)、[live.go](../internal/vfs/live.go)、[floor.go](../internal/vfs/floor.go) |
 | Memory | 精确分区、差异版本和关系、共同部分保护、引用校验与不可变快照 | [context/input.go](../internal/context/input.go)、[store.go](../internal/context/store.go) |
 | 记忆整理会话 | 只看差异及必要共同参照与最终文件证据；失败不修改 live 记忆 | [input_memory.go](../internal/agent/input_memory.go) |
-| Manager / Help | 编排 tasks/edges、独立任务寿命、暂停/恢复和选择发布 | [manager.go](../internal/manager/manager.go)、[help.go](../internal/coordination/help.go)、[graph_tools.go](../internal/coordination/graph_tools.go) |
+| Manager / Help | 编排 tasks/edges、独立任务寿命、暂停/恢复和创建真实目录 task | [manager.go](../internal/manager/manager.go)、[help.go](../internal/coordination/help.go)、[graph_tools.go](../internal/coordination/graph_tools.go) |
 
 运行时阶段为：
 
@@ -186,13 +191,13 @@ Planner/Verifier 的临时实验不成为持久实现，但经 Input/Help 明确
 | 对象 | 当前字段或职责 |
 | --- | --- |
 | `Task` | ID、Info、Env.ID、三个当前角色节点、Outcome、RunPolicy、Persistent、Activation |
-| `Graph` 持久状态 | Version=1、Revision、NextID、Tasks、全部 Nodes、Edges、不可变 Outputs、Help 请求、固定发布记录 |
+| `Graph` 持久状态 | Version=1、Revision、NextID、Tasks、全部 Nodes、Edges、不可变 Outputs、Help 请求、ProjectTaskID、ProjectMessages |
 | `Output` | Node、FilesRef、MemoryRef、Report；图中的不可变成对出口 |
 | `TaskProgress` | Version=1；以 activation 的 Env.ID 存储 Inputs、Pending 导出日志 |
 | `InputProgress` | ID、NodeID、ResumeFor、TargetID、Sources、Paths、Phase、FilesRef、MemoryRef、Reason、Started |
 | `InputSourceProgress` | 来源节点与配套引用、只读候选 EnvID、报告、采用路径/全部采用/丢弃状态和理由 |
 | `ExportProgress` | 尚待提交的成对 Output 和暂存记忆；图提交后清除日志 |
-| 发布记录 | 选定的 TaskID、Activation、NodeID、FilesRef、Outcome；发布意图与已发布记录分别保留 |
+| 真实目录归属 | ProjectTaskID 标识当前归属；Task.RealDirectory 只在创建时选择，旧 task 不可切换 |
 | `helpState` | 请求/调用/原角色 ID，PauseID、ResumeID、Units、TaskIDs、Configured、Declined |
 
 `coordination_orchestrate` 的动作是 `replace_pending`、`provide_help`、`continue_task`、`close_task`。前两个使用统一的 `tasks`/`edges`，不再接受 roots/spawns。`replace_pending` 替换可编辑部分并保留完成历史；`provide_help` 对当前图增补普通 task 与边，不替换无关工作。
@@ -229,11 +234,11 @@ Planner/Verifier 的临时实验不成为持久实现，但经 Input/Help 明确
 
 **兼容性：Graph 与目录 Progress 的版本 1 会拒绝旧版或未知版本；没有自动转换器。** 旧 Finished/Merged 没有配套文件与记忆证明，不能映射为 ready。切换前保留旧状态与匹配的程序：用旧版完成旧工作，或人工核对项目事实后建立全新图。没有完整快照/导出日志的中断，不承诺模型调用、命令或外部副作用恰好一次。新状态也不应交给旧程序写入。
 
-VFS 接纳变化的项目时创建新的 `.floors/<digest>`，旧 overlay 保留自己的 lower 路径；归档/恢复不静默换成新 base。快照与 delta 减少逻辑分支复制，但完整可见状态比较会扫描文件；归档在 copy/reflink 后端可能保留完整磁盘工作区，overlay 后端也保留需要的持久底层。
+VFS 接纳变化的项目时创建新的 `.floors/<digest>`，旧 overlay 保留自己的 lower 路径；归档/恢复不静默换成新 base。快照与 delta 减少逻辑分支复制，但完整可见状态比较会扫描文件；归档在 reflink 后端可能保留完整磁盘工作区，overlay 后端也保留需要的持久底层。
 
 本次没有新增引用计数 GC、关闭后自动删除历史或 O(1) 成本保证。关闭 task 停止当前运行，历史 Output、记忆快照和 floor 可能继续占用磁盘。原生 OverlayFS 需要相应权限，本次非特权验证会跳过该后端；其他后端的测试不能代替它的验收。
 
-## 9. Help、持久 task 与发布
+## 9. Help、持久 task 与真实目录
 
 ### 9.1 Help 的因果关系
 
@@ -256,13 +261,27 @@ I1/I2/I3 按每项交付保持：唯一整合/验收 owner、隔离写入、依�
 
 消费者可以引用已提交的历史节点，不等待持久 task 关闭。VFS base 与任务身份解耦：新项目 floor 为新环境提供初始文件，旧 task 的成对出口继续引用其原来的文件和记忆。
 
-### 9.3 发布
+### 9.3 真实目录 task
 
-`coordination_publishTask` 接收 task_id，新发布在该 task 当前已结束的激活中选择最近一个已提交的角色文件出口。done/failed/idle/closed 可被选择，但必须有文件出口；它不自动验收内容。当前工具没有独立的历史 node_id/activation 选择参数，不应宣称能直接发布持久 task 的任意旧轮次。
+Manager 通过 `coordination_orchestrate` 创建带 `real_directory=true` 的新 task，使用显式边提供候选实现。已有 task 不能修改此模式。旧的 `coordination_publishTask` 工具与 publishing/published 记录已移除。
 
-发布意图固定选定节点、文件引用和当时的激活/结果。同一 task 的未完成发布重试沿用这份记录，即使该 task 已进入下一轮，也不能重新选择其最新文件。成功清除意图后，再次调用才是新的发布选择。返回结果和图中的固定节点标识使 Manager 能区分实际展示的是哪一轮。
+该 task 开始收集 Planner 输入时，在启动或等待上游之前，把真实目录现有内容捕获成不可变额外来源。它没有 Agent 结论，记忆源为空；文件与显式上游共同进入 pending，沿用交集、文件差异决策、记忆核对流程。重试复用固定来源，不重新采集。此捕获时点、来源命名及空记忆是 Agent 选择的实现细节。
 
-发布把所选快照渲染到项目展示面，并持久化 publishing/published 记录；不合并或消费输入，不改变其他运行环境或其 floor，也不要求全图空闲。所有进入 dev-native 的代码仍通过 PR；实现分支的本地集成不等于已经发布或进入基线。
+只有 input ready 后，运行时才把已选择结果安装到真实目录并绑定角色工作区。被明确丢弃的真实目录新增文件也须移除。文件工具与沙箱命令直接作用于该目录，改动立即可见；Planner/Verifier 仍不修复实现，临时实验须自行清理。失败不回滚真实改动，Started 恢复不重装旧输入。各角色出口继续归档为不可变快照。
+
+同一时刻只有一个 task 拥有真实目录。前一 task 已结束且 runner 清理完成后，可新建另一个真实目录 task；被替代的持久 task 不可继续激活。命令 Reap 失败不能释放目录绑定。其他 task 始终使用隔离工作区，无新增隐式等待边或全局串行规则。图版本仍为 1，旧 task 默认隔离，旧发布标记不赋予目录归属。
+
+所有进入 dev-native 的代码仍通过 PR；文件可见不代表 Verifier PASS，也不代表已进入基线。
+
+### 9.4 阶段与运行中通信
+
+新阶段创建时就指定真实目录，由该 task 直接推进、调试和验收。隔离 task 的候选可通过普通输入/Help 合入；它们的 PASS 不能替代真实目录的阶段验收。用户要求运行当前工作区时创建新真实目录 task，若目录被占用，先与持有者协调收尾。
+
+Manager 用 `coordination_orchestrate{action:"message_task",task_id,input}` 向运行中的真实目录角色发消息；角色用 `coordination_messageManager{message}` 向 Manager 发进展、问题或答复。后者复用 Manager 队列，不暂停，也不创建 Help、任务或依赖；完成仍通过原有角色出口与最终 task 报告。
+
+消息保存于 Graph.ProjectMessages，包含工具调用 ID、真实角色 NodeID、由运行时确定的发送者和正文。Manager 的调用 ID 去重，同 ID 不同内容拒绝；Agent 通知重放保留同一 ID。接收发生在下一次模型请求前；消息与终态检查共用图锁，在最终答复期间被接收的消息会触发当前角色继续处理，然后才导出。准备输入、角色交接或结束后无接收角色时明确拒绝，不唤醒 task，不修改创建时目录模式。角色错误或取消时未处理消息仍保留在图中，接收成功不保证已完成处理或验收。
+
+普通 task 不展示发送工具；运行时还校验当前归属及精确角色身份。消息是交流记录，不是用户授权、不可变文件来源或验收结论。上述工具/字段命名、异步投递方式、持久化结构与回归形状是 Agent 实现选择。
 
 ## 10. 当前落点与验证范围
 
@@ -289,7 +308,7 @@ v0.6 按全仓实际调用继续删除旧入口及其专属测试，没有保留
 | 普通边、激活历史、版本拒绝、待执行图边界 | [graph_model_test.go](../internal/coordination/graph_model_test.go)、[graph_store_test.go](../internal/coordination/graph_store_test.go)、[pending_test.go](../internal/coordination/pending_test.go) |
 | 独立运行、提前消费角色输出、持久续跑、导出失败重试、文件→记忆恢复 | [unified_test.go](../internal/coordination/unified_test.go)、[run_test.go](../internal/coordination/run_test.go) |
 | Help 显式返回、无返回独立工作、来源校验与恢复 | [help_test.go](../internal/coordination/help_test.go)、[help_scope_test.go](../internal/coordination/help_scope_test.go)、[runtime_review_test.go](../internal/coordination/runtime_review_test.go) |
-| 跨激活发布重试固定原出口、实验重试引用本次文件 | [publication_activation_test.go](../internal/coordination/publication_activation_test.go)、[help_scope_test.go](../internal/coordination/help_scope_test.go) |
+| 真实目录输入合入、独占归属、恢复保留编辑；实验重试引用本次文件 | [project_test.go](../internal/coordination/project_test.go)、[help_scope_test.go](../internal/coordination/help_scope_test.go) |
 | 文件处置、部分采用、权限与工作区绑定 | [input_tool_test.go](../internal/coordination/input_tool_test.go) |
 | 完整文件交集/缺失/权限、重试、旧 floor 与归档恢复 | [vfs/input_test.go](../internal/vfs/input_test.go)、[live_test.go](../internal/vfs/live_test.go) |
 | 记忆交集、版本保留、引用/指令/共同部分保护 | [context/input_test.go](../internal/context/input_test.go)、[store_test.go](../internal/context/store_test.go) |
@@ -305,7 +324,7 @@ v0.6 按全仓实际调用继续删除旧入口及其专属测试，没有保留
 | `go test -tags=integration ./... -run '^$'` | 全包编译通过；未调用真实模型 |
 | `go run ./cmd/tmfleet -tasks 8 -model-delay 10ms -slots 4 -files 10 -timeout 20s` | 统一边实现阶段通过：模拟 provider 完成全链路，18 次命令请求全部完成；这是功能冒烟，不是规模性能结论 |
 
-TDD 切片先捕获失败再修复，包含初始环境串联、共享运行、提前消费固定出口、重启文件丢失、输出提交失败重跑、Help 文件投影、失败资源清理、held 等待、重启后输入改接、汇合来源串行化、持久激活延迟启动、跨激活发布重试误选出口及实验重试引用旧文件。回归直接使用图、存储、工具或 Manager 的行为入口。
+TDD 切片先捕获失败再修复，包含初始环境串联、共享运行、提前消费固定出口、重启文件丢失、输出提交失败重跑、Help 文件投影、失败资源清理、held 等待、重启后输入改接、汇合来源串行化、持久激活延迟启动、真实目录合入删除与恢复及实验重试引用旧文件。回归直接使用图、存储、工具或 Manager 的行为入口。
 
 这些结果不代表 §11 的全部故障组合已验证。原生 OverlayFS 用例受非特权环境限制而跳过；真实模型、所有平台与大规模持续运行未在本次验证中执行。§6、§8 的事实与存储边界继续适用。
 
@@ -337,7 +356,7 @@ TDD 切片先捕获失败再修复，包含初始环境串联、共享运行、�
 | A20 / H7、H8 | 创建者完成/取消/失败；独立 L 失败 | L 不随创建者退出或被整树清理；L 失败不取消无关任务，真实消费者收到依赖失败 |
 | A21 / H8 | 持久 L 完成一轮后 idle，再接收新输入 | 同一 task 身份与配套状态可继续；idle 不占模型/命令槽位；单来源续跑不整理记忆，输入不丢失或重复执行 |
 | A22 / H2、H8 | 消费者读取 L 的固定出口后 L 再次写入 | 消费者不等待 L 关闭，已绑定的文件/记忆不变；引入 L 新出口时重新建立显式输入批次 |
-| A23 / H8 | L 无消费者；另一任务发布；项目变化后重启 | L 的状态和所需 floor 仍可恢复，文件与记忆不因重建 base 错配；关闭不改变旧出口；磁盘回收另行验收 |
+| A23 / H8 | L 无消费者；另一真实目录任务修改项目；项目变化后重启 | L 的状态和所需 floor 仍可恢复，文件与记忆不因重建 base 错配；关闭不改变旧出口；磁盘回收另行验收 |
 
 A9 中的文件版本变化要求针对不可变快照与写入封口验证；不承诺任意宿主篡改都可自动修复。A10 的恰好一次范围限于已持久化检查点。A13 的 Planner/Verifier Input/Help 投影有专项回归，仍需保留跨阶段组合验证。A23 的跨 floor 恢复已有实现和测试入口，关闭后的自动磁盘回收不在本次范围。
 
@@ -367,3 +386,15 @@ A9 中的文件版本变化要求针对不可变快照与写入封口验证；�
 - floor、归档和历史记忆可能持续增长；没有新增 GC，也没有对所有后端和大规模完整状态比较作性能保证。
 - held 等待与重启输入冻结已有[专项回归](../internal/coordination/runtime_review_test.go)：暂停来源只阻塞消费者，只有 durable Input 而没有本角色 Output 时仍拒绝改接或删除；继续维护这些跨重启边界。
 - 全矩阵与所有平台验证分别记录；本版不把有测试入口等同于已经证明所有并发、崩溃和恢复组合。
+
+### 真实目录工具绑定的横向参考
+
+- [Pi SSH tools（0c7bb7c5）](https://github.com/badlogic/pi-mono/blob/0c7bb7c5c72118e4c71e4c04dfa2ad4a0a6a62f1/packages/coding-agent/examples/extensions/ssh.ts)：文件与命令后端共同绑定 cwd；只改命令 cwd 会留下文件工具不一致。Threadmill 同时绑定 VFS 与 Exec，保留快照出口。
+- [deepseek-harness sandbox（c291e796）](https://github.com/deepseek-ai/deepseek-harness/blob/c291e7961a515f6d7af9304e7fd1d257929aef26/docs/subsystems/sandbox.md)及同版本 `packages/shell/bash-sandbox/tests/bwrap.e2e.ts`：工作目录映射与沙箱策略分离。Threadmill 复用现有沙箱，真实目录归属不增加 Manager 命令权限。
+- [Eino filesystem backend（9d983b36）](https://github.com/cloudwego/eino/blob/9d983b36a5112a1c233056b1a099825298fafb8f/adk/filesystem/backend.go)及同版本 `adk/middlewares/filesystem/filesystem_test.go`：文件工具委托后端；不要求角色知道物理存储。Threadmill 复用 Tool/VFS 入口。单 task 真实目录归属和额外来源 pending 语义来自本项目人类要求，上述项目不提供这一协议。
+
+### 运行中通信的横向参考
+
+- [Pi agent loop（0c7bb7c5）](https://github.com/badlogic/pi-mono/blob/0c7bb7c5c72118e4c71e4c04dfa2ad4a0a6a62f1/packages/agent/src/agent-loop.ts) 与同版本 `packages/agent/test/agent-loop.test.ts`：在工具/模型边界接入 steering，退出前检查 follow-up。Threadmill 用既有请求 hook 和角色结束检查，避免消息在 final 期间丢失。
+- [deepseek-harness 邻接通信设计（c291e796）](https://github.com/deepseek-ai/deepseek-harness/blob/c291e7961a515f6d7af9304e7fd1d257929aef26/.agents/notes/implemented/architecture/2026-08-27-adjacent-agent-steer-messaging.md)、同版本 `packages/subagent/subagent/src/continuation-messages.ts` 与 `tests/continuation.spec.ts`：服务端确定发送者，消息进入持久来源，再在运行边界交付。它支持唤醒和邻接 Agent；Threadmill 按 H14 限制为当前运行中的真实目录持有者与 Manager。
+- [Eino interrupt（9d983b36）](https://github.com/cloudwego/eino/blob/9d983b36a5112a1c233056b1a099825298fafb8f/adk/interrupt.go) 与同版本 `adk/interrupt_test.go`：保存暂停状态并带恢复数据继续执行。Threadmill 已有 Help 暂停协议，本次普通交流复用模型边界而不增加暂停/恢复生命周期。

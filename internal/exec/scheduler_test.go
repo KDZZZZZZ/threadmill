@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -313,7 +314,10 @@ func TestExternalSandboxMapsAbsoluteBasePathToEnvironmentLive(t *testing.T) {
 	if err := os.WriteFile(baseMarker, []byte("base"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	files := vfs.NewStore(base)
+	files, err := vfs.NewPersistentStore(base, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := files.View("env-a").Write("marker.txt", []byte("env-a")); err != nil {
 		t.Fatal(err)
 	}
@@ -593,7 +597,7 @@ func TestExternalSandboxReusesBuildCacheOnlyWithinEnvironment(t *testing.T) {
 	}
 }
 
-func TestExternalSandboxForwardsOnlyNetworkEnvironment(t *testing.T) {
+func TestExternalSandboxForwardsNetworkAndToolchainConfiguration(t *testing.T) {
 	networkEnvironment := map[string]string{
 		"all_proxy":           "socks5://127.0.0.1:43001",
 		"http_proxy":          "http://127.0.0.1:43002",
@@ -609,6 +613,11 @@ func TestExternalSandboxForwardsOnlyNetworkEnvironment(t *testing.T) {
 		"REQUESTS_CA_BUNDLE":  "/operator/requests-ca.pem",
 		"SSL_CERT_DIR":        "/operator/certs",
 		"SSL_CERT_FILE":       "/operator/ca.pem",
+		"JAVA_HOME":           "/opt/java",
+		"GRADLE_OPTS":         "-Dmaven.repo.local=/opt/maven-repository",
+		"MAVEN_OPTS":          "-Xmx256m",
+		"GOPROXY":             "off",
+		"PYTHONPATH":          "/opt/python-libs",
 	}
 	checks := make([]string, 0, len(networkEnvironment)+1)
 	for name, value := range networkEnvironment {
@@ -633,6 +642,26 @@ func TestExternalSandboxForwardsOnlyNetworkEnvironment(t *testing.T) {
 	}
 	if result.ExitCode != 0 {
 		t.Fatalf("Run() = %#v, want network environment without arbitrary host variables", result)
+	}
+}
+
+func TestExternalSandboxIsolatesConfiguredGradleHome(t *testing.T) {
+	seed := t.TempDir()
+	if err := os.WriteFile(filepath.Join(seed, "init.gradle"), []byte("image config"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GRADLE_USER_HOME", seed)
+	files := vfs.NewStore(t.TempDir())
+	s := New(Config{Slots: 1, ExternalSandbox: true})
+	t.Cleanup(func() { _ = s.Reap("a"); _ = s.Reap("b") })
+	for _, id := range []string{"a", "b"} {
+		result, err := s.View(id, files).Run(t.Context(), env.Cmd{Command: `test "$GRADLE_USER_HOME" = "$HOME/.gradle" && test "$(cat "$GRADLE_USER_HOME/init.gradle")" = 'image config' && echo changed > "$GRADLE_USER_HOME/init.gradle"`})
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("%s Gradle config: %+v, %v", id, result, err)
+		}
+	}
+	if got, err := os.ReadFile(filepath.Join(seed, "init.gradle")); err != nil || string(got) != "image config" {
+		t.Fatalf("seed changed: %q, %v", got, err)
 	}
 }
 
@@ -679,7 +708,7 @@ func TestSchedulerReapReportsRuntimeCleanupFailureWithoutReturningIt(t *testing.
 
 	parent := t.TempDir()
 	s := New(Config{Slots: 1})
-	runtimeDir, err := s.runtimeDir("env-a", filepath.Join(parent, "live"))
+	runtimeDir, err := s.runtimeDir(t.Context(), "env-a", filepath.Join(parent, "live"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -831,5 +860,77 @@ func TestSchedulerWithoutBwrapDoesNotRun(t *testing.T) {
 	_, err := s.View("env-a", files).Run(context.Background(), env.Cmd{Command: "true"})
 	if !errors.Is(err, ErrSandboxUnavailable) {
 		t.Fatalf("Run error = %v, want ErrSandboxUnavailable", err)
+	}
+}
+
+func TestGradleSeedChangesDoNotReuseCachedResults(t *testing.T) {
+	seed := t.TempDir()
+	t.Setenv("GRADLE_USER_HOME", seed)
+	if err := os.WriteFile(filepath.Join(seed, "init.gradle"), []byte("first"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sched, cache := newCachedScheduler(t, Config{Slots: 1, ExternalSandbox: true})
+	t.Cleanup(func() { _ = sched.Reap("a"); _ = sched.Reap("b") })
+	files := vfs.NewStore(baseRepo(t))
+	command := env.Cmd{Command: `cat "$GRADLE_USER_HOME/init.gradle"`}
+	first, err := sched.View("a", files).Run(t.Context(), command)
+	if err != nil || first.ExitCode != 0 {
+		t.Fatalf("first=%+v %v", first, err)
+	}
+	if err := os.WriteFile(filepath.Join(seed, "init.gradle"), []byte("second"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := sched.View("b", files).Run(t.Context(), command)
+	if err != nil || second.ExitCode != 0 || strings.TrimSpace(second.Output) != "second" {
+		t.Fatalf("second=%+v %v, cache=%+v", second, err, cache.Stats())
+	}
+}
+
+func TestSchedulerRunsInRealDirectoryWithoutChangingArchivedInput(t *testing.T) {
+	for _, namespace := range []bool{false, true} {
+		t.Run(fmt.Sprintf("namespace=%t", namespace), func(t *testing.T) {
+			if namespace && !probeExternalWorkspaceIsolation() {
+				t.Skip("mount namespace isolation unavailable")
+			}
+			base := t.TempDir()
+			if err := os.WriteFile(filepath.Join(base, "input.txt"), []byte("original"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			files, err := vfs.NewPersistentStore(base, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = files.Close() })
+			if err := files.ArchiveProject("before"); err != nil {
+				t.Fatal(err)
+			}
+			if err := files.BindProject("real"); err != nil {
+				t.Fatal(err)
+			}
+			s := New(Config{Slots: 1, ExternalSandbox: true, ExternalWorkspaceIsolation: namespace})
+			t.Cleanup(func() { _ = s.Reap("real") })
+			result, err := s.View("real", files).Run(t.Context(), env.Cmd{Command: `cat input.txt > output.txt && printf changed > input.txt`})
+			if err != nil || result.ExitCode != 0 {
+				t.Fatalf("run=%+v,%v", result, err)
+			}
+			if got, err := os.ReadFile(filepath.Join(base, "output.txt")); err != nil || string(got) != "original" {
+				t.Fatalf("real output=%q,%v", got, err)
+			}
+			if got, err := os.ReadFile(filepath.Join(base, "input.txt")); err != nil || string(got) != "changed" {
+				t.Fatalf("real input=%q,%v", got, err)
+			}
+			if got, err := files.View("before").Read("input.txt"); err != nil || string(got) != "original" {
+				t.Fatalf("archived input=%q,%v", got, err)
+			}
+			if err := s.Reap("real"); err != nil {
+				t.Fatal(err)
+			}
+			if err := files.Release("real"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(base, "output.txt")); err != nil {
+				t.Fatalf("cleanup removed project: %v", err)
+			}
+		})
 	}
 }

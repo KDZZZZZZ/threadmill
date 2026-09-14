@@ -752,13 +752,13 @@ func TestRepositorySpecializedPromptsPreserveAuthorizationBoundary(t *testing.T)
 		t.Error("manager prompt can delegate unauthorized actions")
 	}
 	verifier := config.Agents.Verifier.SystemPrompt
-	for _, want := range []string{"只有一次性 VFS 文件 delta 会丢弃", "外部副作用不会回滚"} {
+	for _, want := range []string{"隔离 task 的验收文件 delta 会丢弃", "真实目录 task 必须自行清理实验文件", "外部副作用不会回滚"} {
 		if !strings.Contains(verifier, want) {
 			t.Errorf("verifier prompt misstates probe rollback %q", want)
 		}
 	}
 	planner := config.Agents.Planner.SystemPrompt
-	for _, want := range []string{"只有 VFS delta 会丢弃", "外部副作用不回滚"} {
+	for _, want := range []string{"隔离 task 的调查文件 delta 会丢弃", "真实目录 task 必须自行清理实验文件", "外部副作用不回滚"} {
 		if !strings.Contains(planner, want) {
 			t.Errorf("planner prompt misstates one-time workspace rollback %q", want)
 		}
@@ -2278,7 +2278,7 @@ func TestRepositoryOrchestrationPromptUsesOrdinaryTasksAndExplicitEdges(t *testi
 	}
 	prompt := config.Tools["coordination_orchestrate"].Description
 	for _, want := range []string{
-		"tasks:[{id,info,run_policy,persistent}]", "edges:[{from,to}]", "taskID:activation:role",
+		"tasks:[{id,info,run_policy,persistent,real_directory}]", "edges:[{from,to}]", "taskID:activation:role",
 		"persistent", "continue_task", "close_task", "task_id", "input",
 		"Pause", "Resume", "合出边可以为空", "不阻塞无依赖的 task",
 		"held 只暂停当前 task", "VFS base", "显式边",
@@ -2367,16 +2367,19 @@ func TestRepositoryRolePromptsUseExplicitDependenciesWithoutRoots(t *testing.T) 
 	}
 }
 
-func TestRepositoryPublicationPromptAllowsIdlePersistentTask(t *testing.T) {
+func TestRepositoryRealDirectoryOwnershipIsCreationOnly(t *testing.T) {
 	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	prompt := config.Tools["coordination_publishTask"].Description
-	for _, want := range []string{"激活已结束", "idle", "不需要等别的 task", "不代表验收通过", "task_id"} {
+	prompt := config.Tools["coordination_orchestrate"].Description
+	for _, want := range []string{"real_directory=true", "创建新 task", "额外输入快照", "文件合入"} {
 		if !strings.Contains(prompt, want) {
-			t.Errorf("publication contract missing %q", want)
+			t.Errorf("real directory contract missing %q", want)
 		}
+	}
+	if _, exists := config.Tools["coordination_publishTask"]; exists {
+		t.Fatal("legacy publication tool still installed")
 	}
 }
 
@@ -2434,7 +2437,7 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 		"工具成功返回前，不得声称 task、helper 或图变更已经创建",
 		"问答不介绍内部机制",
 		"workflow done 不等于验收通过",
-		"coordination_publishTask",
+		"real_directory=true",
 		"成功前不声称已落盘",
 	} {
 		if !strings.Contains(got.Agents.Manager.SystemPrompt, want) {
@@ -2471,13 +2474,13 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 	if slices.Contains(got.Agents.Manager.Tools, "input") {
 		t.Fatalf("manager tools include role-local %q", "input")
 	}
-	for _, name := range []string{"coordination_orchestrate", "coordination_publishTask"} {
+	for _, name := range []string{"coordination_orchestrate"} {
 		if got.Tools[name].Description == "" {
 			t.Fatalf("workspace tools.%s.description is empty", name)
 		}
 	}
-	if !slices.Contains(got.Agents.Manager.Tools, "coordination_publishTask") {
-		t.Fatalf("manager tools = %v, want coordination_publishTask", got.Agents.Manager.Tools)
+	if slices.Contains(got.Agents.Manager.Tools, "coordination_publishTask") {
+		t.Fatal("manager still exposes manual publication")
 	}
 	for _, name := range got.Agents.Planner.Tools {
 		if name == "coordination_orchestrate" {
@@ -2493,6 +2496,25 @@ func TestLoadConfigReadsWorkspaceFile(t *testing.T) {
 	for _, want := range []string{"offset 从 1 起", "一次最多 2000 行/50KB", "截断返回下个 offset"} {
 		if !strings.Contains(got.Tools["read"].Description, want) {
 			t.Errorf("tools.read.description missing %q", want)
+		}
+	}
+}
+
+func TestManagerStagesAndVerifiesDeliverablesInRealDirectory(t *testing.T) {
+	config, err := LoadConfigFile(filepath.Join("..", "..", ConfigFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := config.Agents.Manager.SystemPrompt
+	for _, want := range []string{
+		"开始新阶段时就创建 real_directory=true 的新 task",
+		"阶段性成果必须合入真实目录后展示",
+		"阶段性验收必须由真实目录 task 在真实目录中进行",
+		"必须创建一个新的 real_directory=true task",
+		"不把该请求当作给旧 task 的继续消息",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("missing current workspace contract: %s", want)
 		}
 	}
 }

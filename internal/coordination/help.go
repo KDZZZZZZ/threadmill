@@ -66,8 +66,9 @@ func (g *Graph) HelpTools(notify func(string)) map[string]agenttool.Tool {
 		help.mu.Unlock()
 	}
 	return map[string]agenttool.Tool{
-		coordRequestHelpName: requestHelpTool{help: help},
-		inputToolName:        inputTool{graph: g},
+		coordRequestHelpName:    requestHelpTool{help: help},
+		coordMessageManagerName: messageManagerTool{help: help},
+		inputToolName:           inputTool{graph: g},
 	}
 }
 

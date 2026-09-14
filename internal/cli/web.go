@@ -889,16 +889,13 @@ func webAgentIdentity(id string) (string, string, string) {
 // The UI needs graph metadata, not private immutable files or memory storage references.
 func webGraphSnapshot(s coordination.Snapshot) any {
 	return struct {
-		Revision         int64               `json:"revision"`
-		Executing        bool                `json:"executing"`
-		PublishingTaskID string              `json:"publishing_task_id,omitempty"`
-		PublishedTaskID  string              `json:"published_task_id,omitempty"`
-		PublishingNodeID string              `json:"publishing_node_id,omitempty"`
-		PublishedNodeID  string              `json:"published_node_id,omitempty"`
-		Tasks            []coordination.Task `json:"tasks"`
-		Nodes            []coordination.Node `json:"nodes"`
-		Edges            []coordination.Edge `json:"edges"`
-	}{s.Revision, s.Executing, s.PublishingTaskID, s.PublishedTaskID, s.PublishingNodeID, s.PublishedNodeID, s.Tasks, s.Nodes, s.Edges}
+		ProjectTaskID string              `json:"project_task_id,omitempty"`
+		Revision      int64               `json:"revision"`
+		Executing     bool                `json:"executing"`
+		Tasks         []coordination.Task `json:"tasks"`
+		Nodes         []coordination.Node `json:"nodes"`
+		Edges         []coordination.Edge `json:"edges"`
+	}{s.ProjectTaskID, s.Revision, s.Executing, s.Tasks, s.Nodes, s.Edges}
 }
 
 // Only the incomplete model response is retractable; complete outputs and user submissions survive retries.
