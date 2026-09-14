@@ -4,12 +4,28 @@ Threadmill 是轻量级 Agent OS。
 
 ## 安装
 
-Linux x86-64/ARM64 支持一键安装。**先进入要使用的项目目录**，或用 `THREADMILL_PROJECT_DIR` 指定它。安装先以当前用户验证实际项目、VFS 状态目录、安装目录、项目父目录和 shell 配置的权限，实际测试执行、符号链接与 reflink 克隆。之后请求 `sudo` 完成运行依赖准备，必要时启用发行版提供的 AppArmor `bwrap` profile；实际沙箱命令通过后才安装私有 Go 工具链和 Threadmill。
+在 Linux 项目目录执行：
 
-**不提供普通复制降级。** 项目及默认 `~/.threadmill/projects/<项目路径哈希>/vfs` 必须允许 reflink 克隆，通常要求位于同一个启用 reflink 的 Btrfs/XFS 文件系统。仅有文件系统名称或 sudo 权限不算通过；ext4、跨文件系统或受限目录会在预检中拒绝。Threadmill、私有 Go 工具链和构建缓存放在 `~/.threadmill`，`~/.threadmill/bin` 幂等加入 shell 启动文件。安装器检查默认存储位置；使用 `vfs.live_root` 自定义位置或切换项目时，启动还会对实际路径重新准入。
+```sh
+curl -fsSL https://kdzzzzzz.github.io/threadmill/install.sh | sh
+```
+
+安装器会自动检查系统、文件系统和目录权限，并在需要时请求 `sudo` 准备依赖。所有检查通过后再安装 Threadmill，无需手动安装 Go 或填写环境变量。
+
+<details>
+<summary>系统要求与备用下载地址</summary>
+
+支持 Linux x86-64/ARM64。项目与 VFS 状态目录必须能够进行 reflink 克隆，普通 ext4 或跨文件系统克隆不满足要求；不提供普通复制降级。安装检查以当前用户实际执行，并验证 bwrap 沙箱。切换项目或自定义 `vfs.live_root` 时，启动会重新检查实际路径。
+
+Threadmill、必要的私有 Go 工具链和构建缓存放在 `~/.threadmill`，安装器将 `~/.threadmill/bin` 加入 shell 启动文件。默认 VFS 状态路径为 `~/.threadmill/projects/<项目路径哈希>/vfs`。可用 `THREADMILL_PROJECT_DIR` 指定要预检的项目。
+
+备用 GitHub 下载地址：
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/KDZZZZZZ/threadmill/dev-native/scripts/install.sh | sh
 ```
+
+</details>
 
 安装不会读取或写入模型密钥。打开新终端后，在通过准入的项目目录首次运行：
 
