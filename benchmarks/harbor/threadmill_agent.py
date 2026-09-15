@@ -16,6 +16,7 @@ from harbor.models.agent.context import AgentContext
 
 _REMOTE_BINARY = PurePosixPath("/installed-agent/threadmill")
 _REMOTE_TRACER = PurePosixPath("/usr/local/bin/strace")
+_REMOTE_BWRAP = PurePosixPath("/usr/local/bin/bwrap")
 _REMOTE_HOME = PurePosixPath("/tmp/threadmill-agent-home")
 _REMOTE_TMP = PurePosixPath("/tmp/threadmill-agent-tmp")
 _REMOTE_VFS = PurePosixPath("/threadmill-vfs")
@@ -47,8 +48,6 @@ def _runtime_config(
         f"  model: {_yaml_string(model)}",
         f"  context_window: {context_window}",
         "exec:",
-        "  external_sandbox: true",
-        "  external_workspace_isolation: true",
     ]
     if model_proxy:
         lines.insert(3, f"  proxy_url: {_yaml_string(model_proxy)}")
@@ -98,6 +97,7 @@ class ThreadmillRunner:
         *args: Any,
         binary: str | os.PathLike[str] | None = None,
         tracer: str | os.PathLike[str] | None = None,
+        bwrap: str | os.PathLike[str] | None = None,
         context_window: int = 272_000,
         exec_slots: int | None = None,
         model_proxy: str | None = None,
@@ -115,6 +115,9 @@ class ThreadmillRunner:
         self._tracer = None if tracer is None else Path(tracer).expanduser().resolve()
         if self._tracer is not None and not self._tracer.is_file():
             raise FileNotFoundError(f"strace binary not found: {self._tracer}")
+        self._bwrap = None if bwrap is None else Path(bwrap).expanduser().resolve()
+        if self._bwrap is not None and not self._bwrap.is_file():
+            raise FileNotFoundError(f"bwrap binary not found: {self._bwrap}")
         self._context_window = int(context_window)
         if self._context_window <= 0:
             raise ValueError("context_window must be positive")
@@ -137,17 +140,23 @@ class ThreadmillRunner:
         await environment.upload_file(self._binary, _REMOTE_BINARY.as_posix())
         if self._tracer is not None:
             await environment.upload_file(self._tracer, _REMOTE_TRACER.as_posix())
+        if self._bwrap is not None:
+            await environment.upload_file(self._bwrap, _REMOTE_BWRAP.as_posix())
         workspace = shlex.quote(self._workspace.as_posix())
         tracer_chmod = (
             f"chmod 0755 {shlex.quote(_REMOTE_TRACER.as_posix())}; "
             if self._tracer is not None
             else ""
         )
+        bwrap_chmod = (
+            f"chmod 0755 {shlex.quote(_REMOTE_BWRAP.as_posix())}; "
+            if self._bwrap is not None else ""
+        )
         await self.exec_as_root(
             environment,
             command=(
                 f"chmod 0755 {shlex.quote(_REMOTE_BINARY.as_posix())}; "
-                f"{tracer_chmod}"
+                f"{tracer_chmod}{bwrap_chmod}"
                 f"mkdir -p {shlex.quote(_REMOTE_LOGS.as_posix())} "
                 f"{shlex.quote(_REMOTE_VFS.as_posix())}; "
                 f"probe=$(mktemp -d {_REMOTE_VFS.as_posix()}/probe.XXXXXX); "
@@ -160,6 +169,7 @@ class ThreadmillRunner:
                 "printf 'cpus='; nproc; "
                 "printf 'strace='; command -v strace || printf 'unavailable\\n'; "
                 "printf 'fuse_overlayfs='; command -v fuse-overlayfs || printf 'unavailable\\n'; "
+                "printf 'bwrap='; command -v bwrap && bwrap --version || printf 'unavailable\\n'; "
                 "printf 'fusermount3='; command -v fusermount3 || printf 'unavailable\\n'; "
                 "printf 'devices='; stat -c '%n:%d' "
                 f"{workspace} /tmp; "
@@ -191,6 +201,8 @@ class ThreadmillRunner:
                 f"}} >{shlex.quote((_REMOTE_LOGS / 'setup.txt').as_posix())} 2>&1; "
                 f"grep -qx 'mount_namespace=yes' "
                 f"{shlex.quote((_REMOTE_LOGS / 'setup.txt').as_posix())}"
+                f" && grep -q '^bwrap=' {shlex.quote((_REMOTE_LOGS / 'setup.txt').as_posix())} "
+                f" && ! grep -q '^bwrap=unavailable' {shlex.quote((_REMOTE_LOGS / 'setup.txt').as_posix())}"
             ),
         )
 
@@ -287,6 +299,10 @@ class ThreadmillRunner:
         logs = shlex.quote(_REMOTE_LOGS.as_posix())
         command = (
             "set +e; "
+            f"{shlex.quote(_REMOTE_BINARY.as_posix())} -check -C {shlex.quote(self._workspace.as_posix())} "
+            f"-config {shlex.quote(_REMOTE_CONFIG.as_posix())} >{logs}/check.log 2>&1; "
+            "check_status=$?; if [ \"$check_status\" -ne 0 ]; then cat "
+            f"{logs}/check.log; exit \"$check_status\"; fi; "
             f"{shlex.quote(_REMOTE_BINARY.as_posix())} "
             f"-C {shlex.quote(self._workspace.as_posix())} "
             f"-config {shlex.quote(_REMOTE_CONFIG.as_posix())} "

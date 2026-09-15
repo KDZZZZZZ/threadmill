@@ -104,6 +104,17 @@ threadmill -C /path/to/project -config /path/to/override.yaml
 
 `-p` 不会启动首次配置向导，使用前先完成模型与凭据设置。
 
+### Docker
+
+日常 Docker 和评测容器都使用同一个镜像入口；Docker 只提供项目级外层边界，Agent 命令仍由 bwrap 执行。先把项目、状态和 VFS 放在同一个支持 reflink 的宿主目录，再运行：
+
+```sh
+go build -o threadmill ./cmd/threadmill
+THREADMILL_DATA=/srv/threadmill docker compose -f deploy/docker-compose.yml up --build
+```
+
+启动器会先执行 `threadmill -check`，bwrap、namespace 或 reflink 不满足时直接退出。完整挂载、seccomp 和评测配置见 [外层容器部署](deploy/README.md)。
+
 ### 阶段交付与验收
 
 1. 向 Manager 说明目标、约束和验收方式。

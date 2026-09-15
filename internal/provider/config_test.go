@@ -2080,7 +2080,7 @@ exec:
 	}
 }
 
-func TestLoadConfigAcceptsExecContainerImage(t *testing.T) {
+func TestLoadConfigRejectsExecContainerImage(t *testing.T) {
 	root := t.TempDir()
 	content := []byte(`llm:
   provider: openai-responses
@@ -2094,16 +2094,12 @@ exec:
 		t.Fatal(err)
 	}
 
-	got, err := LoadConfig(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Exec.ContainerImage != "golang:1.26.5-alpine" {
-		t.Fatalf("Exec.ContainerImage = %q", got.Exec.ContainerImage)
+	if _, err := LoadConfig(root); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig() error = %v, want ErrInvalidConfig", err)
 	}
 }
 
-func TestLoadConfigAcceptsExternalSandbox(t *testing.T) {
+func TestLoadConfigRejectsExternalSandbox(t *testing.T) {
 	root := t.TempDir()
 	content := []byte(`llm:
   provider: openai-responses
@@ -2118,15 +2114,8 @@ exec:
 		t.Fatal(err)
 	}
 
-	got, err := LoadConfig(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !got.Exec.ExternalSandbox {
-		t.Fatal("Exec.ExternalSandbox = false, want true")
-	}
-	if !got.Exec.ExternalWorkspaceIsolation {
-		t.Fatal("Exec.ExternalWorkspaceIsolation = false, want true")
+	if _, err := LoadConfig(root); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig() error = %v, want ErrInvalidConfig", err)
 	}
 }
 

@@ -64,10 +64,9 @@ func run(taskCount int, delay time.Duration, slots, files int, timeout time.Dura
 	}
 	defer filesStore.Close()
 	sched := exec.New(exec.Config{
-		Slots:           slots,
-		Timeout:         30 * time.Second,
-		ExternalSandbox: true,
-		HeavyThreshold:  24 * time.Hour, // 压测关闭车道干扰
+		Slots:          slots,
+		Timeout:        30 * time.Second,
+		HeavyThreshold: 24 * time.Hour, // 压测关闭车道干扰
 	})
 	memory := ctxgraph.NewStore()
 

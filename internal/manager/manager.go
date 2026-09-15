@@ -65,6 +65,35 @@ type Manager struct {
 	logger    *slog.Logger
 }
 
+// Preflight validates the complete execution environment without contacting
+// the model provider or starting a manager loop. It is used by container
+// launchers before accepting work.
+func Preflight(root, configPath string) error {
+	paths, err := openStatePaths(root)
+	if err != nil {
+		return err
+	}
+	file, err := provider.LoadRuntimeConfig(paths.ProjectRoot, configPath)
+	if err != nil {
+		return err
+	}
+	liveRoot := paths.VFSDir
+	if file.VFS.LiveRoot != "" {
+		liveRoot = file.VFS.LiveRoot
+	}
+	files, err := vfs.NewPersistentStoreWithOptions(paths.ProjectRoot, liveRoot, vfs.Options{Overlay: true})
+	if err != nil {
+		return fmt.Errorf("manager preflight: vfs: %w", err)
+	}
+	defer files.Close()
+	s := tmexec.New(tmexec.Config{Slots: file.Exec.Slots})
+	status := s.Stats()
+	if status.SandboxBackend != "bwrap" {
+		return fmt.Errorf("manager preflight: bwrap sandbox unavailable")
+	}
+	return nil
+}
+
 type taskRun struct {
 	activation uint64
 	cancel     context.CancelFunc // nil after this activation settles

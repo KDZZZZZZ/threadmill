@@ -35,6 +35,7 @@ type options struct {
 	dir        string
 	configPath string
 	message    string
+	check      bool
 	web        bool
 	listen     string
 	webUI      string
@@ -124,6 +125,14 @@ func Run(args []string, stdio IO) int {
 
 	if opts.web {
 		return runWeb(ctx, opts, open, out, errOut)
+	}
+	if opts.check {
+		if err := manager.Preflight(opts.dir, opts.configPath); err != nil {
+			fmt.Fprintln(errOut, err)
+			return 1
+		}
+		fmt.Fprintln(out, "Threadmill preflight: bwrap and reflink are ready")
+		return 0
 	}
 	if opts.message != "" {
 		return runPrint(ctx, stop, opts, open, out, errOut)
@@ -329,6 +338,7 @@ func parse(args []string, errOut io.Writer) (options, error) {
 		"highest-priority configuration override file",
 	)
 	fs.StringVar(&opts.message, "p", "", "send one message and exit")
+	fs.BoolVar(&opts.check, "check", false, "validate bwrap, namespace and reflink prerequisites, then exit")
 	fs.BoolVar(&opts.web, "web", false, "serve the local WebUI; open projects from the browser")
 	fs.StringVar(&opts.listen, "listen", "127.0.0.1:8787", "WebUI loopback address")
 	fs.StringVar(&opts.webUI, "web-ui", "", "override the bundled WebUI with a standalone HTML file")

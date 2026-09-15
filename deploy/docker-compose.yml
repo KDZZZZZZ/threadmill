@@ -1,0 +1,24 @@
+services:
+  threadmill:
+    build:
+      context: ..
+      args:
+        BINARY: threadmill
+    image: threadmill:local
+    # /data is one host filesystem: reflink probes must cross neither mount point.
+    volumes:
+      - type: bind
+        source: ${THREADMILL_DATA:-/srv/threadmill}
+        target: /data
+    environment:
+      THREADMILL_ROOT: /data/project
+      THREADMILL_CONFIG: /data/config.yaml
+      HOME: /data/state
+    ports:
+      - "127.0.0.1:8787:8787"
+    # bwrap remains the only Agent sandbox. These are outer-container settings.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:false
+      - seccomp:unconfined
+    command: ["-web", "-listen", "0.0.0.0:8787"]
