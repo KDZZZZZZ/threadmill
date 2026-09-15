@@ -109,3 +109,9 @@ Agent Self-Claimed：使用 `real_directory` 与 `project_task_id` 字段；额�
 2026-09-14 安装准入：Human Design：禁止普通复制降级，仅允许具备完整能力的用户使用，安装前探测并申请所需权限。Agent Self-Claimed：项目到不可变 floor 必须通过非空 FICLONE 探针，工作树克隆、Gradle 种子、发布替换保留和命令缓存产物不再回退普通复制；安装器先检查实际用户与默认项目状态路径的读写、执行、符号链接、rename 和全树 reflink，再申请 sudo 准备依赖并真实运行 bwrap，之后才安装主程序。启动对新目录重新准入并拒绝不可用沙箱；不为 reflink 可用的默认路径安装无用的 FUSE 依赖。无新增模块间依赖。安装时不能替未来新增项目、外部挂载或后来变更的权限担保。
 
 准入实现参照已检查的 Pi `0c7bb7c5` `packages/coding-agent/examples/extensions/sandbox/index.ts`、`test/restore-sandbox-env.test.ts`（运行边界与环境恢复）；deepseek-harness `c291e796` `docs/subsystems/sandbox.md`、`packages/shell/bash-sandbox/tests/bwrap.e2e.ts`（真实 bwrap 操作验证）；Eino `9d983b36` `adk/filesystem/backend.go`、`adk/middlewares/filesystem/filesystem_test.go`（后端能力边界）。这些实现不提供 Threadmill 的 reflink 安装准入协议，严格准入来自本项目人类要求。克隆语义依据 GNU coreutils `cp --help` 的 `--reflink=always` 契约及 Linux FICLONE；拒绝复制无需增加权限后门。
+
+## 显式后台命令（2026-09-15）
+
+Human Design：参照成熟 agent harness 为长期进程加入显式声明，而不是让 `&`、`nohup` 隐式遗留进程；先单独合入 dev-native，bwrap-only 改动之后另行处理。
+
+Agent Self-Claimed：照搬 Claude Code 的形状：`bash` 增加 `run_in_background`，新增 `bash_output`（增量输出、状态、可选 wait）与 `bash_kill`。数量上限参照 Codex 的会话上限：每个工作区同时最多 4 个运行中、保留 16 条记录、超出时先淘汰已退出记录。后台命令归属当前环境（角色工作区），不继承发起调用的取消、不受 timeout 约束、不占执行槽位、不进命令缓存与追踪；显式终止或既有 `Reap`（角色或 task 结束、会话关闭）以 SIGKILL 回收整个进程组，bwrap 的 PID 命名空间与 `--die-with-parent` 覆盖脱离的后代和 Threadmill 自身崩溃。输出只保留最近 output cap 字节并报告丢弃量。docker 与 external 后端拒绝后台命令（`ErrBackgroundUnsupported`）：docker 客户端的进程组不拥有容器内进程，external 模式没有 PID 命名空间，两者都无法保证回收。`ExecView` 通过可选接口 `env.BackgroundExec` 扩展；Tool Layer → Execution Sandbox 箭头不变，无新增模块依赖。工具命名、上限数值、状态格式和测试形状均由 Agent 选择。

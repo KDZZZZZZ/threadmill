@@ -864,12 +864,18 @@ func TestRepositoryPromptsRecoverStallsAndShapeCacheableCommands(t *testing.T) {
 		"相同命令与参数",
 		"按用途命名",
 		"语义正确优先",
-		"等待所有后代进程",
-		"trap",
-		"wait",
+		"后代进程随之终止",
+		"run_in_background",
+		"bash_output",
+		"bash_kill",
 	} {
 		if !strings.Contains(bash, want) {
 			t.Errorf("bash description lacks cacheable-command contract %q", want)
+		}
+	}
+	for _, name := range []string{"bash_output", "bash_kill"} {
+		if config.Tools[name].Description == "" {
+			t.Errorf("tools.%s lacks a description for explicit background commands", name)
 		}
 	}
 	read := config.Tools["read"].Description

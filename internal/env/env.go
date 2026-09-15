@@ -55,6 +55,27 @@ type ExecView interface {
 	Run(ctx context.Context, spec Cmd) (ExecResult, error)
 }
 
+// BackgroundStatus 是一个后台命令的状态，以及自上次读取以来的新输出。
+type BackgroundStatus struct {
+	ID       string
+	Command  string
+	Running  bool
+	ExitCode int
+	// Killed 表示命令是被显式终止或回收的，而不是自己退出。
+	Killed bool
+	Output string
+	// Dropped 是超出保留窗口、未被读到就丢弃的字节数。
+	Dropped int64
+}
+
+// BackgroundExec 是 ExecView 可选实现的后台命令能力。后台命令须显式声明，
+// 归属当前环境：显式终止或环境回收时结束，不跨角色或激活存活。
+type BackgroundExec interface {
+	Start(ctx context.Context, spec Cmd) (BackgroundStatus, error)
+	Output(ctx context.Context, id string, wait time.Duration) (BackgroundStatus, error)
+	Kill(id string) (BackgroundStatus, error)
+}
+
 // Env 是一个角色的隔离工作区。同一 task 的角色可共用记忆并使用不同文件/执行视图。
 type Env struct {
 	ID     string
