@@ -5,7 +5,6 @@ services:
     security_opt:
       - apparmor=unconfined
     volumes:
-      - threadmill-vfs:/threadmill-vfs
-
-volumes:
-  threadmill-vfs:
+      # Bind both paths from one host filesystem so FICLONE/reflink works.
+      - ${THREADMILL_PROJECTS_ROOT:?set to a reflink-capable host directory}/repo:/workspace/repo
+      - ${THREADMILL_PROJECTS_ROOT:?set to the same host directory}/vfs:/threadmill-vfs

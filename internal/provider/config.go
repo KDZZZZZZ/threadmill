@@ -401,11 +401,8 @@ func (c *ExecConfig) validate() error {
 	if strings.TrimSpace(c.ContainerImage) != c.ContainerImage {
 		return fmt.Errorf("%w: exec.container_image must not have surrounding whitespace", ErrInvalidConfig)
 	}
-	if c.ExternalWorkspaceIsolation && !c.ExternalSandbox {
-		return fmt.Errorf(
-			"%w: exec.external_workspace_isolation requires exec.external_sandbox",
-			ErrInvalidConfig,
-		)
+	if c.ContainerImage != "" || c.ExternalSandbox || c.ExternalWorkspaceIsolation {
+		return fmt.Errorf("%w: exec.container_image and external sandbox modes were removed; Threadmill always executes commands with bwrap", ErrInvalidConfig)
 	}
 	if c.Slots == 0 {
 		c.Slots = runtime.NumCPU()

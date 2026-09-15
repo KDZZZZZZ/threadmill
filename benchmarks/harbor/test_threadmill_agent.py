@@ -18,7 +18,7 @@ from benchmarks.harbor.threadmill_agent import (
 
 
 class ThreadmillAgentTest(unittest.TestCase):
-    def test_runtime_config_uses_external_harbor_boundary(self) -> None:
+    def test_runtime_config_keeps_internal_sandbox_authoritative(self) -> None:
         config = _runtime_config(
             "https://example.test/v1",
             'model:"quoted"',
@@ -29,13 +29,11 @@ class ThreadmillAgentTest(unittest.TestCase):
         self.assertIn('base_url: "https://example.test/v1"', config)
         self.assertIn('model: "model:\\"quoted\\\""', config)
         self.assertIn("context_window: 200000", config)
-        self.assertIn("external_sandbox: true", config)
-        self.assertIn("external_workspace_isolation: true", config)
+        self.assertNotIn("external_sandbox", config)
+        self.assertNotIn("external_workspace_isolation", config)
         self.assertIn('live_root: "/threadmill-vfs"', config)
         self.assertIn(
             "exec:\n"
-            "  external_sandbox: true\n"
-            "  external_workspace_isolation: true\n"
             "  slots: 32\n"
             "vfs:\n",
             config,
@@ -90,6 +88,18 @@ class ThreadmillAgentTest(unittest.TestCase):
                     binary=binary,
                     tracer=root / "missing",
                 )
+
+    def test_optional_bwrap_must_be_a_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            binary = root / "threadmill"
+            binary.write_bytes(b"binary")
+            bwrap = root / "bwrap"
+            bwrap.write_bytes(b"bwrap")
+            agent = Threadmill(root, model_name="deepseek/model", binary=binary, bwrap=bwrap)
+            self.assertEqual(agent._bwrap, bwrap.resolve())
+            with self.assertRaises(FileNotFoundError):
+                Threadmill(root, model_name="deepseek/model", binary=binary, bwrap=root / "missing")
 
     def test_context_uses_last_runtime_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

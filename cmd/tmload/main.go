@@ -105,10 +105,9 @@ func run(
 	// 压测默认关闭重车道：合成 sleep 会被时长画像误分类为重命令，
 	// 干扰对基底开销的度量；车道效果由 heavylane_test 覆盖。
 	sched := exec.New(exec.Config{
-		Slots:           slots,
-		Timeout:         120 * time.Second,
-		ExternalSandbox: true,
-		HeavyThreshold:  24 * time.Hour,
+		Slots:          slots,
+		Timeout:        120 * time.Second,
+		HeavyThreshold: 24 * time.Hour,
 	})
 	seedEnv := "fixture-env"
 	if err := seedEnvironment(store, seedEnv, fileCount); err != nil {

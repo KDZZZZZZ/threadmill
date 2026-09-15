@@ -264,9 +264,6 @@ func probeSandbox(containerImage string) sandboxKind {
 	if probeBwrap() {
 		return sandboxBwrap
 	}
-	if containerImage != "" && probeDocker(containerImage) {
-		return sandboxDocker
-	}
 	return sandboxNone
 }
 

@@ -1,0 +1,5 @@
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_AARCH64"],
+  "syscalls": [{"names": ["clone", "clone3", "unshare", "mount", "umount2", "pivot_root", "setns", "open_by_handle_at", "faccessat2", "openat2"], "action": "SCMP_ACT_ALLOW"}]
+}

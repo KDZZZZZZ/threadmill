@@ -8,4 +8,3 @@ exec:
   slots: 3
   timeout: 60
   output_cap_kb: 256
-  container_image: golang:1.26.5-alpine
