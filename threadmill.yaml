@@ -48,9 +48,13 @@ tools:
       - 只在确实需要共享 shell 状态时才组合命令，并用 &&/|| 表达依赖；不要用换行让前一条失败后继续。
       - 语义正确优先，不要包装退出码。
 
-      调用会等待所有后代进程，`&`、`nohup` 或守护化不能让后台任务脱离。临时服务须在同一调用中用 `trap` 保证终止并 `wait` 回收；否则不要启动。
+      普通调用结束时，它启动的所有后代进程随之终止；`&`、`nohup` 或守护化不能让进程脱离本次调用。需要跨调用存活的服务（dev server、watch 构建、长测试）必须设 `run_in_background: true` 显式声明：调用立即返回 id，用 bash_output 读增量输出和状态，用完即 bash_kill。后台命令不受 timeout 约束、不进执行缓存，但属于当前角色：角色结束、task 取消或会话关闭都会终止它，不能当作持久交付。每个工作区同时最多 4 个后台命令。
 
-      可选 timeout 单位是秒。非零退出码写在输出里，不是工具错误。输出可能被截断。项目文件受 VFS 单文件/总量限制；运行交付入口产生的依赖和测试缓存仍是非交付物。交接或检查点前核对本轮生成路径并清理这些缓存，保留源码、依赖锁定、环境重建入口与原始证据。
+      可选 timeout 单位是秒，只作用于前台调用。非零退出码写在输出里，不是工具错误。输出可能被截断。项目文件受 VFS 单文件/总量限制；运行交付入口产生的依赖和测试缓存仍是非交付物。交接或检查点前核对本轮生成路径并清理这些缓存，保留源码、依赖锁定、环境重建入口与原始证据。
+  bash_output:
+    description: 读取 bash `run_in_background` 启动的后台命令自上次读取以来的新输出和状态（running、exited N 或 killed）；超出保留窗口的旧输出会注明丢弃字节数。等待服务就绪或命令结束时用 wait（秒，最多 600）一次等够，不要连续空轮询。
+  bash_kill:
+    description: 终止 bash `run_in_background` 启动的后台命令及其全部后代，返回最后的输出和状态。服务用完立即终止；角色结束时未终止的后台命令会被强制回收。
   coordination_orchestrate:
     description: |-
       manager 的唯一协调图编排工具。action 为 replace_pending、provide_help、continue_task、close_task 或 message_task；动作字段不可混用，失败时图不变。
@@ -430,6 +434,8 @@ agents:
       - grep
       - find
       - bash
+      - bash_output
+      - bash_kill
     hooks:
       - inject_subscribed_memory
       - compact_on_overflow
@@ -505,6 +511,8 @@ agents:
       - write
       - edit
       - bash
+      - bash_output
+      - bash_kill
     hooks:
       - inject_subscribed_memory
       - compact_on_overflow
@@ -586,6 +594,8 @@ agents:
       - grep
       - find
       - bash
+      - bash_output
+      - bash_kill
     hooks:
       - inject_subscribed_memory
       - compact_on_overflow

@@ -28,13 +28,15 @@ const (
 	memoryExpandToolName          = "memory_expand"
 	memoryCollapseToolName        = "memory_collapse"
 
-	fileReadToolName  = "read"
-	fileWriteToolName = "write"
-	fileEditToolName  = "edit"
-	fileLsToolName    = "ls"
-	fileGrepToolName  = "grep"
-	fileFindToolName  = "find"
-	bashToolName      = "bash"
+	fileReadToolName   = "read"
+	fileWriteToolName  = "write"
+	fileEditToolName   = "edit"
+	fileLsToolName     = "ls"
+	fileGrepToolName   = "grep"
+	fileFindToolName   = "find"
+	bashToolName       = "bash"
+	bashOutputToolName = agenttool.BashOutputName
+	bashKillToolName   = agenttool.BashKillName
 
 	coordOrchestrateToolName    = "coordination_orchestrate"
 	coordRequestHelpToolName    = "coordination_requestHelp"
@@ -77,6 +79,8 @@ var knownFileTools = map[string]struct{}{
 	fileGrepToolName:              {},
 	fileFindToolName:              {},
 	bashToolName:                  {},
+	bashOutputToolName:            {},
+	bashKillToolName:              {},
 	coordOrchestrateToolName:      {},
 	coordRequestHelpToolName:      {},
 	coordMessageManagerToolName:   {},
@@ -691,8 +695,15 @@ func toolsFromNames(
 				out = append(out, tool)
 				continue
 			}
-			if name == bashToolName {
+			switch name {
+			case bashToolName:
 				out = append(out, agenttool.Bash())
+				continue
+			case bashOutputToolName:
+				out = append(out, agenttool.BashOutput())
+				continue
+			case bashKillToolName:
+				out = append(out, agenttool.BashKill())
 				continue
 			}
 			return nil, fmt.Errorf("unknown tool %q", name)

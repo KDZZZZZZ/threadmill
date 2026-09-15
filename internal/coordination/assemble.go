@@ -150,7 +150,7 @@ func Assemble(
 		}
 		if inputTool != nil {
 			roles.ResolveInput = func(ctx context.Context, node Node, input InputProgress) error {
-				tools := append(agenttool.FileTools(), agenttool.Bash(), inputTool)
+				tools := append(append(agenttool.FileTools(), agenttool.ShellTools()...), inputTool)
 				if len(overlay) > 0 {
 					tools = agent.WithToolDescriptions(tools, overlay[0].Tools)
 				}

@@ -86,6 +86,11 @@ type Scheduler struct {
 
 	externalWorkspaceIsolation          bool
 	externalWorkspaceIsolationAvailable bool
+
+	// 显式后台命令按环境登记；锁顺序是 bgMu 先于 mu。
+	bgMu       sync.Mutex
+	background map[string]map[string]*backgroundProc
+	bgSeq      uint64
 }
 
 type schedulerCounters struct {
@@ -142,6 +147,10 @@ type Stats struct {
 	Cache cmdcache.Stats `json:"cache"`
 	// DependencyTracing 表示读集推断是否可用。为假时缓存退化成整树指纹键。
 	DependencyTracing bool `json:"dependency_tracing"`
+	// BackgroundRunning 是仍在运行的显式后台命令数；它们不占执行槽位，由 Reap 回收。
+	BackgroundRunning int `json:"background_running"`
+	// BackgroundStarted 是累计启动的后台命令数。
+	BackgroundStarted uint64 `json:"background_started"`
 }
 
 // New 创建调度器。Slots <= 0 时用 runtime.NumCPU()。
@@ -197,6 +206,7 @@ func (s *Scheduler) Stats() Stats {
 	if s == nil {
 		return Stats{}
 	}
+	bgRunning, bgStarted := s.backgroundStats()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tracked := 0
@@ -234,6 +244,8 @@ func (s *Scheduler) Stats() Stats {
 		HeavyWaitDuration:       c.heavyWaitDuration,
 		Cache:                   s.cache.Stats(),
 		DependencyTracing:       s.tracing,
+		BackgroundRunning:       bgRunning,
+		BackgroundStarted:       bgStarted,
 	}
 }
 
@@ -765,9 +777,12 @@ const (
 	runtimeCleanupPoll    = time.Millisecond
 )
 
-// Reap 杀掉该 env 里仍活着的命令进程组并删除运行时目录。在 task 结束时调用。
-// 运行时目录清理失败只记录到 Stats，避免覆盖已经完成的命令结果。
+// Reap 杀掉该 env 里的显式后台命令和仍活着的命令进程组，再删除运行时目录。
+// 在角色或 task 结束时调用。运行时目录清理失败只记录到 Stats，避免覆盖已经完成的命令结果。
 func (s *Scheduler) Reap(envID string) error {
+	if err := s.stopBackground(envID); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	pgids := append([]int(nil), s.groups[envID]...)
 	runtimeDir := s.runtimes[envID]

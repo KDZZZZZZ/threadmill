@@ -60,6 +60,14 @@ func runBwrap(
 	// 追踪器跑在沙箱内，作为该 PID 命名空间的 1 号进程追踪自己的后代；
 	// Yama ptrace_scope=1 允许这种父子关系。
 	args := trace.wrap(bashArgs(command))
+	cmd := osexec.CommandContext(ctx, "bwrap", bwrapCommandArgs(live, tempDir, args)...)
+	cmd.Env = networkSandboxEnv("/tmp", "/tmp")
+	return collect(ctx, cmd, capBytes, track)
+}
+
+// bwrapCommandArgs 是前台与后台命令共用的沙箱参数。--unshare-pid 让命令的
+// 全部后代在它退出时一起结束；--die-with-parent 覆盖 Threadmill 自身退出。
+func bwrapCommandArgs(live, tempDir string, argv []string) []string {
 	bwrapArgs := []string{
 		"--unshare-user",
 		"--unshare-pid",
@@ -82,8 +90,5 @@ func runBwrap(
 		"--chdir", bwrapWorkspace,
 		"--",
 	}
-	bwrapArgs = append(bwrapArgs, args...)
-	cmd := osexec.CommandContext(ctx, "bwrap", bwrapArgs...)
-	cmd.Env = networkSandboxEnv("/tmp", "/tmp")
-	return collect(ctx, cmd, capBytes, track)
+	return append(bwrapArgs, argv...)
 }
