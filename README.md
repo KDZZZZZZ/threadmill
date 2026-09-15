@@ -117,7 +117,7 @@ threadmill -C /path/to/project -config /path/to/override.yaml
 
 默认提示词和工具配置已内置，普通项目无需携带 `threadmill.yaml`。模型配置保存在 `~/.threadmill/config.yaml`，与密钥文件分开；项目和命令行配置可以覆盖默认值。
 
-完整说明见 [配置与隔离](docs/configuration.md)，包括配置优先级、凭据权限、Docker / 外部沙箱与角色提示词。
+完整说明见 [配置与隔离](docs/configuration.md) 和 [权限与容器运行模式](docs/permissions-and-container-modes.md)，包括配置优先级、凭据权限、Docker / 外部沙箱与角色提示词。
 
 目前变更文件吸收有单文件 50 MiB、总量 200 MiB 的限制；持久快照与旧基线没有自动垃圾回收。统一边状态格式不自动迁移旧 root/Join 状态，升级前应保留需要接续的旧状态和匹配程序。详见 [统一边设计](docs/unified-edge-design.md)。
 
