@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/earendil-works/pi.git",
+  "commit": "7fbbd5f4a1d982bb02d63472dde0774fa639f99b",
+  "node_minimum": "22.19.0",
+  "install": ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+  "build": ["npm", "run", "build:offline"],
+  "tools": {
+    "read": "packages/coding-agent/dist/core/tools/read.js:createReadToolDefinition",
+    "write": "packages/coding-agent/dist/core/tools/write.js:createWriteToolDefinition",
+    "list": "packages/coding-agent/dist/core/tools/ls.js:createLsToolDefinition",
+    "bash": "packages/coding-agent/dist/core/tools/bash.js:createBashToolDefinition"
+  }
+}

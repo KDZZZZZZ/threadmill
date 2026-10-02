@@ -37,7 +37,29 @@ func main() {
 	seed := flag.Int64("seed", 42, "随机种子")
 	repo := flag.String("repo", "", "基线仓目录；空则生成 fixture（-live-root 设定时 fixture 建在同盘以启用 reflink）")
 	workdir := flag.String("workdir", "", "运行根目录；空则用临时目录")
+	traceOut := flag.String("trace-out", "", "导出固定种子的 JSON trace 后退出；使用 -repo 或 -workdir 保存 fixture")
+	traceIn := flag.String("trace-in", "", "严格回放 JSON trace；需要已提交的 -repo 和空的 -workdir")
+	sandbox := flag.String("sandbox", "external", "trace 回放执行边界：external 或 bwrap")
+	cache := flag.Bool("cache", false, "trace 回放启用命令结果缓存")
+	dependencyTracing := flag.Bool("dependency-tracing", false, "trace 回放开启 strace；不可用时硬失败")
+	verifyRate := flag.Float64("cache-verify-sample-rate", 0.01, "trace 回放命中抽样验证比例")
+	jsonOut := flag.String("json-out", "", "trace 回放 JSON 指标输出文件")
+	retain := flag.Bool("retain", true, "trace 回放收集持久 checkpoint，计入 collect 延迟")
 	flag.Parse()
+
+	if *traceOut != "" || *traceIn != "" {
+		err := traceCLI(*traceOut, *traceIn, *jsonOut,
+			traceGeneration{Agents: *agents, Turns: *turns, Files: *files, FileBytes: *fileKB * 1024,
+				Seed: *seed, Think: *thinkMult, Scale: *timeScale},
+			*commandDuty,
+			replayOptions{Repo: *repo, Workdir: *workdir, LiveRoot: *liveRoot, Sandbox: *sandbox,
+				Slots: *slots, Cache: *cache, Tracing: *dependencyTracing, Retain: *retain, Verify: *verifyRate})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "tmload:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if err := run(
 		*agents, *turns, *slots, *files, *fileKB,
