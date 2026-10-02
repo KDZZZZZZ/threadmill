@@ -63,6 +63,21 @@ Solid arrows are the only allowed business dependencies. Dashed arrows are persi
 | Persistent State | Atomic save and load, compatibility, corruption detection, cleanup, and recovery | Store component state through component-owned Store interfaces. Graph and activation progress use schema version 1 and reject legacy root/Join state; no automatic converter exists. Keep immutable Graph Outputs separate from activation Inputs and pending export journals. Persist the real-directory task ID and creation-time task mode. Started role recovery rebinds existing real files without reinstalling the original input. Historical outputs retain their original floor. Older version-1 tasks default to isolated mode; obsolete publication metadata grants no directory ownership. Must not otherwise make task decisions or replay model and tool side effects implicitly. The Command Result Cache is the single sanctioned exception for tool side effects, and only within the boundary stated in its own row: file effects confined to the current live workspace, replayed only when every inferred dependency still holds |
 | Logs and Monitoring | Event schema, correlation, human-readable timelines, bounded metrics, performance breakdowns, snapshots, and alerts | Observation is one-way. Monitoring must not alter control flow or retain prompts, model deltas, secrets, or arbitrary file contents |
 
+## 命令缓存与评测边界（2026-10-02）
+
+Human Design：拆分运行时 `home/` 与 `tmp/`；HOME 输入使用 `~/` 依赖，仅放行 `.cache/go-build`、`go/pkg/mod` 等已指定内容寻址缓存，HOME 其他写入拒绝缓存；记录全部树外读取与负向探测；保留输出头尾；bash 支持 `fresh` 与缓存标注；按退出码、写集、仅输出分类对账；暴露重车道和内存预算；补齐运行时指标。正式对照为 Pi 原生工具 + worktree，同一已提交 fixture 和 JSON trace；修复合入后再固定 commit 测量，Harbor A 审计先于 B。
+
+Agent Self-Claimed：以下实现都留在原有 Execution Sandbox → Command Result Cache → 当前 live VFS 边界内，无新业务依赖箭头、业务角色或生产依赖。
+
+- 每个执行环境独享 HOME 和 TMPDIR；HOME 读取在记录与查找时映射同一 `~/` 路径。Maven repository 不在白名单，外部依赖状态包含 device、inode、mode、size、mtime、ctime；替换时保留 mtime 仍会失效。`ENOENT` 与 `ENOTDIR` 均按不存在校验。
+- bwrap 依赖校验使用实际只读绑定列表，不能用沙箱不可见的宿主文件校验。无宿主 backing 的虚拟内容读取拒绝缓存；仅已知结构节点的 metadata 类型可复用。`O_PATH` 不是目录枚举，readlink 的返回文字不是另一个输入路径。进程的 cwd/root/fd 不能拿缓存进程自身的状态替代。固定 `/dev/null` EOF 只在宿主设备身份与 `--dev` 语义一致时映射。
+- 缓存键保持原始命令并使旧缺少 HOME/树外依赖的索引失效；后端布局、输出上限与头尾截断版本进入环境摘要。AST/尾部管道相似性仅作有界诊断；尚未根据未经审计的数据改变执行键、生产者缓存或角色提示。`Peek` 只校验，不更新计数、LRU 或回放文件。
+- 潜在时间加权命中率为 `matched_duration / (matched_duration + executed_duration - verification_duration)`。实际复用率为 `saved_duration / (saved_duration + executed_duration)`；只有成功 replay 才计 saved，影子重跑不计节省。角色为固定集合，创建者写入条目；跨角色验证率在已启用采样时至少 0.1。miss/reject 分类、近似 miss、lookup/store 耗时均进入 snapshot，观测数据不含命令或路径。
+- `exec.heavy_slots`、`exec.heavy_threshold`（秒）、`exec.memory_budget_mb` 接到已有调度准入。`exec.require_dependency_tracing` 要求启动准入通过；`-exec-doctor` 由执行层做真实边界内探针，输出 tracing 能力与是否启用两个字段，不创建模型驱动 Manager。没有 tracer 或不具备 ptrace/所选边界能力时告警，严格评测模式硬失败。
+- OverlayFS 代码保留其明确条件：`NewPersistentStoreWithOptions` 先做 project→VFS 的 reflink 准入，再建立 floor；只有 `options.Overlay` 为真且 floor→root 不可 reflink 时才保留 overlay driver（`internal/vfs/store.go`）。正常同文件系统准入走 reflink；旧 `98ed7d3` 只能作为另行适配、固定 patch 的历史组。
+
+已核对的横向参考：Pi [`7fbbd5f4 tools/index.ts`](https://github.com/earendil-works/pi/blob/7fbbd5f4a1d982bb02d63472dde0774fa639f99b/packages/coding-agent/src/core/tools/index.ts) 与 [`tools.test.ts`](https://github.com/earendil-works/pi/blob/7fbbd5f4a1d982bb02d63472dde0774fa639f99b/packages/coding-agent/test/tools.test.ts) 的原生文件/命令及截断边界；deepseek-harness [`c291e796 bash-local/src/index.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/c291e7961a515f6d7af9304e7fd1d257929aef26/packages/shell/bash-local/src/index.ts) 与 [`tests/executor.spec.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/c291e7961a515f6d7af9304e7fd1d257929aef26/packages/shell/bash-local/tests/executor.spec.ts) 的 cwd/env/超时行为；Eino [`9d983b36 backend_inmemory.go`](https://github.com/cloudwego/eino/blob/9d983b36a5112a1c233056b1a099825298fafb8f/adk/filesystem/backend_inmemory.go) 与 [`backend_inmemory_test.go`](https://github.com/cloudwego/eino/blob/9d983b36a5112a1c233056b1a099825298fafb8f/adk/filesystem/backend_inmemory_test.go) 的文件 backend 契约。后两者所查部分未提供可照搬的观察读集命令缓存。缓存行为来自本项目人类要求，原生工具速度不等于生产隔离能力。测量规则、来源与限制由后续 harness 提交中的可复现性能协议单独交付。
+
 ## Evaluation
 
 | Module | Evaluation dimensions | Evidence from logs and monitoring |

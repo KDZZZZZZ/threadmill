@@ -64,7 +64,7 @@ func runExternalWorkspaceSandbox(
 	helperArgs = append(helperArgs, args...)
 	cmd := osexec.CommandContext(ctx, executable, helperArgs...)
 	cmd.Dir = live
-	cmd.Env = networkSandboxEnv(tempDir, tempDir)
+	cmd.Env = networkSandboxEnv(filepath.Join(tempDir, "home"), filepath.Join(tempDir, "tmp"))
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: unix.CLONE_NEWNS | unix.CLONE_NEWPID,
 		Pdeathsig:  syscall.SIGKILL,

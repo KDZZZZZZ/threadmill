@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/KDZZZZZZ/threadmill/internal/vfs"
 )
 
 // traceProgram 是读集推断依赖的外部程序。
@@ -50,10 +53,11 @@ type traceRun struct {
 	output string
 	// hostOutput 是同一个文件在宿主上的路径，执行结束后由调用方读取并删除。
 	hostOutput string
-	// root 与 tmp 是解析追踪时的沙箱路径映射：root 是 live 树的挂载点，
-	// tmp 是 per-env 临时目录（既不是依赖也不是产物）。
-	root string
-	tmp  string
+	// root、tmp 和 home 是工作区、临时目录和用户目录的沙箱路径映射。
+	root     string
+	tmp      string
+	home     string
+	hostHome string
 	// pgid 是被执行命令所在的进程组。-D 让 strace 留在该组但不再成为
 	// 前台命令的父进程，因此前台退出后仍存活的组表示追踪尚未闭合。
 	pgid int
@@ -180,41 +184,124 @@ func (t *traceRun) wrap(argv []string) []string {
 }
 
 var (
-	traceProbeOnce sync.Once
-	traceProbePath string
+	traceProbeOnce   sync.Once
+	traceProbePath   string
+	traceProbeReason string
 )
 
 // tracerPath 返回可用的追踪器路径，不可用返回空串。
 //
-// 追踪器必须在沙箱内也能执行。bwrap 只把 /usr、/bin、/lib 这些目录只读绑进去，
-// 装在别处的 strace 在沙箱里根本不存在，所以这里要求它位于被绑定的前缀下。
+// 先验证版本与实际 ptrace 启动能力；每个后端再验证沙箱内能力。
 func tracerPath() string {
 	traceProbeOnce.Do(func() {
 		resolved, err := osexec.LookPath(traceProgram)
 		if err != nil {
+			traceProbeReason = "not_found"
 			return
 		}
 		abs, err := filepath.Abs(resolved)
 		if err != nil {
+			traceProbeReason = "not_found"
 			return
 		}
-		for _, prefix := range []string{"/usr/", "/bin/", "/sbin/"} {
-			if strings.HasPrefix(abs, prefix) {
-				traceProbePath = abs
+		if target, err := filepath.EvalSymlinks(abs); err == nil {
+			abs = target
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		version, err := osexec.CommandContext(ctx, abs, "-V").Output()
+		major, minor := 0, 0
+		_, versionText, found := strings.Cut(string(version), "version ")
+		parsed, _ := fmt.Sscanf(versionText, "%d.%d", &major, &minor)
+		if err != nil || !found || parsed != 2 || major < 5 || major == 5 && minor < 3 {
+			traceProbeReason = "unsupported_version"
+			return
+		}
+		dir, err := os.MkdirTemp("", "threadmill-trace-probe-")
+		if err != nil {
+			traceProbeReason = "probe_failed"
+			return
+		}
+		defer os.RemoveAll(dir)
+		trace := &traceRun{program: abs, output: filepath.Join(dir, "trace")}
+		defer func() {
+			if trace.pgid <= 0 {
 				return
 			}
+			if active, _ := processGroupState(trace.pgid); active {
+				_ = syscall.Kill(-trace.pgid, syscall.SIGKILL)
+				waitForProcessGroupExit(trace.pgid, traceClassifyDelay)
+			}
+		}()
+		args := trace.wrap([]string{"/bin/sh", "-c", "true"})
+		result, err := collect(ctx, osexec.CommandContext(ctx, args[0], args[1:]...), 1024, trace.tracker(nil))
+		if err != nil || result.ExitCode != 0 || !trace.finish() {
+			traceProbeReason = "probe_failed"
+			return
 		}
+		info, statErr := os.Stat(trace.output)
+		if statErr != nil || info.Size() == 0 {
+			traceProbeReason = "probe_failed"
+			return
+		}
+		traceProbePath = abs
 	})
 	return traceProbePath
 }
 
-// newTraceRun 为一次执行准备追踪配置。tempDir 是该 env 的运行时目录，
-// 在 bwrap 与 external 后端里都同时充当命令的 TMPDIR。
-func newTraceRun(program, live, tempDir, sandboxRoot, sandboxTmp string) (*traceRun, error) {
+// ProbeDependencyTracing tests tracing in the selected sandbox without a model
+// call or enabling cache reuse. Cache-off benchmarks can use the same capability gate.
+func (s *Scheduler) ProbeDependencyTracing(ctx context.Context) (ok bool, reason string) {
+	if s == nil || s.sandbox == sandboxNone {
+		return false, "sandbox_unavailable"
+	}
+	if s.sandbox == sandboxDocker {
+		return false, "docker_tracing_unsupported"
+	}
+	program := tracerPath()
+	if program == "" {
+		return false, traceProbeReason
+	}
+	if s.sandbox == sandboxBwrap && !strings.HasPrefix(program, "/usr/") && !strings.HasPrefix(program, "/bin/") {
+		return false, "tracer_outside_sandbox"
+	}
+	if s.externalWorkspaceIsolation && !s.externalWorkspaceIsolationAvailable {
+		return false, "workspace_isolation_unavailable"
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	live, err := os.MkdirTemp("", "threadmill-sandbox-trace-probe-")
+	if err != nil {
+		return false, "probe_failed"
+	}
+	defer os.RemoveAll(live)
+	id := filepath.Base(live)
+	defer func() {
+		if err := s.Reap(id); err != nil {
+			ok, reason = false, "probe_cleanup_failed"
+		}
+	}()
+	result, trace, err := s.runSandboxed(ctx, vfs.NewStore(live), live, "true", id, true)
+	defer trace.discard()
+	if err != nil || result.ExitCode != 0 || trace == nil || trace.incomplete {
+		return false, "probe_failed"
+	}
+	info, err := os.Stat(trace.hostOutput)
+	if err != nil || info.Size() == 0 {
+		return false, "probe_failed"
+	}
+	if obs, observed := trace.observe(); !observed || obs.Incomplete {
+		return false, "probe_failed"
+	}
+	return true, ""
+}
+
+// newTraceRun 把追踪文件放在该环境的 tmp/，与可作为依赖的 home/ 分开。
+func newTraceRun(program, live, runtimeDir, sandboxRoot, sandboxTmp, home string) (*traceRun, error) {
 	if program == "" {
 		return nil, nil
 	}
-	file, err := os.CreateTemp(tempDir, ".tmtrace-")
+	file, err := os.CreateTemp(filepath.Join(runtimeDir, "tmp"), ".tmtrace-")
 	if err != nil {
 		return nil, fmt.Errorf("exec: create trace file: %w", err)
 	}
@@ -228,6 +315,8 @@ func newTraceRun(program, live, tempDir, sandboxRoot, sandboxTmp string) (*trace
 		hostOutput: file.Name(),
 		root:       sandboxRoot,
 		tmp:        sandboxTmp,
+		home:       home,
+		hostHome:   filepath.Join(runtimeDir, "home"),
 	}, nil
 }
 
@@ -242,10 +331,19 @@ func (t *traceRun) discard() {
 //
 // 有意排除 HOME 与 TMPDIR：它们是 per-env 的运行时目录，每个 agent 都不同，
 // 算进键里会让缓存永远无法跨 agent 复用——而那正是这个特性存在的理由。
-// 它们的内容也不进读集，所以排除不会漏掉依赖。
-func cacheEnvHash(backend string) string {
+// HOME 的非内容寻址缓存区通过 ~/ 相对路径进入读集；TMPDIR 只供临时文件。
+func cacheEnvHash(backend string, outputCap int) string {
 	hasher := sha256.New()
 	fmt.Fprintf(hasher, "backend\t%s\n", backend)
+	fmt.Fprintf(hasher, "output\thead-tail-v1\t%d\n", outputCap)
+	if backend == "bwrap" {
+		fmt.Fprintln(hasher, "virtual-stat\ttype-v1")
+		fmt.Fprintln(hasher, "fixed-eof\tdev-null-v1")
+		fmt.Fprintf(hasher, "layout\t%s\t%s\t/tmp\n", bwrapWorkspace, sandboxHome)
+		for _, path := range bwrapReadOnlyPaths {
+			fmt.Fprintf(hasher, "ro-bind-try\t%s\n", path)
+		}
+	}
 	fmt.Fprintf(hasher, "PATH\t%s\n", os.Getenv("PATH"))
 	fmt.Fprintf(hasher, "LANG\tC.UTF-8\n")
 	for _, name := range forwardedEnvironment {

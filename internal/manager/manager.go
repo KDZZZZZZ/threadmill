@@ -142,8 +142,8 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 		debug.SetMemoryLimit(int64(file.Memory.SoftMemoryLimitMB) << 20)
 	}
 	// 命令结果缓存跨进程共享：缓存目录挂在项目状态目录下，同一项目的另一个
-	// Threadmill 进程指向同一份产物存储。构造失败不该让整个进程起不来，
-	// 缓存只是加速，不是正确性的一部分。
+	// Threadmill 进程指向同一份产物存储。显式启用时构造失败必须报错；
+	// 执行时无法确认依赖的单条结果则拒绝缓存，仍返回真实执行结果。
 	var commandCache *cmdcache.Cache
 	if file.Exec.Cache.Enabled {
 		commandCache, err = cmdcache.New(cmdcache.Config{
@@ -171,19 +171,20 @@ func Open(parent context.Context, opt Options) (*Manager, error) {
 	s.stores = coordination.Stores{
 		Memory: memory,
 		Files:  files,
-		Exec: tmexec.New(tmexec.Config{
-			Slots:                      file.Exec.Slots,
-			Timeout:                    time.Duration(file.Exec.Timeout) * time.Second,
-			OutputCapKB:                file.Exec.OutputCapKB,
-			ContainerImage:             file.Exec.ContainerImage,
-			ExternalSandbox:            file.Exec.ExternalSandbox,
-			ExternalWorkspaceIsolation: file.Exec.ExternalWorkspaceIsolation,
-			Cache:                      commandCache,
-			DisableTrace:               file.Exec.Cache.DisableTrace,
-		}),
+		Exec:   tmexec.New(executionConfig(file, commandCache)),
 	}
 	if status := s.stores.Exec.Stats(); status.SandboxBackend == "unavailable" || status.WorkspaceIsolation == "unavailable" {
 		return nil, errors.Join(fmt.Errorf("manager: required execution sandbox is unavailable; complete installation preflight before opening a project"), files.Close())
+	}
+	if file.Exec.RequireDependencyTracing {
+		status := s.stores.Exec.Stats()
+		ok, reason := status.DependencyTracing, status.DependencyTracingReason
+		if !file.Exec.Cache.Enabled {
+			ok, reason = s.stores.Exec.ProbeDependencyTracing(parent)
+		}
+		if !ok {
+			return nil, errors.Join(fmt.Errorf("manager: required dependency tracing unavailable: %s", reason), files.Close())
+		}
 	}
 	s.graph.SetProgressStore(progress)
 	if err := s.graph.SetTaskSink(s.stores.ProjectManagerTaskInfos); err != nil {
@@ -737,6 +738,7 @@ func (s *Manager) logSnapshot() {
 		"exec_heavy_peak_active", snapshot.Exec.HeavyPeakActive,
 		"exec_heavy_wait_duration", snapshot.Exec.HeavyWaitDuration,
 		"exec_dependency_tracing", snapshot.Exec.DependencyTracing,
+		"exec_dependency_tracing_reason", snapshot.Exec.DependencyTracingReason,
 		"cmdcache_lookups", snapshot.Exec.Cache.Lookups,
 		"cmdcache_hits", snapshot.Exec.Cache.Hits,
 		"cmdcache_stores", snapshot.Exec.Cache.Stores,
@@ -749,6 +751,29 @@ func (s *Manager) logSnapshot() {
 		"cmdcache_verifications", snapshot.Exec.Cache.Verifications,
 		"cmdcache_verify_mismatches", snapshot.Exec.Cache.VerifyMismatches,
 		"cmdcache_saved_duration", snapshot.Exec.Cache.SavedDuration,
+		"cmdcache_matched_duration", snapshot.Exec.Cache.MatchedDuration,
+		"cmdcache_executed_duration", snapshot.Exec.Cache.ExecutedDuration,
+		"cmdcache_verification_duration", snapshot.Exec.Cache.VerificationDuration,
+		"cmdcache_time_weighted_hit_rate", snapshot.Exec.Cache.TimeWeightedHitRate,
+		"cmdcache_time_weighted_reuse_rate", snapshot.Exec.Cache.TimeWeightedReuseRate,
+		"cmdcache_replays", snapshot.Exec.Cache.Replays,
+		"cmdcache_miss_no_key", snapshot.Exec.Cache.MissNoKey,
+		"cmdcache_miss_read_set", snapshot.Exec.Cache.MissReadSet,
+		"cmdcache_miss_artifacts", snapshot.Exec.Cache.MissArtifacts,
+		"cmdcache_miss_corrupt", snapshot.Exec.Cache.MissCorrupt,
+		"cmdcache_miss_path_types", snapshot.Exec.Cache.MissPathTypes,
+		"cmdcache_rejected_reasons", snapshot.Exec.Cache.RejectedReasons,
+		"cmdcache_roles", snapshot.Exec.Cache.Roles,
+		"cmdcache_cross_role_hits", snapshot.Exec.Cache.CrossRoleHits,
+		"cmdcache_verify_exit_mismatches", snapshot.Exec.Cache.VerifyExitMismatches,
+		"cmdcache_verify_write_mismatches", snapshot.Exec.Cache.VerifyWriteMismatches,
+		"cmdcache_verify_output_mismatches", snapshot.Exec.Cache.VerifyOutputMismatches,
+		"cmdcache_verify_unavailable", snapshot.Exec.Cache.VerifyUnavailable,
+		"cmdcache_lookup_duration", snapshot.Exec.Cache.LookupDuration,
+		"cmdcache_lookup_max_duration", snapshot.Exec.Cache.LookupMaxDuration,
+		"cmdcache_store_duration", snapshot.Exec.Cache.StoreDuration,
+		"cmdcache_near_miss_ast", snapshot.Exec.Cache.NearMissAST,
+		"cmdcache_near_miss_pipeline", snapshot.Exec.Cache.NearMissPipeline,
 		"vfs_environments", snapshot.VFS.Environments,
 		"vfs_live_dirs", snapshot.VFS.LiveDirs,
 		"vfs_overlay_files", snapshot.VFS.OverlayFiles,

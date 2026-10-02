@@ -117,6 +117,24 @@ func TestOpenRejectsUnavailableExecutionSandbox(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsRequiredTracingBeforeCallingModel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	file := loadRepoConfig(t)
+	file.Exec.Cache.Enabled = true
+	file.Exec.Cache.DisableTrace = true
+	file.Exec.RequireDependencyTracing = true
+	opened, err := Open(context.Background(), Options{
+		Root: t.TempDir(), File: file,
+		Provider: stubProvider(func(context.Context, agent.Request) (agent.AssistantMessage, error) {
+			t.Fatal("model called before tracing admission")
+			return agent.AssistantMessage{}, nil
+		}),
+	})
+	if opened != nil || err == nil || !strings.Contains(err.Error(), "required dependency tracing unavailable") {
+		t.Fatalf("Open = %v, %v, want tracing admission failure", opened, err)
+	}
+}
+
 func TestOpenLoadsConfigOutsideProject(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	project := t.TempDir()

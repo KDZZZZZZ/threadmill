@@ -40,6 +40,10 @@ type FileView interface {
 type Cmd struct {
 	Command string
 	Timeout time.Duration
+	// Fresh 绕过命令缓存的读取与存储，用于显式重新执行。
+	Fresh bool
+	// Role 用于有界的缓存角色观测，不参与缓存键。
+	Role string
 }
 
 // ExecResult 是命令跑完后的合流输出。
@@ -48,6 +52,10 @@ type ExecResult struct {
 	Output   string
 	// PeakRSSBytes 是命令进程树观测到的常驻内存峰值（/proc 轮询采样），0 表示未计量。
 	PeakRSSBytes uint64
+	// CachedSegments 与历史耗时只描述本次实际回放的命令段。
+	CachedSegments     int
+	CacheSavedDuration time.Duration
+	CacheCreatorRole   string
 }
 
 // ExecView 是某个环境的命令执行视图。

@@ -2080,6 +2080,52 @@ exec:
 	}
 }
 
+func TestLoadConfigAcceptsExecResourceControls(t *testing.T) {
+	root := t.TempDir()
+	content := []byte(`llm:
+  provider: openai-responses
+  base_url: https://api.openai.com/v1
+  credential: test
+  model: gpt-5
+exec:
+  heavy_slots: 2
+  heavy_threshold: 30
+  memory_budget_mb: 4096
+  require_dependency_tracing: true
+`)
+	if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadConfig(root)
+	if err != nil {
+		t.Fatalf("LoadConfig() rejects execution resource controls: %v", err)
+	}
+	if got.Exec.HeavySlots != 2 || got.Exec.HeavyThreshold != 30 || got.Exec.MemoryBudgetMB != 4096 || !got.Exec.RequireDependencyTracing {
+		t.Fatalf("execution resource controls not preserved: %+v", got.Exec)
+	}
+}
+
+func TestLoadConfigRejectsInvalidExecResourceControls(t *testing.T) {
+	for _, setting := range []string{
+		"heavy_slots: -1",
+		"heavy_threshold: -1",
+		"memory_budget_mb: -1",
+		"heavy_threshold: 9223372037",
+		"memory_budget_mb: 8796093022208",
+	} {
+		t.Run(setting, func(t *testing.T) {
+			root := t.TempDir()
+			content := []byte("llm:\n  provider: openai-responses\n  base_url: https://api.openai.com/v1\n  credential: test\n  model: gpt-5\nexec:\n  " + setting + "\n")
+			if err := os.WriteFile(filepath.Join(root, ConfigFileName), content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadConfig(root); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("LoadConfig(%q) error = %v, want ErrInvalidConfig", setting, err)
+			}
+		})
+	}
+}
+
 func TestLoadConfigAcceptsExecContainerImage(t *testing.T) {
 	root := t.TempDir()
 	content := []byte(`llm:

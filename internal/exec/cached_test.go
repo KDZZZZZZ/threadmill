@@ -48,7 +48,10 @@ func baseRepo(t *testing.T) string {
 }
 
 func TestCachedRootListingIncludesFilesAddedByAnotherAgent(t *testing.T) {
-	sched, cache := newCachedScheduler(t, Config{Slots: 1})
+	// GNU ls reads /proc/filesystems in bwrap; that virtual content has no
+	// immutable host backing, so use the external boundary for listing replay.
+	sched, cache := newCachedScheduler(t, Config{Slots: 1, ExternalSandbox: true})
+	t.Cleanup(func() { _ = sched.Reap("agent-a") })
 	files := vfs.NewStore(baseRepo(t))
 	command := env.Cmd{Command: "ls -1"}
 	first, err := sched.View("agent-a", files).Run(t.Context(), command)
@@ -92,7 +95,7 @@ func TestCacheReusesResultAndArtifactAcrossAgents(t *testing.T) {
 		t.Fatalf("first output = %q", first.Output)
 	}
 	if cache.Stats().Stores != 2 {
-		t.Fatalf("stores = %d, want 2 command segments", cache.Stats().Stores)
+		t.Fatalf("stores = %d, want 2 command segments; cache=%+v", cache.Stats().Stores, cache.Stats())
 	}
 
 	// 第二个 agent 改了与命令无关的文件：整树指纹会 miss，读集不该 miss。
@@ -106,7 +109,7 @@ func TestCacheReusesResultAndArtifactAcrossAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cache.Stats().Hits != 2 {
-		t.Fatalf("hits = %d, want 2", cache.Stats().Hits)
+		t.Fatalf("hits = %d, want 2; cache=%+v", cache.Stats().Hits, cache.Stats())
 	}
 	if second.Output != first.Output {
 		t.Fatalf("cached output = %q, want %q", second.Output, first.Output)
@@ -361,8 +364,8 @@ func TestSegmentedCacheStopsAfterSignaledShell(t *testing.T) {
 func TestSegmentedCacheKeepsOneOutputCap(t *testing.T) {
 	sched, _ := newCachedScheduler(t, Config{Slots: 1, OutputCapKB: 1})
 	files := vfs.NewStore(baseRepo(t))
-	const command = "head -c 800 /dev/zero | tr '\\0' a; head -c 800 /dev/zero | tr '\\0' b"
-	want := strings.Repeat("a", 800) + strings.Repeat("b", 224) + "\n[output truncated]"
+	const command = "printf '%0800d' 0 | tr 0 a; printf '%0800d' 0 | tr 0 b"
+	want := strings.Repeat("a", 512) + "\n[output truncated]\n" + strings.Repeat("b", 512)
 	for index, envID := range []string{"agent-a", "agent-b"} {
 		startedBefore := sched.Stats().Started
 		result, err := sched.View(envID, files).Run(context.Background(), env.Cmd{Command: command})
@@ -679,7 +682,10 @@ func TestSchedulerWorksWithoutCache(t *testing.T) {
 // 真实构建的验收：包装命令不同时，第二个 agent 仍必须复用实际
 // go build 段及其字节一致的二进制；只有新的廉价包装段真正执行。
 func TestCacheReusesRealGoBuild(t *testing.T) {
-	sched, cache := newCachedScheduler(t, Config{Slots: 4})
+	// Go reads /proc/self/exe; bwrap rejects that dynamic virtual dependency.
+	// Exercise build artifact replay where external stat validation is available.
+	sched, cache := newCachedScheduler(t, Config{Slots: 4, ExternalSandbox: true})
+	t.Cleanup(func() { _ = sched.Reap("agent-a"); _ = sched.Reap("agent-b") })
 	base := t.TempDir()
 	// go 1.16 这个下限任何更新的工具链都接受，免得测试跟宿主版本绑死。
 	mustWrite(t, base, "go.mod", "module demo\n\ngo 1.16\n")
@@ -691,10 +697,21 @@ func main() { fmt.Println("built by threadmill") }
 `)
 	mustWrite(t, base, "README.md", "docs\n")
 	files := vfs.NewStore(base)
+	// Newer Go toolchains write telemetry under HOME by default. Seed the same
+	// off policy before tracing so this fixture exercises replayable build work.
+	for _, id := range []string{"agent-a", "agent-b"} {
+		seed, err := sched.View(id, files).Run(t.Context(), env.Cmd{
+			Command: `mkdir -p "$HOME/.config/go/telemetry" && printf off > "$HOME/.config/go/telemetry/mode"`,
+			Fresh:   true,
+		})
+		if err != nil || seed.ExitCode != 0 {
+			t.Fatalf("seed telemetry policy = %+v, %v", seed, err)
+		}
+	}
 
 	// env 只影响构建段，不引入跨段 shell 状态。GOTOOLCHAIN=local 阻止
 	// 下载工具链，GOPATH/GOCACHE 指向 per-env 临时目录。
-	const build = "env GOTOOLCHAIN=local GOPATH=/tmp/gopath GOCACHE=/tmp/gocache go build -o app ."
+	const build = `env GOTOOLCHAIN=local bash -c 'GOPATH="$TMPDIR/gopath" GOCACHE="$TMPDIR/gocache" go build -o app .'`
 
 	coldStarted := time.Now()
 	first, err := sched.View("agent-a", files).Run(context.Background(), env.Cmd{

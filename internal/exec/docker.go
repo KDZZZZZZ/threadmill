@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	osexec "os/exec"
+	"path/filepath"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -32,7 +33,7 @@ func probeDocker(image string) bool {
 
 func runDocker(
 	ctx context.Context,
-	live, command, image string,
+	live, runtimeDir, command, image string,
 	capBytes int,
 	track func(int),
 ) (env.ExecResult, error) {
@@ -40,7 +41,7 @@ func runDocker(
 	cmd := osexec.CommandContext(
 		ctx,
 		"docker",
-		dockerArgs(live, image, name, os.Getuid(), os.Getgid(), command)...,
+		dockerArgs(live, runtimeDir, image, name, os.Getuid(), os.Getgid(), command)...,
 	)
 	result, err := collect(ctx, cmd, capBytes, track)
 	if ctx.Err() != nil || err != nil {
@@ -49,7 +50,7 @@ func runDocker(
 	return result, err
 }
 
-func dockerArgs(live, image, name string, uid, gid int, command string) []string {
+func dockerArgs(live, runtimeDir, image, name string, uid, gid int, command string) []string {
 	return []string{
 		"run",
 		"--pull=never",
@@ -64,11 +65,12 @@ func dockerArgs(live, image, name string, uid, gid int, command string) []string
 		"--memory-swap=1g",
 		"--user=" + strconv.Itoa(uid) + ":" + strconv.Itoa(gid),
 		"--volume=" + live + ":/workspace:rw",
+		"--volume=" + filepath.Join(runtimeDir, "home") + ":" + sandboxHome + ":rw",
+		"--volume=" + filepath.Join(runtimeDir, "tmp") + ":/tmp:rw",
 		"--workdir=/workspace",
-		"--tmpfs=/tmp:rw,exec,nosuid,nodev,size=512m",
-		"--env=HOME=/tmp",
+		"--env=HOME=" + sandboxHome,
 		"--env=TMPDIR=/tmp",
-		"--env=GOCACHE=/tmp/go-cache",
+		"--env=GOCACHE=" + sandboxHome + "/.cache/go-build",
 		"--env=LANG=C.UTF-8",
 		image,
 		"/bin/sh",

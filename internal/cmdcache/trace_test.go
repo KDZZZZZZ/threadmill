@@ -161,6 +161,65 @@ func TestParseTraceRecordsExternalExecutable(t *testing.T) {
 	}
 }
 
+func TestParseTraceRecordsAllExternalReads(t *testing.T) {
+	for _, tc := range []struct {
+		name, syscall, dependency string
+	}{
+		{"content", `openat(AT_FDCWD</workspace>, "/usr/lib/python3/site-packages/pytest.py", O_RDONLY) = 3`, "/usr/lib/python3/site-packages/pytest.py"},
+		{"directory", `openat(AT_FDCWD</workspace>, "/usr/lib/python3/site-packages", O_RDONLY|O_DIRECTORY) = 3`, "/usr/lib/python3/site-packages"},
+		{"missing import", `newfstatat(AT_FDCWD</workspace>, "/opt/site-packages/new_plugin.py", 0x1, 0) = -1 ENOENT (No such file or directory)`, "/opt/site-packages/new_plugin.py"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obs, err := ParseTrace(strings.NewReader("1 "+tc.syscall+"\n"), "/workspace", "/tmp", traceLimit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(obs.Externals, []string{tc.dependency}) || !obs.Cacheable() {
+				t.Fatalf("external read omitted: %+v", obs)
+			}
+		})
+	}
+}
+
+func TestParseTraceTracksOpenedSymlinkTargetOutsideWorkspace(t *testing.T) {
+	obs, err := ParseTrace(strings.NewReader(`1 openat(AT_FDCWD</workspace>, "dependency", O_RDONLY) = 3</opt/site-packages/plugin.py>
+`), "/workspace", "/tmp", traceLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Reads["dependency"] != ReadFile || !reflect.DeepEqual(obs.Externals, []string{"/opt/site-packages/plugin.py"}) {
+		t.Fatalf("opened target omitted: %+v", obs)
+	}
+}
+
+func TestParseTraceTracksHomeAndRejectsNonCacheWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name, access string
+		read         string
+		cacheable    bool
+	}{
+		{"home configuration", `openat(AT_FDCWD</workspace>, "/home/agent/.config/tool.conf", O_RDONLY) = 3`, "~/.config/tool.conf", true},
+		{"mutable Maven repository read", `openat(AT_FDCWD</workspace>, "/home/agent/.m2/repository/settings.xml", O_RDONLY) = 3`, "~/.m2/repository/settings.xml", true},
+		{"mutable Maven repository write", `openat(AT_FDCWD</workspace>, "/home/agent/.m2/repository/settings.xml", O_WRONLY|O_CREAT|O_TRUNC) = 3`, "", false},
+		{"Go build cache", `openat(AT_FDCWD</workspace>, "/home/agent/.cache/go-build/abc-d", O_RDWR|O_CREAT) = 3`, "", true},
+		{"Go module cache", `openat(AT_FDCWD</workspace>, "/home/agent/go/pkg/mod/cache/download/x.zip", O_RDWR|O_CREAT) = 3`, "", true},
+		{"temporary output", `openat(AT_FDCWD</workspace>, "/tmp/intermediate", O_RDWR|O_CREAT) = 3`, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obs, err := ParseTraceWithHome(strings.NewReader("1 "+tc.access+"\n"), "/workspace", "/tmp", "/home/agent", traceLimit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.read != "" && obs.Reads[tc.read] != ReadFile {
+				t.Fatalf("missing HOME dependency %q: %+v", tc.read, obs)
+			}
+			if obs.Cacheable() != tc.cacheable || len(obs.Writes) != 0 || (tc.read == "" && len(obs.Reads) != 0) {
+				t.Fatalf("wrong HOME/TMP classification: %+v", obs)
+			}
+		})
+	}
+}
+
 // execve 的 argv 在 [...] 里，不能被当成路径参数解析出来。
 func TestParseTraceDoesNotTreatArgvAsPaths(t *testing.T) {
 	obs := parseFixture(t, `1 execve("/usr/bin/cat", ["cat", "a.txt"], 0x7ffd /* 62 vars */) = 0
@@ -267,6 +326,43 @@ func TestParseTraceUpgradesStattedDirectoryToReadDir(t *testing.T) {
 `)
 	if got := obs.Reads["internal"]; got != ReadDir {
 		t.Fatalf("internal read kind = %v, want ReadDir", got)
+	}
+}
+
+func TestParseTracePathHandlesDoNotReadDirectoryEntries(t *testing.T) {
+	obs, err := ParseTrace(strings.NewReader(`1 openat(AT_FDCWD</workspace>, "/", O_RDONLY|O_PATH|O_DIRECTORY) = 3</>
+1 openat(3</>, "etc", O_RDONLY|O_NOFOLLOW|O_PATH) = 4</etc>
+1 openat(AT_FDCWD</workspace>, "/dev/tty", O_RDWR|O_NONBLOCK) = -1 ENXIO (No such device or address)
+`), "/workspace", "/tmp", traceLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, abs := range []string{"/", "/etc", "/dev/tty"} {
+		if got := obs.ExternalReads[abs]; got != ReadStat {
+			t.Fatalf("%s kind = %v, want metadata", abs, got)
+		}
+	}
+}
+
+func TestParseTraceReadlinkResultIsNotAnotherPathRead(t *testing.T) {
+	obs, err := ParseTrace(strings.NewReader(`1 readlinkat(AT_FDCWD</workspace>, "/usr/lib/go/src", "../../share/go/src", 128) = 18
+`), "/workspace", "/tmp", traceLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(obs.Externals) != 1 || obs.Externals[0] != "/usr/lib/go/src" {
+		t.Fatalf("readlink output was treated as a filesystem read: %v", obs.Externals)
+	}
+}
+
+func TestParseTraceTruncatedReadlinkOutputIsNotATruncatedPath(t *testing.T) {
+	obs, err := ParseTrace(strings.NewReader(`1 readlinkat(AT_FDCWD</workspace>, "/proc/self/exe", "/usr/local/share/threadmill-benc"..., 128) = 51
+`), "/workspace", "/tmp", traceLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Incomplete || obs.ExternalReads["/proc/self/exe"] != ReadFile {
+		t.Fatalf("truncated output must not discard an intact readlink input: %+v", obs)
 	}
 }
 

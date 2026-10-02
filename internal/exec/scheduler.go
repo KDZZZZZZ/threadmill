@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -54,9 +55,10 @@ type Config struct {
 	// Cache 打开命令结果缓存：依赖文件版本一致的环境可以复用彼此的执行
 	// 结果与产物。nil 表示关闭。
 	Cache *cmdcache.Cache
-	// DisableTrace 关闭系统调用追踪。追踪不可用时缓存仍能工作，
-	// 只是退化成整树指纹键：命中率低，但绝不会错命中。
+	// DisableTrace 关闭系统调用追踪，同时关闭命令缓存复用。
 	DisableTrace bool
+	// DependencyTracing enables tracing even when Cache is nil, for measured baselines.
+	DependencyTracing bool
 }
 
 // Scheduler 用信号量限制并发，并把命令跑进某个 env 的 live 目录。
@@ -75,8 +77,10 @@ type Scheduler struct {
 	counters schedulerCounters
 	costs    *costTable
 
-	cache   *cmdcache.Cache
-	tracing bool
+	cache             *cmdcache.Cache
+	tracing           bool
+	tracingReason     string
+	traceWithoutCache bool
 
 	heavy          chan struct{}
 	heavyThreshold time.Duration
@@ -140,8 +144,9 @@ type Stats struct {
 	HeavyWaitDuration       time.Duration `json:"heavy_wait_duration"`
 	// Cache 是命令结果缓存的累计计数；未启用时为零值。
 	Cache cmdcache.Stats `json:"cache"`
-	// DependencyTracing 表示读集推断是否可用。为假时缓存退化成整树指纹键。
-	DependencyTracing bool `json:"dependency_tracing"`
+	// DependencyTracing 表示读集推断是否可用。为假时命令缓存不复用结果。
+	DependencyTracing       bool   `json:"dependency_tracing"`
+	DependencyTracingReason string `json:"dependency_tracing_reason,omitempty"`
 }
 
 // New 创建调度器。Slots <= 0 时用 runtime.NumCPU()。
@@ -176,7 +181,7 @@ func New(cfg Config) *Scheduler {
 	}
 	s.memBudget = cfg.MemoryBudgetBytes
 	s.cache = cfg.Cache
-	s.tracing = cfg.Cache != nil && !cfg.DisableTrace && tracerPath() != ""
+	s.traceWithoutCache = cfg.DependencyTracing
 	if cfg.ExternalSandbox {
 		s.sandbox = sandboxExternal
 		s.externalWorkspaceIsolation = cfg.ExternalWorkspaceIsolation
@@ -185,6 +190,15 @@ func New(cfg Config) *Scheduler {
 		}
 	} else {
 		s.sandbox = probeSandbox(cfg.ContainerImage)
+	}
+	if cfg.DisableTrace {
+		s.tracingReason = "disabled"
+	} else if cfg.Cache != nil || cfg.DependencyTracing {
+		s.tracing, s.tracingReason = s.ProbeDependencyTracing(context.Background())
+		if !s.tracing {
+			backend, _ := s.isolationBoundary()
+			slog.Warn("exec: dependency tracing unavailable; command cache disabled", "reason", s.tracingReason, "backend", backend)
+		}
 	}
 	for range n {
 		s.slots <- struct{}{}
@@ -234,6 +248,7 @@ func (s *Scheduler) Stats() Stats {
 		HeavyWaitDuration:       c.heavyWaitDuration,
 		Cache:                   s.cache.Stats(),
 		DependencyTracing:       s.tracing,
+		DependencyTracingReason: s.tracingReason,
 	}
 }
 
@@ -301,9 +316,17 @@ func (v execView) Run(ctx context.Context, spec env.Cmd) (result env.ExecResult,
 	}
 
 	var segments []commandSegment
-	cacheable := v.sched.cacheEnabled()
+	cacheable := v.sched.cacheEnabled() && !spec.Fresh
 	if cacheable {
 		segments, cacheable = planCacheCommand(spec.Command)
+	}
+	home := ""
+	if cacheable {
+		dir, err := v.sched.runtimeDir(ctx, v.envID, live)
+		if err != nil {
+			return env.ExecResult{}, err
+		}
+		home = filepath.Join(dir, "home")
 	}
 	segmented := len(segments) > 0
 	if !segmented {
@@ -337,19 +360,25 @@ segmentLoop:
 		}
 		command := segment.cacheCommand(lastExit)
 		// 缓存查找在拿槽之前；分段命中会先回放产物，后段立即看得到。
-		key := v.sched.cacheKey(command)
+		key := v.sched.cacheKey(command, spec.Role)
 		var hit *cmdcache.Entry
 		if cacheable {
-			hit = v.sched.lookupCache(live, key)
+			hit = v.sched.lookupCache(live, home, key)
 		}
 		verifying := false
 		if hit != nil {
 			switch {
-			case v.sched.cache.ShouldVerify():
-				v.sched.cache.RecordVerification()
+			case v.sched.cache.ShouldVerify(key.Role, hit.CreatorRole):
 				verifying = true
-			case v.sched.cache.Replay(live, hit) == nil:
+			case v.sched.cache.Replay(live, hit, key.Role) == nil:
 				out := cachedResult(hit)
+				result.CachedSegments += out.CachedSegments
+				result.CacheSavedDuration += out.CacheSavedDuration
+				if result.CacheCreatorRole == "" {
+					result.CacheCreatorRole = out.CacheCreatorRole
+				} else if result.CacheCreatorRole != out.CacheCreatorRole {
+					result.CacheCreatorRole = "mixed"
+				}
 				lastExit = out.ExitCode
 				result.ExitCode = lastExit
 				if segmented {
@@ -390,11 +419,17 @@ segmentLoop:
 				live,
 				command,
 				v.envID,
-				cacheable,
+				cacheable || v.sched.tracing && v.sched.traceWithoutCache,
 			)
 		}
 		took := time.Since(segmentStarted)
-		fresh := v.sched.storeTrace(ctx, live, key, trace, out, runErr, took)
+		v.sched.cache.RecordExecution(spec.Role, took, verifying)
+		var fresh *cmdcache.Entry
+		if cacheable {
+			fresh = v.sched.storeTrace(ctx, live, key, trace, out, runErr, took)
+		} else {
+			trace.discard()
+		}
 		if verifying {
 			v.sched.reconcileVerification(key, hit, fresh)
 		}
@@ -630,7 +665,7 @@ func (s *Scheduler) runSandboxed(
 		}
 		// live 位于独立的 /workspace；/proc 等系统挂载不再落进项目根，
 		// 追踪器仍可用同一个前缀把访问映射回工作区相对路径。
-		trace, err := newTraceRun(tracer, live, runtimeDir, bwrapWorkspace, "/tmp")
+		trace, err := newTraceRun(tracer, live, runtimeDir, bwrapWorkspace, "/tmp", sandboxHome)
 		if err != nil {
 			return env.ExecResult{}, nil, err
 		}
@@ -645,7 +680,11 @@ func (s *Scheduler) runSandboxed(
 		}
 		return result, trace, err
 	case sandboxDocker:
-		result, err := runDocker(ctx, live, command, s.image, s.outputCap, func(pgid int) {
+		runtimeDir, err := s.runtimeDir(ctx, envID, live)
+		if err != nil {
+			return env.ExecResult{}, nil, err
+		}
+		result, err := runDocker(ctx, live, runtimeDir, command, s.image, s.outputCap, func(pgid int) {
 			s.track(envID, pgid)
 		})
 		return result, nil, err
@@ -665,7 +704,7 @@ func (s *Scheduler) runSandboxed(
 		if err != nil {
 			return env.ExecResult{}, nil, err
 		}
-		trace, err := newTraceRun(tracer, live, runtimeDir, workspace, runtimeDir)
+		trace, err := newTraceRun(tracer, live, runtimeDir, workspace, filepath.Join(runtimeDir, "tmp"), filepath.Join(runtimeDir, "home"))
 		if err != nil {
 			return env.ExecResult{}, nil, err
 		}
@@ -700,7 +739,12 @@ func (s *Scheduler) runtimeDir(ctx context.Context, envID, live string) (string,
 	if err != nil {
 		return "", fmt.Errorf("exec: create runtime dir: %w", err)
 	}
-	if err := seedGradleHome(ctx, dir); err != nil {
+	for _, subdir := range []string{"home", "tmp"} {
+		if err := os.Mkdir(filepath.Join(dir, subdir), 0o700); err != nil {
+			return "", errors.Join(fmt.Errorf("exec: prepare runtime directory: %w", err), removeRuntimeDir(dir))
+		}
+	}
+	if err := seedGradleHome(ctx, filepath.Join(dir, "home")); err != nil {
 		return "", errors.Join(fmt.Errorf("exec: prepare Gradle home: %w", err), removeRuntimeDir(dir))
 	}
 	s.mu.Lock()
@@ -882,31 +926,45 @@ func runtimeDirRemainedAbsent(dir string, quiet time.Duration) (bool, error) {
 }
 
 type capBuffer struct {
-	buf bytes.Buffer
-	cap int
-	hit bool
+	buf     bytes.Buffer
+	cap     int
+	hit     bool
+	tailPos int
 }
 
 func (c *capBuffer) Write(p []byte) (int, error) {
-	if c.cap > 0 {
-		remain := c.cap - c.buf.Len()
-		if remain <= 0 {
-			c.hit = true
-			return len(p), nil
-		}
-		if len(p) > remain {
-			_, _ = c.buf.Write(p[:remain])
-			c.hit = true
-			return len(p), nil
-		}
+	if c.cap <= 0 {
+		return c.buf.Write(p)
 	}
-	return c.buf.Write(p)
+	n := len(p)
+	keep := min(n, c.cap-c.buf.Len())
+	_, _ = c.buf.Write(p[:keep])
+	p = p[keep:]
+	if len(p) == 0 {
+		return n, nil
+	}
+	c.hit = true
+	tail := c.buf.Bytes()[c.cap-c.cap/2:]
+	if len(tail) == 0 {
+		return n, nil
+	}
+	if len(p) >= len(tail) {
+		copy(tail, p[len(p)-len(tail):])
+		c.tailPos = 0
+	} else {
+		written := copy(tail[c.tailPos:], p)
+		copy(tail, p[written:])
+		c.tailPos = (c.tailPos + len(p)) % len(tail)
+	}
+	return n, nil
 }
 
 func (c *capBuffer) String() string {
-	out := c.buf.String()
-	if c.hit {
-		out += "\n[output truncated]"
+	if !c.hit {
+		return c.buf.String()
 	}
-	return out
+	head := c.cap - c.cap/2
+	tail := c.buf.Bytes()[head:]
+	return string(c.buf.Bytes()[:head]) + "\n[output truncated]\n" +
+		string(tail[c.tailPos:]) + string(tail[:c.tailPos])
 }

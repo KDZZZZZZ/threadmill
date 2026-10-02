@@ -3,6 +3,7 @@ package cmdcache
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,10 +11,15 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // stateAbsent 是不存在路径的状态串。负依赖靠它表达。
 const stateAbsent = "absent"
+
+func absentPath(err error) bool {
+	return os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR)
+}
 
 // typeStatePrefix 标识只比对类型的元数据状态串。
 const typeStatePrefix = "t:"
@@ -30,7 +36,7 @@ func pathTypeState(root, rel string) (string, error) {
 	}
 	info, err := os.Lstat(full)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if absentPath(err) {
 			return stateAbsent, nil
 		}
 		return "", fmt.Errorf("cmdcache: stat %q: %w", rel, err)
@@ -91,7 +97,7 @@ func pathStateExcluding(root, rel string, managed map[string]struct{}) (string, 
 	}
 	info, err := os.Lstat(full)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if absentPath(err) {
 			return stateAbsent, nil
 		}
 		return "", fmt.Errorf("cmdcache: stat %q: %w", rel, err)

@@ -80,6 +80,26 @@ func TestParseHelp(t *testing.T) {
 	}
 }
 
+func TestExecDoctorNeverOpensManagerOrRequestsSetup(t *testing.T) {
+	var out strings.Builder
+	code := Run([]string{"-C", "/workspace", "-exec-doctor"}, IO{
+		Out: &out, Err: io.Discard,
+		Open: func(context.Context, manager.Options) (*manager.Manager, error) {
+			t.Fatal("doctor opened a model-driven manager")
+			return nil, nil
+		},
+		ExecutionDoctor: func(_ context.Context, opt manager.Options) (manager.ExecutionDiagnostics, error) {
+			if opt.Root != "/workspace" {
+				t.Fatalf("root = %q", opt.Root)
+			}
+			return manager.ExecutionDiagnostics{DependencyTracing: true, Backend: "external"}, nil
+		},
+	})
+	if code != 0 || !strings.Contains(out.String(), `"exec_dependency_tracing":true`) {
+		t.Fatalf("doctor exit=%d output=%q", code, out.String())
+	}
+}
+
 func TestRunPrintOpensWorkspace(t *testing.T) {
 	var root string
 	var configPath string
