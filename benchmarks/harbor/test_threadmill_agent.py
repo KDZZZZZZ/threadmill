@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import struct
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+import yaml
 
 from harbor.agents.model_connection import ResolvedModelConnection
 from harbor.models.agent.context import AgentContext
@@ -18,6 +23,134 @@ from benchmarks.harbor.threadmill_agent import (
 
 
 class ThreadmillAgentTest(unittest.TestCase):
+    def test_doctor_prepares_install_directories_as_root_and_keeps_image_user(self):
+        from benchmarks.harbor.doctor import check
+
+        prepared, calls = False, []
+        setup = "mount_namespace=yes\nrepo_to_vfs_reflink=yes\nstrace_version=6.8\nstrace_probe=yes\n"
+
+        def process(command, **kwargs):
+            nonlocal prepared
+            command = list(command)
+            calls.append(command)
+            stdout = ""
+            if command[:2] == ["docker", "info"]:
+                stdout = json.dumps({"Driver": "btrfs", "DockerRootDir": "/dedicated/data"})
+            elif command[:3] == ["docker", "image", "inspect"]:
+                stdout = json.dumps([{"Id": "sha256:task", "Config": {"User": "agent"}}])
+            elif command[0] == "findmnt":
+                stdout = "btrfs"
+            elif command[-1] == "-V":
+                stdout = "strace -- version 6.8"
+            elif command[:2] == ["docker", "exec"]:
+                if "--user" in command and "mkdir -p" in command[-1] and command[command.index("--user") + 1] == "root":
+                    prepared = True
+                stdout = setup
+                if "-exec-doctor" in command:
+                    self.assertNotIn("--user", command)
+                    stdout = '{"exec_dependency_tracing":true,"exec_dependency_tracing_enabled":true}'
+            elif command[:2] == ["docker", "cp"] and "/installed-agent/" in command[-1] and not prepared:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="install directory missing")
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary, tracer = root / "threadmill", root / "strace"
+            binary.touch()
+            elf = bytearray(120)
+            elf[:16] = b"\x7fELF\x02\x01\x01" + b"\x00" * 9
+            struct.pack_into("<HHIQQQIHHHHHH", elf, 16,
+                             2, 62, 1, 0, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+            struct.pack_into("<IIQQQQQQ", elf, 64, 1, 5, 0, 0, 0, len(elf), len(elf), 4096)
+            tracer.write_bytes(elf)
+            with patch("benchmarks.harbor.doctor.subprocess.run", side_effect=process):
+                result = check(binary=binary, tracer=tracer, image="task/image",
+                               workspace="/workspace/repo", runtime="test-harbor")
+            self.assertTrue(result["ok"], result["failures"])
+            self.assertNotIn("--user", next(call for call in calls if call[:2] == ["docker", "create"]))
+
+    def test_cache_modes_follow_existing_exec_cache_schema(self) -> None:
+        for mode, enabled, rate in (("off", False, .01), ("shadow", True, 1.0), ("live", True, .01)):
+            config = yaml.safe_load(_runtime_config("https://example.test/v1", "model", 128000,
+                                                    None, cache_mode=mode))
+            self.assertEqual(config["exec"]["cache"], {"enabled": enabled, "verify_sample_rate": rate})
+            self.assertNotIn("cache", config)
+
+    def test_install_rejects_dynamic_tracer_without_upload(self) -> None:
+        class Environment:
+            async def upload_file(self, source, destination):
+                self.uploaded = True
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            binary = root / "threadmill"
+            binary.touch()
+            environment = Environment()
+            environment.uploaded = False
+            agent = Threadmill(root, binary=binary, tracer="/bin/sh",
+                               model_name="openai/model")
+            with self.assertRaisesRegex(ValueError, "static"):
+                asyncio.run(agent.install(environment))
+            self.assertFalse(environment.uploaded)
+
+    def test_install_rejects_failed_reflink_before_run(self) -> None:
+        class Environment:
+            async def upload_file(self, source, destination):
+                return None
+
+        class ProbeThreadmill(Threadmill):
+            setup = "mount_namespace=yes\nrepo_to_vfs_reflink=no\nstrace_version=6.8\nstrace_probe=yes\n"
+
+            async def exec_as_root(self, environment, command, **kwargs):
+                return SimpleNamespace(stdout=self.setup)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            binary = root / "threadmill"
+            binary.touch()
+            tracer = root / "strace"
+            elf = bytearray(120)
+            elf[:16] = b"\x7fELF\x02\x01\x01" + b"\x00" * 9
+            struct.pack_into("<HHIQQQIHHHHHH", elf, 16,
+                             2, 62, 1, 0, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+            struct.pack_into("<IIQQQQQQ", elf, 64,
+                             1, 5, 0, 0, 0, len(elf), len(elf), 4096)
+            tracer.write_bytes(elf)
+            agent = ProbeThreadmill(root, binary=binary, tracer=tracer,
+                                    model_name="openai/model")
+
+            with self.assertRaisesRegex(RuntimeError, "repo_to_vfs_reflink"):
+                asyncio.run(agent.install(Environment()))
+
+            agent.setup = "mount_namespace=yes\nrepo_to_vfs_reflink=yes\nstrace_version=5.2\nstrace_probe=yes\n"
+            with self.assertRaisesRegex(RuntimeError, "strace.*5.3"):
+                asyncio.run(agent.install(Environment()))
+
+    def test_run_rejects_unavailable_tracing_before_model_command(self) -> None:
+        class ProbeThreadmill(Threadmill):
+            @property
+            def model_connection(self) -> ResolvedModelConnection:
+                return ResolvedModelConnection(api_key="test-key", base_url="https://example.test/v1")
+
+            async def _write_configuration(self, *args, **kwargs):
+                return None
+
+            async def exec_as_agent(self, environment, command, **kwargs):
+                self.calls.append(command)
+                return SimpleNamespace(stdout='{"exec_dependency_tracing": false}')
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            binary = root / "threadmill"
+            binary.touch()
+            agent = ProbeThreadmill(root, binary=binary, model_name="openai/model")
+            agent.calls = []
+            with self.assertRaisesRegex(RuntimeError, "exec_dependency_tracing"):
+                asyncio.run(agent.run("do it", object(), AgentContext()))
+            self.assertEqual(len(agent.calls), 1)
+            self.assertIn("-exec-doctor", agent.calls[0])
+            self.assertNotIn("-p ", agent.calls[0])
+
     def test_runtime_config_uses_external_harbor_boundary(self) -> None:
         config = _runtime_config(
             "https://example.test/v1",
@@ -36,6 +169,7 @@ class ThreadmillAgentTest(unittest.TestCase):
             "exec:\n"
             "  external_sandbox: true\n"
             "  external_workspace_isolation: true\n"
+            "  require_dependency_tracing: true\n"
             "  slots: 32\n"
             "vfs:\n",
             config,
@@ -148,6 +282,10 @@ class ThreadmillAgentTest(unittest.TestCase):
 
             async def exec_as_agent(self, environment, command, **kwargs):
                 self.calls.append({"command": command, **kwargs})
+                return SimpleNamespace(stdout=json.dumps({
+                    "exec_dependency_tracing": True,
+                    "exec_dependency_tracing_enabled": True,
+                }))
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -175,8 +313,9 @@ class ThreadmillAgentTest(unittest.TestCase):
 
             asyncio.run(agent.run("do it", object(), AgentContext()))
 
-            self.assertEqual(len(agent.calls), 1)
-            call = agent.calls[0]
+            self.assertEqual(len(agent.calls), 2)
+            self.assertIn("-exec-doctor", str(agent.calls[0]["command"]))
+            call = agent.calls[1]
             self.assertEqual(call.get("timeout_sec"), 22200)
             self.assertEqual(call.get("cwd"), "/app")
             self.assertIn("-C /app ", str(call["command"]))

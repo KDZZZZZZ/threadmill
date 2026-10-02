@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
+import struct
 import tomllib
 from pathlib import Path, PurePosixPath
 from typing import Any, override
@@ -28,6 +30,40 @@ _RUN_TIMEOUT_HEADROOM_SEC = 600
 _DEFAULT_RUN_TIMEOUT_SEC = 144_000
 
 
+def _require_static_tracer(path: Path | None) -> None:
+    if path is None:
+        raise ValueError("THREADMILL_STRACE_BINARY must point to a static strace >= 5.3")
+    data = path.read_bytes()
+    try:
+        if data[:4] != b"\x7fELF" or data[4] not in (1, 2) or data[5] not in (1, 2):
+            raise ValueError("not ELF")
+        endian = "<" if data[5] == 1 else ">"
+        wide = data[4] == 2
+        word = "Q" if wide else "I"
+        phoff = struct.unpack_from(endian + word, data, 32 if wide else 28)[0]
+        size, count = struct.unpack_from(endian + "HH", data, 54 if wide else 42)
+        if not count or size < (56 if wide else 32) or phoff + size * count > len(data):
+            raise ValueError("invalid program headers")
+        for index in range(count):
+            offset = phoff + size * index
+            kind = struct.unpack_from(endian + "I", data, offset)[0]
+            if kind == 3:  # PT_INTERP requires a container dynamic loader.
+                raise ValueError("dynamic interpreter")
+            if kind == 2:  # Static PIE is allowed only without DT_NEEDED libraries.
+                start = struct.unpack_from(endian + word, data, offset + (8 if wide else 4))[0]
+                length = struct.unpack_from(endian + word, data, offset + (32 if wide else 16))[0]
+                if start + length > len(data):
+                    raise ValueError("invalid dynamic section")
+                for entry in range(start, start + length, 16 if wide else 8):
+                    tag = struct.unpack_from(endian + word, data, entry)[0]
+                    if tag == 0:
+                        break
+                    if tag == 1:
+                        raise ValueError("dynamic library")
+    except (ValueError, IndexError, struct.error) as error:
+        raise ValueError(f"strace must be a static ELF executable: {path}") from error
+
+
 def _yaml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -38,6 +74,7 @@ def _runtime_config(
     context_window: int,
     exec_slots: int | None,
     model_proxy: str | None = None,
+    cache_mode: str | None = None,
 ) -> str:
     lines = [
         "llm:",
@@ -49,11 +86,18 @@ def _runtime_config(
         "exec:",
         "  external_sandbox: true",
         "  external_workspace_isolation: true",
+        "  require_dependency_tracing: true",
     ]
     if model_proxy:
         lines.insert(3, f"  proxy_url: {_yaml_string(model_proxy)}")
     if exec_slots is not None:
         lines.append(f"  slots: {exec_slots}")
+    if cache_mode:
+        lines.extend([
+            "  cache:",
+            f"    enabled: {'false' if cache_mode == 'off' else 'true'}",
+            f"    verify_sample_rate: {1.0 if cache_mode == 'shadow' else 0.01}",
+        ])
     lines.extend(
         [
             "vfs:",
@@ -102,6 +146,7 @@ class ThreadmillRunner:
         exec_slots: int | None = None,
         model_proxy: str | None = None,
         workspace: str = "/workspace/repo",
+        cache_mode: str | None = None,
         **kwargs: Any,
     ) -> None:
         candidate = binary or os.environ.get("THREADMILL_BINARY")
@@ -112,6 +157,7 @@ class ThreadmillRunner:
         self._binary = Path(candidate).expanduser().resolve()
         if not self._binary.is_file():
             raise FileNotFoundError(f"Threadmill binary not found: {self._binary}")
+        tracer = tracer or os.environ.get("THREADMILL_STRACE_BINARY")
         self._tracer = None if tracer is None else Path(tracer).expanduser().resolve()
         if self._tracer is not None and not self._tracer.is_file():
             raise FileNotFoundError(f"strace binary not found: {self._tracer}")
@@ -125,6 +171,9 @@ class ThreadmillRunner:
         if not self._workspace.is_absolute():
             raise ValueError("workspace must be an absolute container path")
         self._model_proxy = model_proxy
+        if cache_mode not in (None, "off", "shadow", "live"):
+            raise ValueError("cache_mode must be off, shadow, or live")
+        self._cache_mode = cache_mode
         super().__init__(*args, **kwargs)
 
     @staticmethod
@@ -134,6 +183,7 @@ class ThreadmillRunner:
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
+        _require_static_tracer(self._tracer)
         await environment.upload_file(self._binary, _REMOTE_BINARY.as_posix())
         if self._tracer is not None:
             await environment.upload_file(self._tracer, _REMOTE_TRACER.as_posix())
@@ -143,16 +193,18 @@ class ThreadmillRunner:
             if self._tracer is not None
             else ""
         )
-        await self.exec_as_root(
+        result = await self.exec_as_root(
             environment,
             command=(
+                "set -eu; "
                 f"chmod 0755 {shlex.quote(_REMOTE_BINARY.as_posix())}; "
                 f"{tracer_chmod}"
                 f"mkdir -p {shlex.quote(_REMOTE_LOGS.as_posix())} "
                 f"{shlex.quote(_REMOTE_VFS.as_posix())}; "
                 f"probe=$(mktemp -d {_REMOTE_VFS.as_posix()}/probe.XXXXXX); "
+                f"repo_probe=$(mktemp {workspace}/.threadmill-reflink-probe.XXXXXX); "
                 "trap 'umount \"$probe/merged\" >/dev/null 2>&1 || true; "
-                "rm -rf \"$probe\"' EXIT; "
+                "rm -rf \"$probe\"; rm -f \"$repo_probe\"' EXIT; "
                 "{ "
                 "printf 'utc='; date -u +%FT%TZ; "
                 "printf 'identity='; id; "
@@ -185,14 +237,30 @@ class ThreadmillRunner:
                 "\"$probe/lower\" \"$probe/merged\" 2>/dev/null; then "
                 "printf 'mount_namespace=yes\\n'; "
                 "else printf 'mount_namespace=no\\n'; fi; "
-                f"if cp --reflink=always {workspace}/.git/HEAD "
-                "\"$probe/reflink\" 2>/dev/null; then printf 'repo_to_vfs_reflink=yes\\n'; "
+                "dd if=/dev/urandom of=\"$repo_probe\" bs=4096 count=1 status=none; "
+                "if test -s \"$repo_probe\" && cp --reflink=always \"$repo_probe\" "
+                "\"$probe/reflink\" 2>/dev/null && cmp \"$repo_probe\" \"$probe/reflink\"; "
+                "then printf 'repo_to_vfs_reflink=yes\\n'; "
                 "else printf 'repo_to_vfs_reflink=no\\n'; fi; "
+                "printf 'strace_version='; "
+                f"{_REMOTE_TRACER.as_posix()} -V 2>/dev/null | "
+                "sed -n '1s/^.* version //p'; "
+                f"if {_REMOTE_TRACER.as_posix()} -qq -f -yy -e trace=%file "
+                "-o \"$probe/strace.log\" sh -c 'cat \"$1\" >/dev/null' _ \"$repo_probe\" "
+                "2>/dev/null && grep -Fq \"$repo_probe\" \"$probe/strace.log\"; "
+                "then printf 'strace_probe=yes\\n'; else printf 'strace_probe=no\\n'; fi; "
                 f"}} >{shlex.quote((_REMOTE_LOGS / 'setup.txt').as_posix())} 2>&1; "
-                f"grep -qx 'mount_namespace=yes' "
-                f"{shlex.quote((_REMOTE_LOGS / 'setup.txt').as_posix())}"
+                f"cat {shlex.quote((_REMOTE_LOGS / 'setup.txt').as_posix())}"
             ),
         )
+        setup = (result.stdout or "").splitlines()
+        for requirement in ("mount_namespace", "repo_to_vfs_reflink", "strace_probe"):
+            if f"{requirement}=yes" not in setup:
+                raise RuntimeError(f"Threadmill preflight failed: {requirement}")
+        version = next((line for line in setup if line.startswith("strace_version=")), "")
+        match = re.fullmatch(r"strace_version=(\d+)\.(\d+)(?:[.\w-]*)", version)
+        if not match or tuple(map(int, match.groups())) < (5, 3):
+            raise RuntimeError(f"Threadmill preflight requires strace >= 5.3: {version}")
 
     async def _write_configuration(
         self,
@@ -231,6 +299,7 @@ class ThreadmillRunner:
                 self._context_window,
                 self._exec_slots,
                 self._model_proxy,
+                self._cache_mode,
             ),
             remote_path=_REMOTE_CONFIG.as_posix(),
             filename="config.yaml",
@@ -285,6 +354,28 @@ class ThreadmillRunner:
 
         home = shlex.quote(_REMOTE_HOME.as_posix())
         logs = shlex.quote(_REMOTE_LOGS.as_posix())
+        runtime_env = {"HOME": _REMOTE_HOME.as_posix(), "TMPDIR": _REMOTE_TMP.as_posix()}
+        diagnostic = await self.exec_as_agent(
+            environment,
+            command=(
+                f"{shlex.quote(_REMOTE_BINARY.as_posix())} "
+                f"-C {shlex.quote(self._workspace.as_posix())} "
+                f"-config {shlex.quote(_REMOTE_CONFIG.as_posix())} -exec-doctor "
+                f"| tee {logs}/preflight.json"
+            ),
+            env=runtime_env,
+            cwd=self._workspace.as_posix(),
+            timeout_sec=60,
+        )
+        try:
+            preflight = json.loads(diagnostic.stdout or "")
+        except (ValueError, TypeError) as error:
+            raise RuntimeError("Threadmill preflight missing exec_dependency_tracing") from error
+        if preflight.get("exec_dependency_tracing") is not True:
+            raise RuntimeError("Threadmill preflight failed: exec_dependency_tracing")
+        expected_enabled = self._cache_mode != "off"
+        if preflight.get("exec_dependency_tracing_enabled") is not expected_enabled:
+            raise RuntimeError("Threadmill preflight failed: exec_dependency_tracing_enabled")
         command = (
             "set +e; "
             f"{shlex.quote(_REMOTE_BINARY.as_posix())} "
@@ -326,10 +417,7 @@ class ThreadmillRunner:
         await self.exec_as_agent(
             environment,
             command=command,
-            env={
-                "HOME": _REMOTE_HOME.as_posix(),
-                "TMPDIR": _REMOTE_TMP.as_posix(),
-            },
+            env=runtime_env,
             cwd=self._workspace.as_posix(),
             timeout_sec=self._run_timeout_sec(),
         )

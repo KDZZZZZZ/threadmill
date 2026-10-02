@@ -2,6 +2,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from pier.agents.installed.base import BaseInstalledAgent
 from pier.models.agent.context import AgentContext
@@ -14,6 +15,7 @@ class ThreadmillPierTest(unittest.TestCase):
         class CapturingThreadmill(Threadmill):
             async def exec_as_agent(self, environment, command, **kwargs):
                 self.calls.append((command, kwargs))
+                return SimpleNamespace(stdout='{"exec_dependency_tracing": true, "exec_dependency_tracing_enabled": true}')
 
         class Environment:
             async def upload_file(self, source, destination):
@@ -36,6 +38,7 @@ class ThreadmillPierTest(unittest.TestCase):
             self.assertEqual(agent.version(), "test")
             self.assertEqual(agent.network_allowlist().domains, ["model.example"])
             asyncio.run(agent.run("fix the task", Environment(), AgentContext()))
+            self.assertTrue(any("-exec-doctor" in call[0] for call in agent.calls))
             command, options = agent.calls[-1]
             self.assertEqual(options["cwd"], "/app")
             self.assertIn("-C /app ", command)

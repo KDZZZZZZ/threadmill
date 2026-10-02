@@ -32,7 +32,7 @@ const traceProgram = "strace"
 //	-D              让被执行命令保持调用方的直接子进程；后台后代不会拖住前台结果
 //	-f              跟踪子进程：真正读文件的是编译器和测试进程，不是 shell
 //	-y              打印 fd 对应的解析后路径，省掉自己跟踪 dirfd 与 chdir
-//	--seccomp-bpf   让内核过滤非目标系统调用，开销从数倍降到个位数百分比
+//	--seccomp-bpf   让内核过滤非目标系统调用；追踪开销须单独实测
 //	-e trace=...    %file 覆盖一切带路径的调用，%network 用来发现出站流量
 //
 // 不能加 `-e status=successful`：ENOENT 正是负依赖，探测过但不存在的路径
