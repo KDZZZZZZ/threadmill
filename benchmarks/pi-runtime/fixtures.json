@@ -1,0 +1,18 @@
+{
+  "synthetic": {
+    "files": 3000,
+    "file_bytes": 4096,
+    "contents": "0123456789 repeated to file_bytes",
+    "directories": "src/pkg-(index modulo 64)"
+  },
+  "real": {
+    "repository": "https://github.com/ipython/ipython.git",
+    "commit": "0bb317d10fdcb3aa13beb1031d5f10e5b821203b",
+    "tracked_files": 473,
+    "regular_file_bytes": 7481778,
+    "benchmark_task": "DeepSWE ipython-session-bundle-replay",
+    "task_dataset_commit": "435ee89ec2f2e2289f33b0da4f992f0b7b7266b9",
+    "task_source": "tasks/ipython-session-bundle-replay/environment/Dockerfile",
+    "scope": "committed source only; task dependencies are unnecessary for the stage3 runtime trace"
+  }
+}
