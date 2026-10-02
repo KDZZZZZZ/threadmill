@@ -27,11 +27,11 @@
 | Go 缓存 | Pi 的共享 GOCACHE 可使 `go test` 自带 `(cached)` 成为强对照，Threadmill 开缓存不保证更快 |
 | pytest 缓存 | 确定性重跑的净收益预计为正；追踪与入库成本可能使短命令净收益为负 |
 
-每个 fixture、backend 单独判定：最低并发档的 3 次 wall 中位数 × 1.25 为阈值；全部 3 次零错误且 wall 中位数不超过阈值的最高档为“有效峰值”；“稳定宽度”为它的前一档。若最低档已无合格结果，报告无有效峰值；若仅最低档合格，稳定宽度为未确定。原始失败不能删除或替换。文件写、fork、collect 的每次 P50/P95 再取 3 次中位数。三个重复不足时不作正式容量结论。
+每个 fixture、backend 单独判定：最低并发档的 3 次 wall 中位数 × 1.25 为阈值；全部 3 次零错误且 wall 中位数不超过阈值的最高档为“有效峰值”；“稳定宽度”为它的前一档。这个名称只是事前规则选出的档位，仍须逐行核验该档的原始错误与终态，才能声称它已验证稳定。若最低档已无合格结果，报告无有效峰值；若仅最低档合格，稳定宽度为未确定。原始失败不能删除或替换。文件写、fork、collect 的每次 P50/P95 再取 3 次中位数。三个重复不足时不作正式容量结论。
 
 ## 固定输入和 trace
 
-`go build -o /path/to/tmload ./cmd/tmload`。导出不执行负载；回放不重新采样。每档导出一份 trace，三个重复和各 backend 共用该文件，报告原始文件 SHA-256。
+`go build -buildvcs=true -o /path/to/tmload ./cmd/tmload`，随后用 `go version -m` 确认 exact `vcs.revision` 与 `vcs.modified=false`。本机 [Go 1.24.2 的 VCS 发现](https://github.com/golang/go/blob/go1.24.2/src/cmd/go/internal/vcs/vcs.go)只接受 `.git` 目录，不能从 worktree 的 `.git` 文件盖章；这种情况下从相同固定提交的干净完整检出构建，不放宽门禁。导出不执行负载；回放不重新采样。每档导出一份 trace，三个重复和各 backend 共用该文件，报告原始文件 SHA-256。
 
 ```sh
 python3 benchmarks/pi-runtime/bench.py fixture --repo /dedicated/fixtures/synthetic
@@ -45,6 +45,12 @@ JSON v1：`version`、`seed`、`fixture {kind,files,file_bytes,commit}`、可选
 双方验证 `fixture.commit == git rev-parse HEAD` 且 fixture clean。Threadmill 以该 commit 的 `git archive` 作为 content-only floor（明确排除 `.git`），Pi checkout 同一树，保留其固有 `.git` 指针；trace 不访问 Git 元数据。所有 Git 操作 `gc.auto=0`，这是对 Pi 有利的去噪设置。
 
 Threadmill collect 显式执行 `Absorb + Archive`，保存 `checkpoint-<agent-id>`；release 执行调度器 Reap、Release、Discard 原工作环境。持久 reflink checkpoint 保留到测量结束。Pi collect 为 `git add -A && git commit --allow-empty`，branch 与 commit 对象保留到测量结束；release 为 `git worktree remove --force`。Archive 不隐藏在 setup 或 cleanup 中。`setup_ns` 单列源码读取、floor 建立/原生工具导入，`wall_ns` 为所有 Agent 完整生命周期。
+
+Pi harness 对同一个 common gitdir 的 `worktree add/remove` 使用同一 FIFO；等待完整计入原 fork/release timer 与 wall。Git 2.43.0 的 [add_worktree](https://github.com/git/git/blob/v2.43.0/builtin/worktree.c) 会先建立管理目录与 HEAD，再写 commondir，另一次生命周期操作在 [get_worktrees](https://github.com/git/git/blob/v2.43.0/worktree.c) 枚举时可观察到半初始化条目。文件工具、bash、每个 worktree 的 `git add/commit` 仍并发；一个失败的生命周期请求会返回失败，队列继续处理后续请求。
+
+两阶段均检查 Threadmill 的 `runtime_cleanup_errors`、`runtime_dirs`、执行 active/queued、heavy active/queued、tracked process groups，以及 VFS materialize/absorb/overlay active 终态必须为零，缺失字段也拒绝。`operation_errors` 保留工具操作错误数，`terminal_state_errors` 单列异常；异常行的 errors 至少加一，不能以操作 errors 为零进入容量或缓存成功结论。retained checkpoint 的环境数与持久 backing 目录不当成活跃执行泄漏。
+
+旧 `formal-20261002` 尝试的 10 行原始数据与登记全部保留为 `harness-invalid/method-debug`：未协调的共享 Git 生命周期出现 commondir 竞态，不能推导 Pi 容量。方法修正经新 PR 合入后，固定新 commit，在独立目录重新登记；失败尝试不覆盖、不并入新正式数据。
 
 真实仓准备入口：`fixture --source-repo /benchmark/task/repo --commit <full-sha1>`。选择 DeepSWE `ipython-session-bundle-replay` 的 [ipython/ipython@0bb317d10fdcb3aa13beb1031d5f10e5b821203b](https://github.com/ipython/ipython/tree/0bb317d10fdcb3aa13beb1031d5f10e5b821203b)，源于 dataset `435ee89ec2f2e2289f33b0da4f992f0b7b7266b9` 的该题 `environment/Dockerfile`；473 个 tracked files、7,481,778 个 regular file bytes，来源登记在 [fixtures.json](../benchmarks/pi-runtime/fixtures.json)。这是真实中型代码库，文件数少于合成仓，结果不用于证明“文件数越多越有利”。选题、具体来源、文件数、字节数、fixture SHA-1 必须在登记 JSON 中记录，正式矩阵不能用未说明来源的宿主工作区替代。Git LFS/submodule 的物化内容若不在 commit 树中，需要先形成独立已提交 fixture 并记录来源。
 
@@ -93,7 +99,7 @@ python3 benchmarks/cache-runtime/bench.py --language pytest \
   --tmload /path/to/tmload --pi-source /cache/pi
 ```
 
-追踪税单独以 cache off 比较 dependency tracing on/off，每种 10 个独立完整 trace。每个重复固定选择第一个 Agent 的第一条全量测试命令（当前 `agent-0`、operation index 1），从其 `operation.duration_ns` 提取一个样本，开/关各 10 个，导出 `BenchmarkCommand/<language>` 行；完整 trace wall 同时导出 `BenchmarkReplay/<language>` 行，用 `benchstat off.txt on.txt` 一并比较。登记 JSON 写明原始命令、Agent/index 与固定采样规则。单命令时长包括这次 `Exec.Run` 的物化、调度、执行追踪和 Absorb 边界；它不是裸子进程时长。所有样本来自已有回放，不额外运行命令。
+追踪税单独以 cache off 比较 dependency tracing on/off，每种 10 个独立完整 trace。每个重复固定选择第一个 Agent 的第一条全量测试命令（当前 `agent-0`、operation index 1），从其 `operation.duration_ns` 提取一个样本，开/关各 10 个，导出 `BenchmarkCommand/<language>` 行；完整 trace wall 同时导出 `BenchmarkReplay/<language>` 行，用 `benchstat off.txt on.txt` 一并比较。登记 JSON 写明原始命令、Agent/index 与固定采样规则。单命令时长包括这次 `Exec.Run` 的按需物化、调度等待、执行及依赖追踪；Absorb 计入 collect，不属于单命令时长。它不是裸子进程时长。所有样本来自已有回放，不额外运行命令。
 
 缓存 wall 对比包括 lookup/入库/replay；快照包含 `saved_duration`、`store_duration`、lookup 耗时。净收益主证据为相同 trace 的 cache-off/untraced wall − cache-on/traced wall；分解同时报告时间节省 − 实测完整 trace 追踪税 − 入库耗时，并注明跨进程 warm cache/等待/重叠造成的不可精确相加项。负值照实保留。
 

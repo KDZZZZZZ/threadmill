@@ -106,7 +106,7 @@ def tracing_command(trace):
     index, operation = next((index, operation) for index, operation in enumerate(agent["operations"]) if operation["op"] == "bash")
     return {"agent": agent["id"], "index": index, "command": operation["command"],
             "sampling_rule": "first agent's first full test command, once per fresh repeated replay",
-            "timing_scope": "Exec.Run duration, including materialize and Absorb boundaries"}
+            "timing_scope": "Exec.Run duration, including on-demand materialize, scheduler queue, execution and dependency tracing; Absorb is timed in collect"}
 
 
 def command_ns(result, selected):
@@ -213,6 +213,7 @@ def compare(args):
                 raise RuntimeError(f"{label} failed before producing a report; see {report_path.with_suffix('.log')}")
             result = json.loads(report_path.read_text())
             result.update(group=group, repeat=repeat + 1, process_exit=code)
+            runtime.check_terminal_state(result)
             if group == "cache-on-traced":
                 result["oracle"] = oracle_report(result)
             results.setdefault(group, []).append(result)
