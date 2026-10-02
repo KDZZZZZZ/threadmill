@@ -36,6 +36,52 @@ func observation(reads map[string]ReadKind, writes ...string) Observation {
 
 var testKey = Key{Command: "go build -o app ./cmd/app", Backend: "bwrap", EnvHash: "env"}
 
+func TestCacheValidatesVirtualMetadataWithoutAllowingContentReads(t *testing.T) {
+	live := t.TempDir()
+	typ := "dir"
+	key := Key{
+		Command: "true", Backend: "bwrap", EnvHash: "fixed-layout",
+		ExternalPath: func(string) string { return "" },
+		ExternalType: func(string) string { return typ },
+	}
+	cache := newCache(t, Config{})
+	obs := observation(nil)
+	obs.Externals = []string{"/etc"}
+	obs.ExternalReads = map[string]ReadKind{"/etc": ReadStat}
+	entry, err := cache.Store(live, key, obs, Result{})
+	if err != nil || entry == nil {
+		t.Fatalf("virtual directory metadata was not stored: %v, %v", entry, err)
+	}
+	if hit, err := cache.Lookup(live, key); err != nil || hit == nil {
+		t.Fatalf("unchanged virtual node must hit: %v, %v", hit, err)
+	}
+	typ = "other"
+	if hit, err := cache.Lookup(live, key); err != nil || hit != nil {
+		t.Fatalf("changed virtual type must miss: %v, %v", hit, err)
+	}
+	for _, kind := range []ReadKind{ReadFile, ReadDir} {
+		obs.ExternalReads["/etc"] = kind
+		entry, err := cache.Store(live, key, obs, Result{})
+		if err != nil || entry != nil {
+			t.Fatalf("unbacked virtual contents must not be stored: kind %v, entry %v, err %v", kind, entry, err)
+		}
+	}
+	if got := cache.Stats().RejectedReasons["unreadable_external"]; got != 2 {
+		t.Fatalf("content rejection count = %d, want 2", got)
+	}
+}
+
+func TestCacheRejectsExternalProcessWorkingDirectoryProbe(t *testing.T) {
+	cache := newCache(t, Config{})
+	obs := observation(nil)
+	obs.Externals = []string{"/proc/self/cwd"}
+	obs.ExternalReads = map[string]ReadKind{"/proc/self/cwd": ReadFile}
+	entry, err := cache.Store(t.TempDir(), testKey, obs, Result{})
+	if err != nil || entry != nil {
+		t.Fatalf("cache process cwd cannot validate the executed command cwd: %v, %v", entry, err)
+	}
+}
+
 func TestCacheDoesNotReplayEntriesWithoutRootDirectoryTracking(t *testing.T) {
 	cache := newCache(t, Config{})
 	live := t.TempDir()
@@ -146,6 +192,27 @@ func TestCacheMissWhenAbsentDependencyAppears(t *testing.T) {
 	}
 }
 
+func TestCacheNegativeProbeBelowFileHitsUntilParentBecomesDirectory(t *testing.T) {
+	cache := newCache(t, Config{})
+	live := t.TempDir()
+	writeFile(t, live, "pricing.py", "price = 1", 0o644)
+	obs := observation(map[string]ReadKind{"pricing.py/pyvenv.cfg": ReadAbsent})
+	entry, err := cache.Store(live, testKey, obs, Result{})
+	if err != nil || entry == nil {
+		t.Fatalf("store ENOTDIR negative probe: %v, %v", entry, err)
+	}
+	if hit, err := cache.Lookup(live, testKey); err != nil || hit == nil {
+		t.Fatalf("unchanged ENOTDIR probe must hit: %v, %v", hit, err)
+	}
+	if err := os.Remove(filepath.Join(live, "pricing.py")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, live, "pricing.py/pyvenv.cfg", "new environment", 0o644)
+	if hit, err := cache.Lookup(live, testKey); err != nil || hit != nil {
+		t.Fatalf("new probe target must miss: %v, %v", hit, err)
+	}
+}
+
 // 目录依赖：条目集变了就必须 miss，即使每个文件的内容都没动。
 func TestCacheMissWhenDirectoryEntryAppears(t *testing.T) {
 	cache := newCache(t, Config{})
@@ -198,6 +265,146 @@ func TestCacheMissWhenExternalBinaryChanges(t *testing.T) {
 	}
 	if entry != nil {
 		t.Fatal("an upgraded toolchain must miss")
+	}
+}
+
+func TestCacheMissWhenExternalFileReplacedWithSameSizeAndMtime(t *testing.T) {
+	cache := newCache(t, Config{CacheFailures: true})
+	live, site := t.TempDir(), t.TempDir()
+	writeFile(t, site, "plugin.py", "old", 0o644)
+	dependency := filepath.Join(site, "plugin.py")
+	info, err := os.Stat(dependency)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs := observation(nil)
+	obs.Externals = []string{dependency}
+	if _, err := cache.Store(live, testKey, obs, Result{ExitCode: 1}); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, site, "replacement.py", "new", 0o644)
+	replacement := filepath.Join(site, "replacement.py")
+	if err := os.Chtimes(replacement, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, dependency); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := cache.Lookup(live, testKey)
+	if err != nil || entry != nil {
+		t.Fatalf("installed plugin replayed old failure: %+v, %v", entry, err)
+	}
+}
+
+func TestCacheValidatesHomeAcrossEnvironments(t *testing.T) {
+	cache := newCache(t, Config{})
+	live, homeA, homeB := t.TempDir(), t.TempDir(), t.TempDir()
+	for _, home := range []string{homeA, homeB} {
+		writeFile(t, home, ".config/tool.conf", "same", 0o644)
+	}
+	obs := observation(map[string]ReadKind{"~/.config/tool.conf": ReadFile, "~/.config/plugin": ReadAbsent})
+	if entry, err := cache.Store(live, testKey, obs, Result{Output: "configured"}, homeA); err != nil || entry == nil {
+		t.Fatalf("store HOME input: %+v %v", entry, err)
+	}
+	if entry, err := cache.Lookup(live, testKey, homeB); err != nil || entry == nil {
+		t.Fatalf("identical HOME must hit: %+v %v", entry, err)
+	}
+	writeFile(t, homeB, ".config/tool.conf", "changed", 0o644)
+	if entry, err := cache.Lookup(live, testKey, homeB); err != nil || entry != nil {
+		t.Fatalf("changed HOME must miss: %+v %v", entry, err)
+	}
+	writeFile(t, homeB, ".config/tool.conf", "same", 0o644)
+	writeFile(t, homeB, ".config/plugin", "installed", 0o644)
+	if entry, err := cache.Lookup(live, testKey, homeB); err != nil || entry != nil {
+		t.Fatalf("new HOME plugin must miss: %+v %v", entry, err)
+	}
+	if entry, err := cache.Lookup(live, testKey); err != nil || entry != nil {
+		t.Fatalf("HOME omitted must miss: %+v %v", entry, err)
+	}
+}
+
+func TestCacheReportsMissKindsRolesAndWeightedHits(t *testing.T) {
+	cache := newCache(t, Config{})
+	live := t.TempDir()
+	key := Key{Command: "cat input", Backend: "external", Role: "executor"}
+	if _, err := cache.Lookup(live, key); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, live, "input", "one", 0o644)
+	if _, err := cache.Store(live, key, observation(map[string]ReadKind{"input": ReadFile}), Result{Duration: 2 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	key.Role = "verifier"
+	hit, err := cache.Lookup(live, key)
+	if err != nil || hit == nil || hit.CreatorRole != "executor" {
+		t.Fatalf("cross-role hit = %+v %v", hit, err)
+	}
+	if err := cache.Replay(live, hit, key.Role); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, live, "input", "two", 0o644)
+	if hit, err := cache.Lookup(live, key); err != nil || hit != nil {
+		t.Fatalf("changed read must miss: %+v %v", hit, err)
+	}
+	cache.RecordExecution("verifier", 8*time.Second)
+	cache.RecordVerification("output")
+	stats := cache.Stats()
+	if stats.MissNoKey != 1 || stats.MissReadSet != 1 || stats.MissPathTypes["workspace_file"] != 1 {
+		t.Fatalf("miss counters = %+v", stats)
+	}
+	if stats.TimeWeightedHitRate != .2 || stats.SavedDuration != 2*time.Second || stats.Roles["verifier"].Hits != 1 || stats.CrossRoleHits != 1 {
+		t.Fatalf("role/weighted counters = %+v", stats)
+	}
+	if stats.LookupDuration <= 0 || stats.StoreDuration <= 0 || stats.VerifyOutputMismatches != 1 || stats.Verifications != 1 {
+		t.Fatalf("timing/audit counters = %+v", stats)
+	}
+	stats.MissPathTypes["workspace_file"] = 100
+	delete(stats.Roles, "verifier")
+	if again := cache.Stats(); again.MissPathTypes["workspace_file"] != 1 || again.Roles["verifier"].Hits != 1 {
+		t.Fatal("snapshot maps must not mutate live counters")
+	}
+}
+
+func TestCachePeekDoesNotChangeStatisticsOrEntryAge(t *testing.T) {
+	cache := newCache(t, Config{})
+	live := t.TempDir()
+	entry, err := cache.Store(live, testKey, observation(nil), Result{})
+	if err != nil || entry == nil {
+		t.Fatalf("store: %+v %v", entry, err)
+	}
+	file := filepath.Join(cache.indexDir(testKey), entry.ID+".json")
+	before, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hit, err := cache.Peek(live, testKey)
+	if err != nil || hit == nil {
+		t.Fatalf("peek: %+v %v", hit, err)
+	}
+	after, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats := cache.Stats(); stats.Lookups != 0 || stats.Hits != 0 || stats.LookupDuration != 0 || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatalf("peek mutated cache: %+v", stats)
+	}
+}
+
+func TestCacheNearMissesAreTelemetryWithoutReuse(t *testing.T) {
+	cache := newCache(t, Config{})
+	live := t.TempDir()
+	key := Key{Command: "printf '%s\\n' value", Backend: "external"}
+	if _, err := cache.Store(live, key, observation(nil), Result{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"printf  '%s\\n'   value", "printf '%s\\n' value | head -1"} {
+		key.Command = command
+		if hit, err := cache.Lookup(live, key); err != nil || hit != nil {
+			t.Fatalf("near miss reused: %+v %v", hit, err)
+		}
+	}
+	if stats := cache.Stats(); stats.NearMissAST != 1 || stats.NearMissPipeline != 1 || stats.Hits != 0 {
+		t.Fatalf("near miss counters: %+v", stats)
 	}
 }
 

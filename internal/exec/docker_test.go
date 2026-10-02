@@ -15,7 +15,7 @@ import (
 )
 
 func TestDockerArgsConstrainTaskContainer(t *testing.T) {
-	args := dockerArgs("/tmp/live", "golang:1.26.5-alpine", "threadmill-test", 1000, 1000, "go test ./...")
+	args := dockerArgs("/tmp/live", "/tmp/runtime", "golang:1.26.5-alpine", "threadmill-test", 1000, 1000, "go test ./...")
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
 		"--pull=never",
@@ -30,7 +30,10 @@ func TestDockerArgsConstrainTaskContainer(t *testing.T) {
 		"--user=1000:1000",
 		"--volume=/tmp/live:/workspace:rw",
 		"--workdir=/workspace",
-		"--tmpfs=/tmp:rw,exec,nosuid,nodev,size=512m",
+		"--volume=/tmp/runtime/home:/home/threadmill:rw",
+		"--volume=/tmp/runtime/tmp:/tmp:rw",
+		"--env=HOME=/home/threadmill",
+		"--env=TMPDIR=/tmp",
 	} {
 		if !slices.Contains(args, want) {
 			t.Errorf("docker args missing %q: %s", want, joined)
@@ -66,6 +69,7 @@ func TestDockerSandboxRunsOnlyInWorkspace(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	result, err := s.View("env-a", files).Run(ctx, env.Cmd{Command: fmt.Sprintf(`
+		test "$HOME" != "$TMPDIR" || exit 7
 		test -z "$THREADMILL_TEST_SECRET" || exit 8
 		grep -q 'eth0:' /proc/net/dev && exit 9
 		test ! -e %q || exit 10

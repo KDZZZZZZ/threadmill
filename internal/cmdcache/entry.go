@@ -4,10 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
+	"path"
 	"sort"
-	"strconv"
+	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Key 是一条命令在缓存里的归类依据。读集不在 Key 里：读集要靠逐条校验
@@ -20,11 +22,19 @@ type Key struct {
 	Backend string
 	// EnvHash 是影响执行的环境变量摘要。
 	EnvHash string
+	// Role attributes observations; it never partitions reusable results.
+	Role string
+	// ExternalPath maps a sandbox path to its visible host backing path.
+	// Nil is identity; empty means the path is absent from that sandbox view.
+	ExternalPath func(string) string
+	// ExternalType describes structural virtual nodes with no host backing.
+	// Only metadata observations may use this type; content reads fail closed.
+	ExternalType func(string) string
 }
 
 func (k Key) index() string {
-	// v1 entries may omit root-directory dependencies and cannot be trusted.
-	sum := sha256.Sum256([]byte("tmcmd2\n" + k.Command + "\n" + k.Backend + "\n" + k.EnvHash))
+	// Older entries omit HOME and external reads and cannot be trusted.
+	sum := sha256.Sum256([]byte("tmcmd3\n" + k.Command + "\n" + k.Backend + "\n" + k.EnvHash))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -56,15 +66,16 @@ type Entry struct {
 	// ID 由 Reads 与 Externals 唯一决定，同样的依赖状态只会存一份。
 	ID string `json:"-"`
 
-	Command string `json:"command"`
-	Backend string `json:"backend"`
-	EnvHash string `json:"env_hash"`
+	Command     string `json:"command"`
+	Backend     string `json:"backend"`
+	EnvHash     string `json:"env_hash"`
+	CreatorRole string `json:"creator_role"`
 
 	// Reads 是推断出的依赖：工作区相对路径 → 执行前状态串。
 	Reads map[string]string `json:"reads"`
-	// Externals 是工作区之外执行过的二进制：绝对路径 → (size, mtime)。
-	// 宿主工具链升级要能让缓存失效。
-	Externals map[string]string `json:"externals,omitempty"`
+	// Externals records all external reads and negative probes using stat identity.
+	Externals     map[string]string   `json:"externals,omitempty"`
+	ExternalKinds map[string]ReadKind `json:"external_kinds,omitempty"`
 	// Managed 是命令产出的路径，计算目录状态时两侧都要排除它们。
 	Managed []string `json:"managed,omitempty"`
 	// Writes 是产物，按 Managed 的顺序无关方式回放。
@@ -119,35 +130,100 @@ func (e *Entry) managedSet() map[string]struct{} {
 
 // matches 校验条目的依赖在 live 树里是否原样成立。
 // 只 stat/hash 读集里那几十个路径，不扫全树——这正是相对整树指纹的收益来源。
-func (e *Entry) matches(live string) (bool, error) {
+func (e *Entry) matches(live string, key Key, home ...string) (bool, string) {
 	managed := e.managedSet()
 	for _, rel := range sortedMapKeys(e.Reads) {
-		state, err := verifyState(live, rel, e.Reads[rel], managed)
+		root, name, err := dependencyRoot(live, rel, home...)
+		if err != nil {
+			return false, dependencyKind(rel, e.Reads[rel])
+		}
+		state, err := verifyState(root, name, e.Reads[rel], managed)
 		if err != nil {
 			// 路径非法或不可读：这条条目不可信，当 miss 处理。
-			return false, nil //nolint:nilerr // 校验失败一律保守判 miss
+			return false, dependencyKind(rel, e.Reads[rel])
 		}
 		if state != e.Reads[rel] {
-			return false, nil
+			return false, dependencyKind(rel, e.Reads[rel])
 		}
 	}
-	for abs, want := range e.Externals {
-		if externalState(abs) != want {
-			return false, nil
+	for _, abs := range sortedMapKeys(e.Externals) {
+		want := e.Externals[abs]
+		if externalReadState(abs, key, e.ExternalKinds[abs]) != want {
+			kind := e.ExternalKinds[abs]
+			if want == stateAbsent {
+				kind = ReadAbsent
+			}
+			return false, "external_" + readKindName(kind)
 		}
 	}
-	return true, nil
+	return true, ""
 }
 
-// externalState 用 (size, mtime) 而不是内容摘要标识宿主工具链。
-// `go` 二进制上百 MB，每次校验都读一遍会把缓存的收益吃光；
-// 工具链升级必然改动这两个值。
-func externalState(abs string) string {
-	info, err := os.Stat(abs)
-	if err != nil {
-		return stateAbsent
+func externalReadState(abs string, key Key, kind ReadKind) string {
+	// A process's cwd/root/fds describe that process's workspace. Probing the
+	// cache process instead cannot validate the executed child's observation.
+	if processWorkspacePath(abs) {
+		return ""
 	}
-	return strconv.FormatInt(info.Size(), 10) + ":" + strconv.FormatInt(info.ModTime().UnixNano(), 10)
+	if key.ExternalPath != nil {
+		backing := key.ExternalPath(abs)
+		if backing == "" {
+			if kind == ReadStat && key.ExternalType != nil {
+				if typ := key.ExternalType(abs); typ != "" {
+					return "v:" + typ
+				}
+			}
+			return stateAbsent
+		}
+		abs = backing
+	}
+	return externalState(abs)
+}
+
+func processWorkspacePath(abs string) bool {
+	parts := strings.Split(strings.TrimPrefix(path.Clean(abs), "/proc/"), "/")
+	if !strings.HasPrefix(abs, "/proc/") || len(parts) < 2 {
+		return false
+	}
+	return parts[1] == "cwd" || parts[1] == "root" || parts[1] == "fd" || parts[1] == "fdinfo"
+}
+
+func dependencyRoot(live, rel string, home ...string) (string, string, error) {
+	if !strings.HasPrefix(rel, "~/") {
+		return live, rel, nil
+	}
+	if len(home) != 1 || home[0] == "" {
+		return "", "", fmt.Errorf("cmdcache: HOME required to validate a ~/ dependency")
+	}
+	return home[0], strings.TrimPrefix(rel, "~/"), nil
+}
+
+// externalState includes ctime and inode identity: installers may preserve size
+// and mtime when replacing a dependency. Follow symlinks for opened content,
+// while retaining the link's own identity for readlink observations.
+func externalState(abs string) string {
+	var link, target unix.Stat_t
+	if err := unix.Lstat(abs, &link); err != nil {
+		if absentPath(err) {
+			return stateAbsent
+		}
+		return ""
+	}
+	state := statIdentity(&link)
+	if link.Mode&unix.S_IFMT == unix.S_IFLNK {
+		if err := unix.Stat(abs, &target); err != nil {
+			if absentPath(err) {
+				return state + ":" + stateAbsent
+			}
+			return ""
+		}
+		state += ":" + statIdentity(&target)
+	}
+	return state
+}
+
+func statIdentity(st *unix.Stat_t) string {
+	return fmt.Sprintf("x:%d:%d:%d:%d:%d:%d", st.Dev, st.Ino, st.Mode, st.Size, st.Mtim.Nano(), st.Ctim.Nano())
 }
 
 func sortedMapKeys(m map[string]string) []string {

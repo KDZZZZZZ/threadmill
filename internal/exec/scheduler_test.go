@@ -597,6 +597,53 @@ func TestExternalSandboxReusesBuildCacheOnlyWithinEnvironment(t *testing.T) {
 	}
 }
 
+func TestExecutionOutputRetainsHeadAndTail(t *testing.T) {
+	t.Parallel()
+	s := New(Config{Slots: 1, ExternalSandbox: true, OutputCapKB: 1})
+	t.Cleanup(func() { _ = s.Reap("output") })
+	files := vfs.NewStore(t.TempDir())
+	result, err := s.View("output", files).Run(t.Context(), env.Cmd{
+		Command: `printf HEAD; head -c 4096 /dev/zero | tr '\0' x; printf TAIL`,
+	})
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("Run() = %+v, %v", result, err)
+	}
+	if !strings.HasPrefix(result.Output, "HEAD") || !strings.HasSuffix(result.Output, "TAIL") {
+		t.Fatalf("output lost head or tail: %q", result.Output)
+	}
+	if strings.Count(result.Output, "[output truncated]") != 1 || len(result.Output) > 1080 {
+		t.Fatalf("truncation must be bounded and marked once: %q", result.Output)
+	}
+}
+
+func TestSandboxSeparatesHomeAndTemporaryState(t *testing.T) {
+	for _, backend := range []string{"external", "bwrap"} {
+		t.Run(backend, func(t *testing.T) {
+			s := New(Config{Slots: 1, ExternalSandbox: backend == "external"})
+			if s.Stats().SandboxBackend == "unavailable" {
+				t.Skip("sandbox unavailable")
+			}
+			t.Cleanup(func() { _ = s.Reap("one"); _ = s.Reap("two") })
+			files := vfs.NewStore(t.TempDir())
+			for _, command := range []string{
+				`test "$HOME" != "$TMPDIR" && printf user > "$HOME/config" && printf temp > "$TMPDIR/config"`,
+				`test "$(cat "$HOME/config")" = user && test "$(cat "$TMPDIR/config")" = temp`,
+			} {
+				result, err := s.View("one", files).Run(t.Context(), env.Cmd{Command: command})
+				if err != nil || result.ExitCode != 0 {
+					t.Fatalf("separate persistent HOME/TMPDIR = %+v, %v", result, err)
+				}
+			}
+			result, err := s.View("two", files).Run(t.Context(), env.Cmd{
+				Command: `test ! -e "$HOME/config" && test ! -e "$TMPDIR/config"`,
+			})
+			if err != nil || result.ExitCode != 0 {
+				t.Fatalf("sibling runtime isolation = %+v, %v", result, err)
+			}
+		})
+	}
+}
+
 func TestExternalSandboxForwardsNetworkAndToolchainConfiguration(t *testing.T) {
 	networkEnvironment := map[string]string{
 		"all_proxy":           "socks5://127.0.0.1:43001",

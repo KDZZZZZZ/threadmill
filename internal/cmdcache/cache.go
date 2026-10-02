@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -47,18 +48,41 @@ type Config struct {
 
 // Stats 是缓存的累计计数，供监控消费。只含有界的标量，不含路径或内容。
 type Stats struct {
-	Lookups          uint64        `json:"lookups"`
-	Hits             uint64        `json:"hits"`
-	Stores           uint64        `json:"stores"`
-	Rejected         uint64        `json:"rejected"`
-	ReplayErrors     uint64        `json:"replay_errors"`
-	ArtifactReflinks uint64        `json:"artifact_reflinks"`
-	ReflinkBytes     uint64        `json:"reflink_bytes"`
-	ArtifactCopies   uint64        `json:"artifact_copies"`
-	CopiedBytes      uint64        `json:"copied_bytes"`
-	Verifications    uint64        `json:"verifications"`
-	VerifyMismatches uint64        `json:"verify_mismatches"`
-	SavedDuration    time.Duration `json:"saved_duration"`
+	Lookups                uint64               `json:"lookups"`
+	Hits                   uint64               `json:"hits"`
+	Stores                 uint64               `json:"stores"`
+	Rejected               uint64               `json:"rejected"`
+	ReplayErrors           uint64               `json:"replay_errors"`
+	ArtifactReflinks       uint64               `json:"artifact_reflinks"`
+	ReflinkBytes           uint64               `json:"reflink_bytes"`
+	ArtifactCopies         uint64               `json:"artifact_copies"`
+	CopiedBytes            uint64               `json:"copied_bytes"`
+	Verifications          uint64               `json:"verifications"`
+	VerifyMismatches       uint64               `json:"verify_mismatches"`
+	SavedDuration          time.Duration        `json:"saved_duration"`
+	MatchedDuration        time.Duration        `json:"matched_duration"`
+	ExecutedDuration       time.Duration        `json:"executed_duration"`
+	VerificationDuration   time.Duration        `json:"verification_duration"`
+	TimeWeightedHitRate    float64              `json:"time_weighted_hit_rate"`
+	TimeWeightedReuseRate  float64              `json:"time_weighted_reuse_rate"`
+	Replays                uint64               `json:"replays"`
+	MissNoKey              uint64               `json:"miss_no_key"`
+	MissReadSet            uint64               `json:"miss_read_set"`
+	MissArtifacts          uint64               `json:"miss_artifacts"`
+	MissCorrupt            uint64               `json:"miss_corrupt"`
+	MissPathTypes          map[string]uint64    `json:"miss_path_types"`
+	RejectedReasons        map[string]uint64    `json:"rejected_reasons"`
+	Roles                  map[string]RoleStats `json:"roles"`
+	CrossRoleHits          uint64               `json:"cross_role_hits"`
+	VerifyExitMismatches   uint64               `json:"verify_exit_mismatches"`
+	VerifyWriteMismatches  uint64               `json:"verify_write_mismatches"`
+	VerifyOutputMismatches uint64               `json:"verify_output_mismatches"`
+	VerifyUnavailable      uint64               `json:"verify_unavailable"`
+	LookupDuration         time.Duration        `json:"lookup_duration"`
+	LookupMaxDuration      time.Duration        `json:"lookup_max_duration"`
+	StoreDuration          time.Duration        `json:"store_duration"`
+	NearMissAST            uint64               `json:"near_miss_ast"`
+	NearMissPipeline       uint64               `json:"near_miss_pipeline"`
 }
 
 // Cache 按推断出的依赖复用命令执行结果。零值不可用，须经 New 构造。
@@ -73,6 +97,7 @@ type Cache struct {
 	mu      sync.Mutex
 	stats   Stats
 	sinceGC int
+	near    []commandSignature
 }
 
 // New 打开或创建一个缓存目录。
@@ -94,6 +119,7 @@ func New(cfg Config) (*Cache, error) {
 		maxReadSet:    cfg.MaxReadSet,
 		cacheFailures: cfg.CacheFailures,
 		verifyRate:    cfg.VerifySampleRate,
+		stats:         Stats{MissPathTypes: make(map[string]uint64), RejectedReasons: make(map[string]uint64), Roles: make(map[string]RoleStats)},
 	}
 	if c.maxBytes <= 0 {
 		c.maxBytes = defaultMaxBytes
@@ -111,12 +137,29 @@ func (c *Cache) Stats() Stats {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.stats
+	stats := c.stats
+	stats.MissPathTypes = maps.Clone(stats.MissPathTypes)
+	stats.RejectedReasons = maps.Clone(stats.RejectedReasons)
+	stats.Roles = maps.Clone(stats.Roles)
+	if total := stats.MatchedDuration + stats.ExecutedDuration - stats.VerificationDuration; total > 0 {
+		stats.TimeWeightedHitRate = float64(stats.MatchedDuration) / float64(total)
+	}
+	if total := stats.SavedDuration + stats.ExecutedDuration; total > 0 {
+		stats.TimeWeightedReuseRate = float64(stats.SavedDuration) / float64(total)
+	}
+	return stats
 }
 
 // ShouldVerify 按采样率决定这次命中是否仍然照常执行来对账。
-func (c *Cache) ShouldVerify() bool {
-	return c != nil && c.verifyRate > 0 && rand.Float64() < c.verifyRate
+func (c *Cache) ShouldVerify(roles ...string) bool {
+	if c == nil || c.verifyRate <= 0 {
+		return false
+	}
+	rate := c.verifyRate
+	if len(roles) == 2 && boundedRole(roles[0]) != boundedRole(roles[1]) {
+		rate = max(rate, .1)
+	}
+	return rand.Float64() < rate
 }
 
 func (c *Cache) indexDir(key Key) string {
@@ -127,15 +170,25 @@ func (c *Cache) indexDir(key Key) string {
 //
 // 校验只触碰读集里的那些路径，不扫全树——这正是相对整树指纹的收益来源：
 // 别的 agent 改了无关文件不会让这条命令失效。
-func (c *Cache) Lookup(live string, key Key) (*Entry, error) {
+func (c *Cache) Lookup(live string, key Key, home ...string) (*Entry, error) {
+	started := time.Now()
+	defer func() { c.recordTiming(true, time.Since(started)) }()
 	c.mu.Lock()
 	c.stats.Lookups++
+	role := c.stats.Roles[boundedRole(key.Role)]
+	role.Lookups++
+	c.stats.Roles[boundedRole(key.Role)] = role
 	c.mu.Unlock()
 
 	candidates, err := c.candidates(key)
 	if err != nil || len(candidates) == 0 {
+		if err == nil {
+			c.recordMiss("no_key")
+			c.recordNearMiss(key)
+		}
 		return nil, err
 	}
+	miss := "corrupt"
 	for _, name := range candidates {
 		full := filepath.Join(c.indexDir(key), name)
 		entry, err := loadEntry(full)
@@ -147,23 +200,33 @@ func (c *Cache) Lookup(live string, key Key) (*Entry, error) {
 		if !c.artifactsPresent(entry) {
 			// 产物被 GC 回收了，这条条目已经没法回放。
 			_ = os.Remove(full)
+			miss = "artifacts"
 			continue
 		}
-		ok, err := entry.matches(live)
-		if err != nil {
-			return nil, err
-		}
+		ok, kind := entry.matches(live, key, home...)
 		if !ok {
+			miss = "read_set"
+			c.mu.Lock()
+			c.stats.MissPathTypes[kind]++
+			c.mu.Unlock()
 			continue
 		}
 		now := time.Now()
 		_ = os.Chtimes(full, now, now)
 		c.mu.Lock()
 		c.stats.Hits++
-		c.stats.SavedDuration += time.Duration(entry.DurationNS)
+		c.stats.MatchedDuration += time.Duration(entry.DurationNS)
+		role := c.stats.Roles[boundedRole(key.Role)]
+		role.Hits++
+		role.MatchedDuration += time.Duration(entry.DurationNS)
+		c.stats.Roles[boundedRole(key.Role)] = role
+		if boundedRole(key.Role) != boundedRole(entry.CreatorRole) {
+			c.stats.CrossRoleHits++
+		}
 		c.mu.Unlock()
 		return entry, nil
 	}
+	c.recordMiss(miss)
 	return nil, nil
 }
 
@@ -216,13 +279,19 @@ func (c *Cache) artifactsPresent(entry *Entry) bool {
 // 依赖状态在执行之后计算。这对纯输入路径是正确的：命令没有改动它们，
 // 执行后读到的就是执行前的值。既读又写的命令由 Observation.Cacheable
 // 拦掉，不会走到这里。
-func (c *Cache) Store(live string, key Key, obs Observation, result Result) (*Entry, error) {
-	if !obs.Cacheable() || len(obs.Reads) > c.maxReadSet {
-		c.reject()
+func (c *Cache) Store(live string, key Key, obs Observation, result Result, home ...string) (*Entry, error) {
+	started := time.Now()
+	defer func() { c.recordTiming(false, time.Since(started)) }()
+	if reason := obs.rejectionReason(); reason != "" {
+		c.Reject(reason)
+		return nil, nil
+	}
+	if len(obs.Reads)+len(obs.Externals) > c.maxReadSet {
+		c.Reject("read_set_limit")
 		return nil, nil
 	}
 	if result.ExitCode != 0 && !c.cacheFailures {
-		c.reject()
+		c.Reject("failure_disabled")
 		return nil, nil
 	}
 	managed := make([]string, 0, len(obs.Writes))
@@ -232,15 +301,16 @@ func (c *Cache) Store(live string, key Key, obs Observation, result Result) (*En
 	sort.Strings(managed)
 
 	entry := &Entry{
-		Command:    key.Command,
-		Backend:    key.Backend,
-		EnvHash:    key.EnvHash,
-		Reads:      make(map[string]string, len(obs.Reads)),
-		Managed:    managed,
-		ExitCode:   result.ExitCode,
-		Output:     result.Output,
-		DurationNS: int64(result.Duration),
-		CreatedAt:  time.Now().UnixNano(),
+		Command:     key.Command,
+		Backend:     key.Backend,
+		EnvHash:     key.EnvHash,
+		Reads:       make(map[string]string, len(obs.Reads)),
+		Managed:     managed,
+		ExitCode:    result.ExitCode,
+		Output:      result.Output,
+		DurationNS:  int64(result.Duration),
+		CreatedAt:   time.Now().UnixNano(),
+		CreatorRole: boundedRole(key.Role),
 	}
 	managedSet := entry.managedSet()
 	for rel, kind := range obs.Reads {
@@ -250,31 +320,44 @@ func (c *Cache) Store(live string, key Key, obs Observation, result Result) (*En
 			entry.Reads[rel] = stateAbsent
 			continue
 		}
-		state, err := readState(live, rel, kind, managedSet)
+		state, err := readState(live, rel, kind, managedSet, home...)
 		if err != nil {
-			c.reject()
+			c.Reject("unreadable_dependency")
 			return nil, nil //nolint:nilerr // 依赖不可读时放弃缓存，不影响本次执行
 		}
 		entry.Reads[rel] = state
 	}
 	if len(obs.Externals) > 0 {
 		entry.Externals = make(map[string]string, len(obs.Externals))
+		entry.ExternalKinds = make(map[string]ReadKind, len(obs.Externals))
 		for _, abs := range obs.Externals {
-			entry.Externals[abs] = externalState(abs)
+			state := externalReadState(abs, key, obs.ExternalReads[abs])
+			if obs.ExternalReads[abs] == ReadAbsent {
+				state = stateAbsent
+			} else if state == "" || state == stateAbsent {
+				c.Reject("unreadable_external")
+				return nil, nil
+			}
+			entry.Externals[abs] = state
+			entry.ExternalKinds[abs] = obs.ExternalReads[abs]
 		}
 	}
 	changes, err := c.captureArtifacts(live, managed)
 	if err != nil {
-		c.reject()
+		c.Reject("artifact_capture")
 		return nil, err
 	}
 	entry.Writes = changes
 	entry.ID = entry.fingerprint()
 	if err := c.writeEntry(key, entry); err != nil {
+		c.Reject("index_write")
 		return nil, err
 	}
 	c.mu.Lock()
 	c.stats.Stores++
+	role := c.stats.Roles[boundedRole(key.Role)]
+	role.Stores++
+	c.stats.Roles[boundedRole(key.Role)] = role
 	c.sinceGC++
 	due := c.sinceGC >= gcInterval
 	if due {
@@ -284,7 +367,26 @@ func (c *Cache) Store(live string, key Key, obs Observation, result Result) (*En
 	if due {
 		_ = c.GC()
 	}
+	c.rememberCommand(key)
 	return entry, nil
+}
+
+// Peek validates candidates without counters, entry touches, cleanup, or replay.
+func (c *Cache) Peek(live string, key Key, home ...string) (*Entry, error) {
+	names, err := c.candidates(key)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range names {
+		entry, err := loadEntry(filepath.Join(c.indexDir(key), name))
+		if err != nil || !c.artifactsPresent(entry) {
+			continue
+		}
+		if match, _ := entry.matches(live, key, home...); match {
+			return entry, nil
+		}
+	}
+	return nil, nil
 }
 
 // captureArtifacts 按写集逐条读回产物。代价是 O(写集)，不是 O(整棵树)——
@@ -334,17 +436,15 @@ func (c *Cache) captureArtifacts(live string, managed []string) ([]Change, error
 
 // readState 按依赖的种类计算它的状态串：只被 stat 过的路径记类型，
 // 真正被读过的记内容。这个区分决定了无关文件的编辑会不会让缓存失效。
-func readState(live, rel string, kind ReadKind, managed map[string]struct{}) (string, error) {
-	if kind == ReadStat {
-		return pathTypeState(live, rel)
+func readState(live, rel string, kind ReadKind, managed map[string]struct{}, home ...string) (string, error) {
+	root, name, err := dependencyRoot(live, rel, home...)
+	if err != nil {
+		return "", err
 	}
-	return pathStateExcluding(live, rel, managed)
-}
-
-func (c *Cache) reject() {
-	c.mu.Lock()
-	c.stats.Rejected++
-	c.mu.Unlock()
+	if kind == ReadStat {
+		return pathTypeState(root, name)
+	}
+	return pathStateExcluding(root, name, managed)
 }
 
 func (c *Cache) writeEntry(key Key, entry *Entry) error {
@@ -413,13 +513,25 @@ func (c *Cache) Invalidate(key Key, entry *Entry) error {
 // 不需要额外的前置条件：写集里的路径都是命令首次触碰即写入的，也就是它本来
 // 就会无条件覆盖的路径，回放覆盖它们与真跑一遍等价。真正被命令读过的产物
 // 路径会同时出现在读集里，那种命令在记录阶段就被判成不可缓存了。
-func (c *Cache) Replay(live string, entry *Entry) error {
+func (c *Cache) Replay(live string, entry *Entry, roles ...string) error {
 	if err := c.replay(live, entry); err != nil {
 		c.mu.Lock()
 		c.stats.ReplayErrors++
 		c.mu.Unlock()
 		return err
 	}
+	c.mu.Lock()
+	c.stats.Replays++
+	c.stats.SavedDuration += time.Duration(entry.DurationNS)
+	roleName := "unknown"
+	if len(roles) > 0 {
+		roleName = boundedRole(roles[0])
+	}
+	role := c.stats.Roles[roleName]
+	role.Replays++
+	role.SavedDuration += time.Duration(entry.DurationNS)
+	c.stats.Roles[roleName] = role
+	c.mu.Unlock()
 	return nil
 }
 
@@ -539,9 +651,21 @@ func cloneArtifact(target, source *os.File) error {
 }
 
 // RecordVerification 记一次抽样对账。
-func (c *Cache) RecordVerification() {
+func (c *Cache) RecordVerification(kind ...string) {
 	c.mu.Lock()
 	c.stats.Verifications++
+	if len(kind) > 0 {
+		switch kind[0] {
+		case "exit_code":
+			c.stats.VerifyExitMismatches++
+		case "writes":
+			c.stats.VerifyWriteMismatches++
+		case "output":
+			c.stats.VerifyOutputMismatches++
+		case "unavailable":
+			c.stats.VerifyUnavailable++
+		}
+	}
 	c.mu.Unlock()
 }
 

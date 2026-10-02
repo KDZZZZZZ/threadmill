@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,11 +25,12 @@ import (
 
 // IO 是 CLI 的输入输出和可选的 manager 工厂。
 type IO struct {
-	In         io.Reader
-	Out        io.Writer
-	Err        io.Writer
-	Open       func(context.Context, manager.Options) (*manager.Manager, error)
-	ReadSecret func() (string, error)
+	In              io.Reader
+	Out             io.Writer
+	Err             io.Writer
+	Open            func(context.Context, manager.Options) (*manager.Manager, error)
+	ReadSecret      func() (string, error)
+	ExecutionDoctor func(context.Context, manager.Options) (manager.ExecutionDiagnostics, error)
 }
 
 type options struct {
@@ -39,6 +41,7 @@ type options struct {
 	listen     string
 	webUI      string
 	webOrigin  string
+	execDoctor bool
 }
 
 type messageSender interface {
@@ -121,6 +124,25 @@ func Run(args []string, stdio IO) int {
 
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
+	if opts.execDoctor {
+		probe := stdio.ExecutionDoctor
+		if probe == nil {
+			probe = manager.ProbeExecution
+		}
+		result, err := probe(ctx, manager.Options{Root: opts.dir, ConfigPath: opts.configPath})
+		if err != nil {
+			fmt.Fprintln(errOut, err)
+			return 1
+		}
+		if err := json.NewEncoder(out).Encode(result); err != nil {
+			fmt.Fprintln(errOut, err)
+			return 1
+		}
+		if !result.DependencyTracing {
+			return 1
+		}
+		return 0
+	}
 
 	if opts.web {
 		return runWeb(ctx, opts, open, out, errOut)
@@ -330,6 +352,7 @@ func parse(args []string, errOut io.Writer) (options, error) {
 	)
 	fs.StringVar(&opts.message, "p", "", "send one message and exit")
 	fs.BoolVar(&opts.web, "web", false, "serve the local WebUI; open projects from the browser")
+	fs.BoolVar(&opts.execDoctor, "exec-doctor", false, "probe execution tracing and emit JSON without calling a model")
 	fs.StringVar(&opts.listen, "listen", "127.0.0.1:8787", "WebUI loopback address")
 	fs.StringVar(&opts.webUI, "web-ui", "", "override the bundled WebUI with a standalone HTML file")
 	fs.StringVar(&opts.webOrigin, "web-origin", "", "additional exact WebUI origin behind a trusted local proxy (scheme://host[:port])")
@@ -338,6 +361,9 @@ func parse(args []string, errOut io.Writer) (options, error) {
 	}
 	if opts.web && opts.message != "" {
 		return options{}, errors.New("-web and -p cannot be combined")
+	}
+	if opts.execDoctor && (opts.web || opts.message != "") {
+		return options{}, errors.New("-exec-doctor cannot be combined with -web or -p")
 	}
 	if opts.dir == "" {
 		wd, err := os.Getwd()

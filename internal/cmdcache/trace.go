@@ -75,8 +75,10 @@ type Observation struct {
 	// Writes 是观测到的写入路径，也就是要收进缓存的产物清单。
 	// 它同时承担两件事：把命令自己产出的中间文件排除出读集，以及逃逸检测。
 	Writes map[string]struct{}
-	// Externals 是在工作区之外执行的二进制（宿主工具链），按 (size, mtime) 记依赖。
+	// Externals contains every path read outside the workspace.
 	Externals []string
+	// ExternalReads preserves negative probes and the kind of each external read.
+	ExternalReads map[string]ReadKind
 	// Escaped 是写到 live 树与临时目录之外的路径样本。非空即不可缓存。
 	Escaped []string
 	// Network 表示观测到 AF_INET/AF_INET6 出站流量。为真即不可缓存。
@@ -118,7 +120,7 @@ func (o Observation) rewritesOwnInput() bool {
 }
 
 // hostMountPrefixes 是宿主只读绑定进沙箱的路径。bwrap 把 live 树绑在 `/`，
-// 这些前缀盖在它上面，属于宿主而非工作区内容，不进读集也不算逃逸。
+// 这些前缀盖在它上面，属于外部读集，而非工作区读集。
 var hostMountPrefixes = []string{
 	"/bin", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/libx32",
 	"/proc", "/run", "/sbin", "/sys", "/tmp", "/usr", "/var/run",
@@ -204,13 +206,21 @@ var outboundSyscalls = map[string]bool{
 // 解析对错误一律 fail closed：无法解析的相对路径、被截断的路径和无法
 // 安全补全的 <unfinished> 都会置 Incomplete，让调用方放弃缓存本次结果。
 func ParseTrace(r io.Reader, root, tmp string, limit int) (Observation, error) {
+	return ParseTraceWithHome(r, root, tmp, "", limit)
+}
+
+// ParseTraceWithHome records HOME inputs using portable ~/ paths. Only the
+// explicitly content-addressed Go caches and scratch TMPDIR are excluded.
+func ParseTraceWithHome(r io.Reader, root, tmp, home string, limit int) (Observation, error) {
 	p := &traceParser{
 		obs: Observation{
-			Reads:  make(map[string]ReadKind),
-			Writes: make(map[string]struct{}),
+			Reads:         make(map[string]ReadKind),
+			Writes:        make(map[string]struct{}),
+			ExternalReads: make(map[string]ReadKind),
 		},
 		root:      cleanSandboxPath(root),
 		tmp:       cleanSandboxPath(tmp),
+		home:      cleanSandboxPath(home),
 		cwd:       make(map[int]string),
 		pending:   make(map[int]string),
 		externals: make(map[string]struct{}),
@@ -271,6 +281,7 @@ type traceParser struct {
 	obs       Observation
 	root      string
 	tmp       string
+	home      string
 	cwd       map[int]string
 	pending   map[int]string
 	externals map[string]struct{}
@@ -330,7 +341,13 @@ func (p *traceParser) consume(line string) {
 	if !traced {
 		return
 	}
-	tokens, truncated := scanArgs(args)
+	pathLimit := 0
+	if name == "readlink" || name == "readlinkat" {
+		// Link text is an output buffer, and strace may truncate it. It must
+		// neither become a path dependency nor make the input path incomplete.
+		pathLimit = 1
+	}
+	tokens, truncated := scanArgs(args, pathLimit)
 	if truncated {
 		p.obs.Incomplete = true
 		return
@@ -352,6 +369,18 @@ func (p *traceParser) consume(line string) {
 			role = openRole(name, tokens.flags)
 		}
 		p.record(name, abs, role, tokens.flags, errno, failed, roles.metadata)
+		// -y reports the resolved opened path. A workspace symlink can point at
+		// an external dependency; tracking only its link text misses that read.
+		if isOpen(name) && !failed && role&roleRead != 0 {
+			if start := strings.Index(result, "</"); start >= 0 {
+				if end := strings.IndexByte(result[start:], '>'); end >= 0 {
+					resolved := path.Clean(result[start+1 : start+end])
+					if resolved != abs {
+						p.record(name, resolved, roleRead, tokens.flags, "", false, roles.metadata)
+					}
+				}
+			}
+		}
 	}
 	if name == "chdir" && !failed && len(paths) == 1 {
 		p.cwd[pid] = paths[0]
@@ -369,6 +398,19 @@ func (p *traceParser) record(
 	flags, errno string,
 	failed, metadata bool,
 ) {
+	if p.home != "" && underPath(abs, p.home) {
+		rel := workspaceRel(p.home, abs)
+		if contentAddressedHomeCache(rel) {
+			return
+		}
+		if failed || role&roleRead != 0 {
+			p.recordRead("~/"+rel, flags, errno, failed, metadata)
+		}
+		if !failed && role&roleWrite != 0 && len(p.obs.Escaped) < maxEscapedPaths {
+			p.obs.Escaped = append(p.obs.Escaped, "~/"+rel)
+		}
+		return
+	}
 	// per-env 临时目录：既不是依赖也不是产物，更不算逃逸。
 	// 放在最前面，免得命令在自己的 TMPDIR 里执行的脚本被记成宿主工具链依赖。
 	if p.tmp != "" && underPath(abs, p.tmp) {
@@ -376,15 +418,15 @@ func (p *traceParser) record(
 	}
 	onHostMount := underHostMount(p.root, abs)
 	if !underPath(abs, p.root) || onHostMount {
-		switch {
-		case name == "execve" || name == "execveat":
-			// 宿主工具链升级要能让缓存失效，按 (size, mtime) 记成外部依赖。
+		if failed {
+			role = roleRead
+		}
+		if role&roleRead != 0 {
 			p.externals[abs] = struct{}{}
-		case onHostMount:
-			// 宿主只读绑定与设备节点：/usr 是只读的，/dev 和 /proc 是内核接口。
-			// 往这里写没有需要回放的副作用，`cmd > /dev/null` 不该因此失去缓存资格。
-		case role&roleWrite != 0 && !failed:
-			// 写到 live 树之外的真实副作用回放不了，命中方会默默丢失它。
+			recordDependency(p.obs.ExternalReads, abs, flags, errno, failed, metadata)
+		}
+		if role&roleWrite != 0 && !failed && abs != "/dev/null" {
+			// Successful external writes cannot be replayed, even under /usr.
 			if len(p.obs.Escaped) < maxEscapedPaths {
 				p.obs.Escaped = append(p.obs.Escaped, abs)
 			}
@@ -407,11 +449,19 @@ func (p *traceParser) record(
 	}
 }
 
+func contentAddressedHomeCache(rel string) bool {
+	return underPath(rel, ".cache/go-build") || underPath(rel, "go/pkg/mod")
+}
+
 func (p *traceParser) recordRead(rel, flags, errno string, failed, metadata bool) {
 	if _, written := p.obs.Writes[rel]; written {
 		// 首次触碰是写：这是命令自己的产物，不是依赖。
 		return
 	}
+	recordDependency(p.obs.Reads, rel, flags, errno, failed, metadata)
+}
+
+func recordDependency(reads map[string]ReadKind, rel, flags, errno string, failed, metadata bool) {
 	kind := ReadFile
 	switch {
 	case !failed && strings.Contains(flags, "O_CREAT") && strings.Contains(flags, "O_EXCL"):
@@ -420,17 +470,17 @@ func (p *traceParser) recordRead(rel, flags, errno string, failed, metadata bool
 		kind = ReadAbsent
 	case failed && (errno == "ENOENT" || errno == "ENOTDIR"):
 		kind = ReadAbsent
+	case metadata || failed || strings.Contains(flags, "O_PATH"):
+		// O_PATH supplies a handle, not contents or directory entries. Other
+		// failed opens did not read contents either; external stat identity
+		// still validates permissions, inode and timestamps.
+		kind = ReadStat
 	case strings.Contains(flags, "O_DIRECTORY"):
 		kind = ReadDir
-	case metadata:
-		kind = ReadStat
-	default:
-		// 其余失败（EACCES、EISDIR……）保守当成「存在且内容相关」：
-		// 多几次 miss，不会错命中。
 	}
-	previous, seen := p.obs.Reads[rel]
+	previous, seen := reads[rel]
 	if !seen {
-		p.obs.Reads[rel] = kind
+		reads[rel] = kind
 		return
 	}
 	// 已经确定不存在的路径不接受升级：那说明它是命令自己创建的，
@@ -439,7 +489,7 @@ func (p *traceParser) recordRead(rel, flags, errno string, failed, metadata bool
 		return
 	}
 	if kind.strength() > previous.strength() {
-		p.obs.Reads[rel] = kind
+		reads[rel] = kind
 	}
 }
 
@@ -504,7 +554,7 @@ type argTokens struct {
 //
 // 只取深度 0 的字符串，这样 execve 的 argv（在 [...] 里）和 sockaddr 结构
 // （在 {...} 里）不会被当成路径。
-func scanArgs(args string) (argTokens, bool) {
+func scanArgs(args string, pathLimit int) (argTokens, bool) {
 	var out argTokens
 	var flags strings.Builder
 	base := ""
@@ -523,6 +573,10 @@ func scanArgs(args string) (argTokens, bool) {
 					return out, true
 				}
 				out.paths = append(out.paths, pathArg{value: value, base: base, fromCwd: baseFromCwd})
+				if pathLimit > 0 && len(out.paths) == pathLimit {
+					out.flags = flags.String()
+					return out, false
+				}
 			}
 			i = next
 		case c == '<':

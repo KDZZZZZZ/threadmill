@@ -66,6 +66,10 @@ type ExecConfig struct {
 	ContainerImage             string `yaml:"container_image"`
 	ExternalSandbox            bool   `yaml:"external_sandbox"`
 	ExternalWorkspaceIsolation bool   `yaml:"external_workspace_isolation"`
+	HeavySlots                 int    `yaml:"heavy_slots"`      // 0 时调度器按 slots 派生
+	HeavyThreshold             int    `yaml:"heavy_threshold"`  // 秒；0 时默认 10s
+	MemoryBudgetMB             int64  `yaml:"memory_budget_mb"` // 0 时关闭历史 RSS 准入
+	RequireDependencyTracing   bool   `yaml:"require_dependency_tracing"`
 	// Cache 配置命令结果缓存：依赖文件版本一致的 agent 复用彼此的执行结果与产物。
 	Cache ExecCacheConfig `yaml:"cache"`
 }
@@ -397,6 +401,12 @@ func writePrivateFile(path string, data []byte) (err error) {
 func (c *ExecConfig) validate() error {
 	if c.Slots < 0 {
 		return fmt.Errorf("%w: exec.slots must not be negative", ErrInvalidConfig)
+	}
+	if c.HeavySlots < 0 || c.HeavyThreshold < 0 || c.MemoryBudgetMB < 0 {
+		return fmt.Errorf("%w: exec heavy_slots, heavy_threshold and memory_budget_mb must not be negative", ErrInvalidConfig)
+	}
+	if int64(c.HeavyThreshold) > (1<<63-1)/1_000_000_000 || c.MemoryBudgetMB > (1<<63-1)/(1<<20) {
+		return fmt.Errorf("%w: exec heavy_threshold or memory_budget_mb overflows runtime units", ErrInvalidConfig)
 	}
 	if strings.TrimSpace(c.ContainerImage) != c.ContainerImage {
 		return fmt.Errorf("%w: exec.container_image must not have surrounding whitespace", ErrInvalidConfig)

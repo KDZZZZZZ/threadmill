@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/KDZZZZZZ/threadmill/internal/env"
 )
@@ -64,6 +65,34 @@ func TestBindEnvSwapsExecView(t *testing.T) {
 	}
 }
 
+func TestBashAcceptsFreshExecution(t *testing.T) {
+	t.Parallel()
+	var received env.Cmd
+	tools := BindEnv(env.Open("task:1:verifier", nil).WithExec(fakeExec{output: "fresh result", received: &received}), []Tool{Bash()})
+	out, err := executeNamed(t, tools, "bash", `{"command":"printf test","fresh":true}`)
+	if err != nil || out.Content != "fresh result" {
+		t.Fatalf("fresh bash = %+v, %v", out, err)
+	}
+	if !received.Fresh || received.Role != "verifier" {
+		t.Fatalf("execution spec = %+v, want fresh verifier command", received)
+	}
+}
+
+func TestBashMarksCachedExecution(t *testing.T) {
+	t.Parallel()
+	tools := BindEnv(env.Open("task:1:verifier", nil).WithExec(fakeExec{
+		exitCode: 3, output: "test failed", cachedSegments: 2,
+		savedDuration: 2*time.Second, creatorRole: "executor",
+	}), []Tool{Bash()})
+	out, err := executeNamed(t, tools, "bash", `{"command":"false"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Content != "[cached: 2 segments, saved 2s, creator executor]\nexit 3\ntest failed" {
+		t.Fatalf("cached output annotation = %q", out.Content)
+	}
+}
+
 func TestBashNonZeroExitIsOutput(t *testing.T) {
 	t.Parallel()
 
@@ -81,10 +110,20 @@ func TestBashNonZeroExitIsOutput(t *testing.T) {
 }
 
 type fakeExec struct {
-	exitCode int
-	output   string
+	exitCode       int
+	output         string
+	received       *env.Cmd
+	cachedSegments int
+	savedDuration  time.Duration
+	creatorRole    string
 }
 
-func (f fakeExec) Run(_ context.Context, _ env.Cmd) (env.ExecResult, error) {
-	return env.ExecResult{ExitCode: f.exitCode, Output: f.output}, nil
+func (f fakeExec) Run(_ context.Context, spec env.Cmd) (env.ExecResult, error) {
+	if f.received != nil {
+		*f.received = spec
+	}
+	return env.ExecResult{
+		ExitCode: f.exitCode, Output: f.output,
+		CachedSegments: f.cachedSegments, CacheSavedDuration: f.savedDuration, CacheCreatorRole: f.creatorRole,
+	}, nil
 }
