@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ $# -eq 1 ]] || { printf 'Usage: %s <build-directory>\n' "$0" >&2; exit 2; }
+build_root="$(realpath -m -- "$1")"
+mkdir -p -- "$build_root"
+archive="$build_root/strace-6.8.tar.xz"
+source_root="$build_root/strace-6.8"
+
+# Official release v6.8, commit a592648ae7d380b79ffb65275ec153b9e4844a57.
+curl --fail --location --retry 2 --max-time 120 --output "$archive" \
+  https://github.com/strace/strace/releases/download/v6.8/strace-6.8.tar.xz
+printf '%s  %s\n' ba6950a96824cdf93a584fa04f0a733896d2a6bc5f0ad9ffe505d9b41e970149 "$archive" \
+  | sha256sum --check
+tar -xJf "$archive" -C "$build_root"
+(cd "$source_root" && \
+  ./configure --enable-mpers=no --enable-stacktrace=no --without-libselinux \
+    LDFLAGS=-static CFLAGS=-O2 > "$build_root/configure.log" 2>&1 && \
+  make -j4 > "$build_root/build.log" 2>&1)
+cp "$source_root/src/strace" "$build_root/strace"
+file -Lb "$build_root/strace" | grep -Eq 'statically linked|static-pie linked'
+"$build_root/strace" -qq -f -yy -e trace=%file -o "$build_root/probe.log" /bin/true
+test -s "$build_root/probe.log"
+{
+  gcc --version | head -1
+  file "$build_root/strace"
+  "$build_root/strace" -V
+  sha256sum "$archive" "$build_root/strace"
+} > "$build_root/manifest.txt"
+printf '%s\n' "$build_root/strace"

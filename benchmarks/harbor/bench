@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/../.." && pwd)"
 work_root="${THREADMILL_BENCHMARK_HOME:-$repo_root/benchmarks/.work}"
-binary="$work_root/harbor/bin/threadmill"
+binary="${THREADMILL_BINARY:-$work_root/harbor/bin/threadmill}"
 jobs_root="${THREADMILL_BENCHMARK_JOBS:-$work_root/jobs/${THREADMILL_BENCHMARK_NAME:-harbor}}"
 runtime="${THREADMILL_HARBOR_BIN:-harbor}"
 workspace_isolation_compose="$repo_root/benchmarks/harbor/docker-compose-workspace-isolation.yaml"
@@ -13,9 +13,10 @@ build_proxy_compose="$repo_root/benchmarks/harbor/docker-compose-build-proxy.yam
 usage() {
   cat <<'EOF'
 Usage:
-  benchmarks/harbor/bench doctor
+  benchmarks/harbor/bench doctor [--image <pinned-task-image>] [--tracer <static-strace>]
   benchmarks/harbor/bench build
   benchmarks/harbor/bench test
+  benchmarks/harbor/bench cache-ab <prepare|run|report|audit> [args...]
   benchmarks/harbor/bench run-path <task-or-dataset-path> <provider/model> [Harbor args...]
   benchmarks/harbor/bench run-dataset <dataset[@version]> <provider/model> [Harbor args...]
 EOF
@@ -27,13 +28,12 @@ die() {
 }
 
 doctor() {
-  command -v go >/dev/null 2>&1 || die "missing command: go"
-  command -v "$runtime" >/dev/null 2>&1 || die "missing command: $runtime"
-  command -v docker >/dev/null 2>&1 || die "missing command: docker"
-  docker info >/dev/null 2>&1 || die "Docker daemon is unavailable"
-  printf 'ok  runtime %s\n' "$($runtime --version)"
-  printf 'ok  go %s\n' "$(go version)"
-  printf 'ok  docker %s\n' "$(docker version --format '{{.Server.Version}}')"
+  local runtime_entry runtime_python
+  runtime_entry="$(readlink -f -- "$(command -v "$runtime")")"
+  runtime_python="$(dirname -- "$runtime_entry")/python"
+  [[ -x "$runtime_python" ]] || die "cannot locate Harbor's Python interpreter"
+  PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" \
+    "$runtime_python" -m benchmarks.harbor.doctor --binary "$binary" --runtime "$runtime" "$@"
 }
 
 build() {
@@ -47,7 +47,10 @@ run_adapter() {
   local source="$2"
   local model="$3"
   shift 3
-  build >/dev/null
+  if [[ -z "${THREADMILL_BINARY:-}" ]]; then
+    build >/dev/null
+  fi
+  [[ -f "$binary" ]] || die "missing binary: $binary"
   mkdir -p -- "$jobs_root"
 
   local version
@@ -89,6 +92,9 @@ run_adapter() {
   if [[ -n "${THREADMILL_STRACE_BINARY:-}" ]]; then
     agent_args+=(--agent-kwarg "tracer=$THREADMILL_STRACE_BINARY")
   fi
+  if [[ -n "${THREADMILL_CACHE_MODE:-}" ]]; then
+    agent_args+=(--agent-kwarg "cache_mode=$THREADMILL_CACHE_MODE")
+  fi
 
   PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" \
     "$runtime" run "$source_flag" "$source" \
@@ -99,7 +105,7 @@ run_adapter() {
 
 case "${1:-}" in
   doctor)
-    doctor
+    doctor "${@:2}"
     ;;
   build)
     build
@@ -112,7 +118,14 @@ case "${1:-}" in
     if [[ "${runtime##*/}" == pier ]]; then
       test_module=benchmarks.harbor.test_threadmill_pier_agent
     fi
-    (cd "$repo_root" && "$harbor_python" -m unittest "$test_module" -v)
+    (cd "$repo_root" && "$harbor_python" -m unittest "$test_module" benchmarks.harbor.test_cache_ab -v)
+    ;;
+  cache-ab)
+    harbor_entry="$(readlink -f -- "$(command -v "$runtime")")"
+    harbor_python="$(dirname -- "$harbor_entry")/python"
+    [[ -x "$harbor_python" ]] || die "cannot locate Harbor's Python interpreter"
+    PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" \
+      "$harbor_python" -m benchmarks.harbor.cache_ab "${@:2}"
     ;;
   run-path)
     [[ $# -ge 3 ]] || { usage >&2; exit 2; }
