@@ -41,6 +41,24 @@ def formal_preflight(tmload):
     return commit
 
 
+def terminal_state_errors(row):
+    if not row.get("backend", "").startswith("threadmill-"):
+        return {}
+    fields = {
+        "execution": ["runtime_cleanup_errors", "runtime_dirs", "active", "queued", "heavy_active", "heavy_queued", "tracked_process_groups"],
+        "vfs": ["materialize_active", "absorb_active", "overlay_active"],
+    }
+    return {f"{section}.{field}": row.get(section, {}).get(field)
+            for section, names in fields.items() for field in names if row.get(section, {}).get(field) != 0}
+
+
+def check_terminal_state(row):
+    row["terminal_state_errors"] = terminal_state_errors(row)
+    row["operation_errors"] = row["errors"]
+    if row["terminal_state_errors"]:
+        row["errors"] += 1
+
+
 def summarize(rows, required_repeats=None):
     """The rule is frozen in docs/cache-worktree-benchmark-protocol.md before runs."""
     out = {}
@@ -52,7 +70,7 @@ def summarize(rows, required_repeats=None):
             samples = [row for row in selected if row["agents"] == width]
             tier = {"agents": width, "repeats": len(samples),
                     "wall_ns_median": statistics.median(row["wall_ns"] for row in samples),
-                    "errors": sum(row["errors"] for row in samples)}
+                    "errors": sum(max(row["errors"], bool(terminal_state_errors(row))) for row in samples)}
             for field, values in {
                 "commands_per_second_median": [row.get("commands_per_second") for row in samples],
                 "physical_peak_delta_bytes_median": [row.get("physical_disk", {}).get("peak_delta_bytes") for row in samples],
@@ -193,6 +211,7 @@ def measure(argv, root, output, sample_interval=0.2):
     else:
         result = {"errors": 1, "wall_ns": 0, "operations": [], "latency": {}}
     result["physical_disk"], result["process_exit"] = disk, code
+    check_terminal_state(result)
     if code and not result.get("errors"):
         result["errors"] = 1
     dump(output, result)

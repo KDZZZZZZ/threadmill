@@ -1,4 +1,5 @@
 import importlib.util
+import copy
 import pathlib
 import subprocess
 import sys
@@ -11,6 +12,27 @@ SPEC.loader.exec_module(bench)
 
 
 class CapacityRuleTests(unittest.TestCase):
+    def test_cleanup_failure_cannot_enter_capacity_with_zero_operation_errors(self):
+        healthy = {"backend": "threadmill-external", "agents": 64, "wall_ns": 10, "errors": 0,
+                   "execution": {field: 0 for field in ["runtime_cleanup_errors", "runtime_dirs", "active", "queued",
+                                                        "heavy_active", "heavy_queued", "tracked_process_groups"]},
+                   "vfs": {field: 0 for field in ["materialize_active", "absorb_active", "overlay_active"]}}
+        invalid = copy.deepcopy(healthy)
+        invalid["agents"] = 128
+        invalid["execution"]["runtime_cleanup_errors"] = 1
+        rows = [copy.deepcopy(healthy) for _ in range(3)] + [copy.deepcopy(invalid) for _ in range(3)]
+        self.assertEqual(bench.summarize(rows, 3)["threadmill-external"]["effective_peak"], 64)
+        bench.check_terminal_state(invalid)
+        self.assertEqual(invalid["operation_errors"], 0)
+        self.assertEqual(invalid["errors"], 1)
+        self.assertEqual(invalid["terminal_state_errors"], {"execution.runtime_cleanup_errors": 1})
+
+    def test_missing_threadmill_terminal_counters_fail_closed(self):
+        row = {"backend": "threadmill-bwrap", "errors": 0}
+        bench.check_terminal_state(row)
+        self.assertGreater(row["errors"], 0)
+        self.assertIn("execution.runtime_dirs", row["terminal_state_errors"])
+
     def test_formal_cli_rejects_a_smoke_matrix_before_running_commands(self):
         with tempfile.TemporaryDirectory() as temporary:
             completed = subprocess.run([sys.executable, str(pathlib.Path(__file__).with_name("bench.py")), "matrix",

@@ -56,6 +56,15 @@ function git(repo, ...args) {
   });
 }
 
+export function createWorktreeLifecycle(repo) {
+  let pending = Promise.resolve();
+  return (...args) => {
+    const operation = pending.then(() => git(repo, "worktree", ...args));
+    pending = operation.catch(() => {});
+    return operation;
+  };
+}
+
 export async function replay(options) {
   const raw = await readFile(options.traceIn);
   const trace = JSON.parse(raw);
@@ -86,9 +95,10 @@ export async function replay(options) {
     fixture_commit: trace.fixture.commit, trace_sha256: sha256(raw), agents: trace.agents.length,
     serial: Boolean(trace.serial), wall_ns: 0, commands_per_second: 0, errors: 0,
     cache_oracle_mismatches: 0, operations: [], latency: {}, setup_ns: elapsed(setup),
-    native_tool_semantics: { read: "default truncation", list: "native createLsToolDefinition; default limit 500", bash: "unsandboxed native spawn" },
+    native_tool_semantics: { read: "default truncation", list: "native createLsToolDefinition; default limit 500", bash: "unsandboxed native spawn", worktree_lifecycle: "common-gitdir add/remove FIFO; waiting included in fork/release" },
     pi_build: build,
   };
+  const worktreeLifecycle = createWorktreeLifecycle(options.repo);
   let sharedCollect = Promise.resolve();
   const record = (row) => {
     if (row.error) result.errors++;
@@ -100,7 +110,7 @@ export async function replay(options) {
     const fork = nanoseconds();
     let created = false;
     try {
-      if (!options.sharedCwd) await git(options.repo, "worktree", "add", "--quiet", "-b", branch, cwd, trace.fixture.commit);
+      if (!options.sharedCwd) await worktreeLifecycle("add", "--quiet", "-b", branch, cwd, trace.fixture.commit);
       created = true;
       record({ agent: agent.id, index: -1, op: "fork", duration_ns: elapsed(fork) });
       const tools = Object.fromEntries(Object.entries(exports).map(([name, factory]) => [name, factory(cwd)]));
@@ -146,7 +156,7 @@ export async function replay(options) {
       const start = nanoseconds();
       let error;
       try {
-        if (created && !options.sharedCwd) await git(options.repo, "worktree", "remove", "--force", cwd);
+        if (created && !options.sharedCwd) await worktreeLifecycle("remove", "--force", cwd);
       } catch (err) { error = err.message; }
       record({ agent: agent.id, index: agent.operations.length + 1, op: "release", duration_ns: elapsed(start), ...(error ? { error } : {}) });
     }
