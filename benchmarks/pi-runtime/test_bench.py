@@ -12,6 +12,16 @@ SPEC.loader.exec_module(bench)
 
 
 class CapacityRuleTests(unittest.TestCase):
+    def test_historical_terminal_rule_requires_an_explicit_callback(self):
+        rows = [{"backend": "threadmill-historical98-overlay-external", "agents": 64,
+                 "wall_ns": 10, "errors": 0, "closed": closed} for closed in [True, True, True]]
+        backend = rows[0]["backend"]
+        self.assertIsNone(bench.summarize(rows, 3)[backend]["effective_peak"])
+        guard = lambda row: {} if row["closed"] else {"closed": False}
+        self.assertEqual(bench.summarize(rows, 3, terminal_errors=guard)[backend]["effective_peak"], 64)
+        rows[1]["closed"] = False
+        self.assertIsNone(bench.summarize(rows, 3, terminal_errors=guard)[backend]["effective_peak"])
+
     def test_cleanup_failure_cannot_enter_capacity_with_zero_operation_errors(self):
         healthy = {"backend": "threadmill-external", "agents": 64, "wall_ns": 10, "errors": 0,
                    "execution": {field: 0 for field in ["runtime_cleanup_errors", "runtime_dirs", "active", "queued",

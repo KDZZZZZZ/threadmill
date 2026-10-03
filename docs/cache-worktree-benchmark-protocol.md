@@ -74,7 +74,7 @@ python3 benchmarks/pi-runtime/bench.py matrix \
 
 `--widths`、`--repeats`、`--turns`、`--seed`、`--time-scale`、`--command-duty`、`--slots` 可用于 smoke；正式 defaults 为上述矩阵、40 turns、seed 42、time-scale 0.05、command-duty 0.12、8 slots。组默认 bwrap/external/Pi worktree；`--groups` 可以加 `pi-shared-cwd`，它没有隔离，写入可相互覆盖，只是速度参考。每次重复旋转组顺序，所有 benchmark 进程串行跑，避免争用 CPU。
 
-可选旧 `98ed7d3` OverlayFS 组不混入主结论。旧 tmload 不支持 JSON trace；只有将本 harness 接到旧 VFS 并验证完全相同操作、记录 harness patch 与旧源码 commit 后，才可作为历史衔接组。缺少这个适配时明确标“未测”，不能把旧报告中的同分布数字当作新 trace 数字。
+用户要求的旧 `98ed7d3` OverlayFS 历史组单列 48 行，不混入主结论。旧 tmload 不支持 JSON trace；[历史桥](../benchmarks/overlay-runtime/README.md) 将冻结 trace 接到未修改的旧 VFS/Exec，保留完整 collect/release 和 wall 内 Close，并在 retained 空间采样后逐树审计全部 checkpoint。桥与 runner 合入 PR、固定构建和单独补登记后才运行；源代码、native 能力验证和正式测量分别记录。缺少正式行时明确标“未测”，不能把旧报告中的同分布数字当作新 trace 数字。旧组的独立只读 ext4 lower / Btrfs upper 布局不得用于主组容量或空间倍数结论。
 
 物理空间的主证据为专用 Btrfs 文件系统 `df` 对应的 `statvfs` allocated bytes 前、采样 peak、收集与释放后。前后 `btrfs filesystem sync`，运行中每 200 ms 采样，不在每个 poll 强制 sync；sampled peak 是观测下界。保存所有样本以及 `btrfs filesystem du -s --raw` 的 shared/exclusive 原始输出。`du` apparent bytes 与公式不替代 df。fixture 的初始空间在 before 已存在；peak/retained 是其后的增量，涵盖 floor、live、checkpoint、Git 新对象和文件系统元数据。每次测量结束保存 retained 空间，随后删该次独立 runroot。
 
