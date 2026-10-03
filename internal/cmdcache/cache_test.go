@@ -390,20 +390,30 @@ func TestCachePeekDoesNotChangeStatisticsOrEntryAge(t *testing.T) {
 	}
 }
 
-func TestCacheNearMissesAreTelemetryWithoutReuse(t *testing.T) {
+func TestCacheNearMissesRemainTelemetryForRawFallbackAndPipelines(t *testing.T) {
 	cache := newCache(t, Config{})
 	live := t.TempDir()
-	key := Key{Command: "printf '%s\\n' value", Backend: "external"}
+	key := Key{Command: "echo value", Backend: "external"}
 	if _, err := cache.Store(live, key, observation(nil), Result{}); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range []string{"printf  '%s\\n'   value", "printf '%s\\n' value | head -1"} {
-		key.Command = command
-		if hit, err := cache.Lookup(live, key); err != nil || hit != nil {
-			t.Fatalf("near miss reused: %+v %v", hit, err)
-		}
+	key.Command = "echo   value"
+	if hit, err := cache.Lookup(live, key); err != nil || hit == nil {
+		t.Fatalf("static AST spelling did not reuse: %+v %v", hit, err)
 	}
-	if stats := cache.Stats(); stats.NearMissAST != 1 || stats.NearMissPipeline != 1 || stats.Hits != 0 {
+	key.Command = "echo value | head -1"
+	if hit, err := cache.Lookup(live, key); err != nil || hit != nil {
+		t.Fatalf("producer-only similarity reused: %+v %v", hit, err)
+	}
+	key.Command = "eval 'printf value'"
+	if entry, err := cache.Store(live, key, observation(nil), Result{}); err != nil || entry == nil {
+		t.Fatalf("store raw fallback: %+v %v", entry, err)
+	}
+	key.Command = "eval  'printf value'"
+	if hit, err := cache.Lookup(live, key); err != nil || hit != nil {
+		t.Fatalf("raw fallback similarity reused: %+v %v", hit, err)
+	}
+	if stats := cache.Stats(); stats.NearMissAST != 1 || stats.NearMissPipeline != 1 || stats.Hits != 1 {
 		t.Fatalf("near miss counters: %+v", stats)
 	}
 }
