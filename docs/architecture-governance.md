@@ -78,6 +78,14 @@ Agent Self-Claimed：以下实现都留在原有 Execution Sandbox → Command R
 
 已核对的横向参考：Pi [`7fbbd5f4 tools/index.ts`](https://github.com/earendil-works/pi/blob/7fbbd5f4a1d982bb02d63472dde0774fa639f99b/packages/coding-agent/src/core/tools/index.ts) 与 [`tools.test.ts`](https://github.com/earendil-works/pi/blob/7fbbd5f4a1d982bb02d63472dde0774fa639f99b/packages/coding-agent/test/tools.test.ts) 的原生文件/命令及截断边界；deepseek-harness [`c291e796 bash-local/src/index.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/c291e7961a515f6d7af9304e7fd1d257929aef26/packages/shell/bash-local/src/index.ts) 与 [`tests/executor.spec.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/c291e7961a515f6d7af9304e7fd1d257929aef26/packages/shell/bash-local/tests/executor.spec.ts) 的 cwd/env/超时行为；Eino [`9d983b36 backend_inmemory.go`](https://github.com/cloudwego/eino/blob/9d983b36a5112a1c233056b1a099825298fafb8f/adk/filesystem/backend_inmemory.go) 与 [`backend_inmemory_test.go`](https://github.com/cloudwego/eino/blob/9d983b36a5112a1c233056b1a099825298fafb8f/adk/filesystem/backend_inmemory_test.go) 的文件 backend 契约。后两者所查部分未提供可照搬的观察读集命令缓存。缓存行为来自本项目人类要求，原生工具速度不等于生产隔离能力。测量规则、来源与限制由后续 harness 提交中的可复现性能协议单独交付。
 
+## AST 命令缓存键（2026-10-03）
+
+Human Design：按评测方案阶段 6.1，将运行时 key 改为 AST 规范形式，去掉无关的空白与引号差异。
+
+Agent Self-Claimed：复用已固定的 [mvdan/sh v3.12.0](https://pkg.go.dev/mvdan.cc/sh/v3@v3.12.0/syntax#Quote)，只规范化单行静态调用与管道；普通参数引号仅在 `Quote` 判定不需要保护时移除。命令词引号、展开、多行、复合语法、源码反射及变量目标 builtin 保留 raw key。`tmcmd4` 分开 ast/raw 域并使旧索引冷启动；`Lookup` / `Peek` 每次只计算一次索引路径。依赖准入、后端与环境隔离、原命令执行和分段行为保持现有契约，没有新增业务箭头或依赖。producer 相似性仍仅作诊断。
+
+公开 Cache 接缝覆盖等价拼写、必要引号、raw fallback、旧索引隔离和失效操作；真实 `Scheduler.View.Run` 集成用例覆盖跨工作区复用、原始 `BASH_EXECUTION_STRING`、行号及 quoted declare/typeset 的静态变量读取。测试通过不能替代新版本的 Harbor A 影子审计；A 尚未完成，不能据此宣称零误命中或性能提升。Pi、deepseek-harness 的上述 Bash 边界都保留原命令；Eino 的文件 backend 契约用于检查公开接缝，这些横向参考没有提供 AST 缓存等价性证明。
+
 ## Evaluation
 
 | Module | Evaluation dimensions | Evidence from logs and monitoring |

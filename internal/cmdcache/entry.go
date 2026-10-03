@@ -33,8 +33,15 @@ type Key struct {
 }
 
 func (k Key) index() string {
-	// Older entries omit HOME and external reads and cannot be trusted.
-	sum := sha256.Sum256([]byte("tmcmd3\n" + k.Command + "\n" + k.Backend + "\n" + k.EnvHash))
+	if command := normalizedCommand(k.Command); command != "" {
+		return k.commandIndex("ast\n" + command)
+	}
+	return k.commandIndex("raw\n" + k.Command)
+}
+
+func (k Key) commandIndex(command string) string {
+	// Version four separates normalized keys from earlier raw-command entries.
+	sum := sha256.Sum256([]byte("tmcmd4\n" + command + "\n" + k.Backend + "\n" + k.EnvHash))
 	return hex.EncodeToString(sum[:])
 }
 

@@ -180,7 +180,8 @@ func (c *Cache) Lookup(live string, key Key, home ...string) (*Entry, error) {
 	c.stats.Roles[boundedRole(key.Role)] = role
 	c.mu.Unlock()
 
-	candidates, err := c.candidates(key)
+	index := c.indexDir(key)
+	candidates, err := c.candidates(index)
 	if err != nil || len(candidates) == 0 {
 		if err == nil {
 			c.recordMiss("no_key")
@@ -190,7 +191,7 @@ func (c *Cache) Lookup(live string, key Key, home ...string) (*Entry, error) {
 	}
 	miss := "corrupt"
 	for _, name := range candidates {
-		full := filepath.Join(c.indexDir(key), name)
+		full := filepath.Join(index, name)
 		entry, err := loadEntry(full)
 		if err != nil {
 			// 条目损坏或被并发回收：删掉它继续找下一条。
@@ -231,8 +232,8 @@ func (c *Cache) Lookup(live string, key Key, home ...string) (*Entry, error) {
 }
 
 // candidates 返回同一 Key 下按最近使用排序的条目文件名，数量有上限。
-func (c *Cache) candidates(key Key) ([]string, error) {
-	entries, err := os.ReadDir(c.indexDir(key))
+func (c *Cache) candidates(index string) ([]string, error) {
+	entries, err := os.ReadDir(index)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -373,12 +374,13 @@ func (c *Cache) Store(live string, key Key, obs Observation, result Result, home
 
 // Peek validates candidates without counters, entry touches, cleanup, or replay.
 func (c *Cache) Peek(live string, key Key, home ...string) (*Entry, error) {
-	names, err := c.candidates(key)
+	index := c.indexDir(key)
+	names, err := c.candidates(index)
 	if err != nil {
 		return nil, err
 	}
 	for _, name := range names {
-		entry, err := loadEntry(filepath.Join(c.indexDir(key), name))
+		entry, err := loadEntry(filepath.Join(index, name))
 		if err != nil || !c.artifactsPresent(entry) {
 			continue
 		}
