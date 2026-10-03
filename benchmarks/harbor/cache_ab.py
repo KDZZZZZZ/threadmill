@@ -22,7 +22,8 @@ _METRICS = ("wall_seconds", "agent_seconds", "passed", "tokens", "bash_calls")
 _MODES = {"off": "off", "A": "shadow", "B": "live", "C": "live"}
 _REPO = Path(__file__).resolve().parents[2]
 _ENV_KEYS = ("DOCKER_HOST", "DOCKER_CONTEXT", "THREADMILL_CONTEXT_WINDOW", "THREADMILL_EXEC_SLOTS",
-             "THREADMILL_MODEL_PROXY", "THREADMILL_BUILD_PROXY", "OPENAI_BASE_URL", "OPENAI_API_BASE")
+             "THREADMILL_MODEL_PROXY", "THREADMILL_BUILD_PROXY", "OPENAI_BASE_URL", "OPENAI_API_BASE",
+             "THREADMILL_BWRAP_BINARY", "THREADMILL_BENCH_EXEC_BACKEND")
 
 
 def _environment() -> dict:
@@ -179,6 +180,12 @@ def prepare(args) -> None:
                         ("workspace", args.workspace), ("runtime_version", runtime_version)):
         if doctor.get(name) != value:
             raise ValueError(f"doctor does not match {name}; repeat preflight for these artifacts")
+    if doctor.get("exec_backend", "external") != args.exec_backend:
+        raise ValueError("doctor does not match exec_backend")
+    if args.exec_backend == "bwrap" and doctor.get("runtime_preflight", {}).get("exec_sandbox_backend") != "bwrap":
+        raise ValueError("doctor did not admit requested bwrap backend")
+    if args.bwrap and doctor.get("bwrap_sha256") != _sha(args.bwrap):
+        raise ValueError("doctor does not match bwrap artifact")
     source = _source()
     if args.phase == "full" and source["dirty"]:
         raise ValueError("formal measurements require a clean, fixed commit")
@@ -237,6 +244,8 @@ def prepare(args) -> None:
             "runtime": args.runtime, "runtime_version": runtime_version,
             "binary": {"path": str(args.binary.resolve()), "sha256": _sha(args.binary)},
             "tracer": {"path": str(args.tracer.resolve()), "sha256": _sha(args.tracer)},
+            "exec_backend": args.exec_backend,
+            "bwrap": ({"path": str(args.bwrap.resolve()), "sha256": _sha(args.bwrap)} if args.bwrap else None),
             "configs": config_paths, "harbor_args": args.harbor_arg,
             "pass_criterion": {"reward_key": args.reward_key, "minimum": args.pass_value},
             "workspace": args.workspace, "environment_sha256": _environment(),
@@ -279,7 +288,8 @@ def _verify_frozen(plan: dict) -> None:
         raise ValueError("Harbor/Pier runtime changed")
     if _environment() != plan["environment_sha256"]:
         raise ValueError("launch environment changed after preregistration")
-    for artifact in [plan["binary"], plan["tracer"], *plan["configs"].values()]:
+    for artifact in [plan["binary"], plan["tracer"], *plan["configs"].values(),
+                     *([plan["bwrap"]] if plan.get("bwrap") else [])]:
         if _sha(Path(artifact["path"])) != artifact["sha256"]:
             raise ValueError(f"artifact changed: {artifact['path']}")
     info = json.loads(_command("docker", "info", "--format", "{{json .}}"))
@@ -408,6 +418,11 @@ def run(root: Path, group: str | None = None) -> None:
                        "THREADMILL_HARBOR_BIN": plan["runtime"], "THREADMILL_CACHE_MODE": _MODES[selected],
                        "THREADMILL_BENCHMARK_JOBS": str(root / "jobs"),
                        "THREADMILL_BENCH_WORKSPACE": plan["workspace"]}
+                env["THREADMILL_BENCH_EXEC_BACKEND"] = plan.get("exec_backend", "external")
+                if plan.get("bwrap"):
+                    env["THREADMILL_BWRAP_BINARY"] = plan["bwrap"]["path"]
+                else:
+                    env.pop("THREADMILL_BWRAP_BINARY", None)
                 config = plan["configs"].get("C" if selected == "C" else "base")
                 if config:
                     env["THREADMILL_BENCH_CONFIG"] = config["path"]
@@ -447,6 +462,8 @@ def main() -> int:
     prep.add_argument("--doctor", type=Path, required=True)
     prep.add_argument("--binary", type=Path, required=True)
     prep.add_argument("--tracer", type=Path, required=True)
+    prep.add_argument("--bwrap", type=Path, default=os.environ.get("THREADMILL_BWRAP_BINARY"))
+    prep.add_argument("--exec-backend", choices=("external", "bwrap"), default="external")
     prep.add_argument("--runtime", default=os.environ.get("THREADMILL_HARBOR_BIN", "harbor"))
     prep.add_argument("--workspace", default="/workspace/repo")
     prep.add_argument("--config", type=Path)

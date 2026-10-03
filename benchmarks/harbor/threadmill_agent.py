@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -18,6 +19,7 @@ from harbor.models.agent.context import AgentContext
 
 _REMOTE_BINARY = PurePosixPath("/installed-agent/threadmill")
 _REMOTE_TRACER = PurePosixPath("/usr/local/bin/strace")
+_REMOTE_BWRAP = PurePosixPath("/usr/bin/bwrap")
 _REMOTE_HOME = PurePosixPath("/tmp/threadmill-agent-home")
 _REMOTE_TMP = PurePosixPath("/tmp/threadmill-agent-tmp")
 _REMOTE_VFS = PurePosixPath("/threadmill-vfs")
@@ -75,6 +77,7 @@ def _runtime_config(
     exec_slots: int | None,
     model_proxy: str | None = None,
     cache_mode: str | None = None,
+    exec_backend: str = "external",
 ) -> str:
     lines = [
         "llm:",
@@ -84,8 +87,8 @@ def _runtime_config(
         f"  model: {_yaml_string(model)}",
         f"  context_window: {context_window}",
         "exec:",
-        "  external_sandbox: true",
-        "  external_workspace_isolation: true",
+        f"  external_sandbox: {str(exec_backend == 'external').lower()}",
+        f"  external_workspace_isolation: {str(exec_backend == 'external').lower()}",
         "  require_dependency_tracing: true",
     ]
     if model_proxy:
@@ -142,6 +145,8 @@ class ThreadmillRunner:
         *args: Any,
         binary: str | os.PathLike[str] | None = None,
         tracer: str | os.PathLike[str] | None = None,
+        bwrap: str | os.PathLike[str] | None = None,
+        exec_backend: str = "external",
         context_window: int = 272_000,
         exec_slots: int | None = None,
         model_proxy: str | None = None,
@@ -161,6 +166,14 @@ class ThreadmillRunner:
         self._tracer = None if tracer is None else Path(tracer).expanduser().resolve()
         if self._tracer is not None and not self._tracer.is_file():
             raise FileNotFoundError(f"strace binary not found: {self._tracer}")
+        bwrap = bwrap or os.environ.get("THREADMILL_BWRAP_BINARY")
+        self._bwrap = None if bwrap is None else Path(bwrap).expanduser().resolve()
+        if self._bwrap is not None and not self._bwrap.is_file():
+            raise FileNotFoundError(f"bwrap binary not found: {self._bwrap}")
+        if exec_backend not in ("external", "bwrap"):
+            raise ValueError("exec_backend must be external or bwrap")
+        self._exec_backend = exec_backend
+        self._task_owner: str | None = None
         self._context_window = int(context_window)
         if self._context_window <= 0:
             raise ValueError("context_window must be positive")
@@ -184,10 +197,35 @@ class ThreadmillRunner:
     @override
     async def install(self, environment: BaseEnvironment) -> None:
         _require_static_tracer(self._tracer)
+        if self._bwrap is not None:
+            try:
+                os.getxattr(self._bwrap, "security.capability")
+            except OSError as error:
+                if error.errno not in (errno.ENODATA, errno.EOPNOTSUPP):
+                    raise
+            else:
+                raise ValueError("bwrap source must have no file capabilities")
+        identity = await self.exec_as_agent(environment, command="id -u; id -g")
+        ids = (identity.stdout or "").splitlines()
+        if identity.return_code != 0 or len(ids) != 2 or not all(re.fullmatch(r"\d+", value) for value in ids):
+            raise RuntimeError("Threadmill preflight failed: task user identity")
+        owner = shlex.quote(":".join(ids))
+        self._task_owner = owner
+        owned_dirs = (_REMOTE_LOGS, _REMOTE_VFS, _REMOTE_HOME, _REMOTE_TMP,
+                      _REMOTE_CONFIG.parent, _REMOTE_CREDENTIALS.parent)
+        private_dirs = (_REMOTE_HOME, _REMOTE_TMP, _REMOTE_CONFIG.parent, _REMOTE_CREDENTIALS.parent)
+        owned = " ".join(shlex.quote(path.as_posix()) for path in owned_dirs)
+        private = " ".join(shlex.quote(path.as_posix()) for path in private_dirs)
         await environment.upload_file(self._binary, _REMOTE_BINARY.as_posix())
         if self._tracer is not None:
             await environment.upload_file(self._tracer, _REMOTE_TRACER.as_posix())
+        if self._bwrap is not None:
+            await environment.upload_file(self._bwrap, _REMOTE_BWRAP.as_posix())
         workspace = shlex.quote(self._workspace.as_posix())
+        bwrap_chmod = (
+            f"chown root:root {_REMOTE_BWRAP.as_posix()}; chmod 0755 {_REMOTE_BWRAP.as_posix()}; "
+            if self._bwrap is not None else ""
+        )
         tracer_chmod = (
             f"chmod 0755 {shlex.quote(_REMOTE_TRACER.as_posix())}; "
             if self._tracer is not None
@@ -198,7 +236,8 @@ class ThreadmillRunner:
             command=(
                 "set -eu; "
                 f"chmod 0755 {shlex.quote(_REMOTE_BINARY.as_posix())}; "
-                f"{tracer_chmod}"
+                f"{tracer_chmod}{bwrap_chmod}"
+                f"mkdir -p {owned}; chown {owner} {owned}; chmod 0700 {private}; "
                 f"mkdir -p {shlex.quote(_REMOTE_LOGS.as_posix())} "
                 f"{shlex.quote(_REMOTE_VFS.as_posix())}; "
                 f"probe=$(mktemp -d {_REMOTE_VFS.as_posix()}/probe.XXXXXX); "
@@ -254,13 +293,74 @@ class ThreadmillRunner:
             ),
         )
         setup = (result.stdout or "").splitlines()
-        for requirement in ("mount_namespace", "repo_to_vfs_reflink", "strace_probe"):
+        requirements = ["repo_to_vfs_reflink", "strace_probe"]
+        if self._exec_backend == "external":
+            requirements.append("mount_namespace")
+        for requirement in requirements:
             if f"{requirement}=yes" not in setup:
                 raise RuntimeError(f"Threadmill preflight failed: {requirement}")
         version = next((line for line in setup if line.startswith("strace_version=")), "")
         match = re.fullmatch(r"strace_version=(\d+)\.(\d+)(?:[.\w-]*)", version)
         if not match or tuple(map(int, match.groups())) < (5, 3):
             raise RuntimeError(f"Threadmill preflight requires strace >= 5.3: {version}")
+
+        bwrap_version = ""
+        if self._bwrap is not None or self._exec_backend == "bwrap":
+            bwrap_version = (
+                "bwrap_resolved=$(command -v bwrap); "
+                "printf 'bwrap_resolved=%s\\n' \"$bwrap_resolved\"; "
+                "bwrap_canonical=$(readlink -f \"$bwrap_resolved\"); "
+                "printf 'bwrap_canonical=%s\\n' \"$bwrap_canonical\"; "
+                f"if test \"$bwrap_canonical\" != \"$(readlink -f {_REMOTE_BWRAP.as_posix()})\"; "
+                "then printf 'bwrap PATH mismatch\\n'; exit 1; fi; "
+                f"test -x {_REMOTE_BWRAP.as_posix()}; "
+                f"test \"$(stat -c %a {_REMOTE_BWRAP.as_posix()})\" = 755; "
+                f"{_REMOTE_BWRAP.as_posix()} --version; sha256sum {_REMOTE_BWRAP.as_posix()}; "
+                "if command -v getcap >/dev/null 2>&1; then "
+                f"caps=$(getcap {_REMOTE_BWRAP.as_posix()}); "
+                "if test -n \"$caps\"; then printf '%s\\n' \"$caps\"; exit 1; fi; "
+                "printf 'bwrap_filecaps=none\\n'; "
+                "else printf 'bwrap_filecaps_check=tool_unavailable\\n'; fi; "
+            )
+        task_log = shlex.quote((_REMOTE_LOGS / "task-setup.txt").as_posix())
+        task_probe = await self.exec_as_agent(
+            environment,
+            command=(
+                "set +e; ( set -eu; id; "
+                "awk '/^Cap|^NoNewPrivs/ {print}' /proc/self/status; "
+                "strace_resolved=$(command -v strace); "
+                "printf 'strace_resolved=%s\\n' \"$strace_resolved\"; "
+                "strace_canonical=$(readlink -f \"$strace_resolved\"); "
+                "printf 'strace_canonical=%s\\n' \"$strace_canonical\"; "
+                f"if test \"$strace_canonical\" != \"$(readlink -f {_REMOTE_TRACER.as_posix()})\"; "
+                "then printf 'strace PATH mismatch\\n'; exit 1; fi; "
+                f"sha256sum {_REMOTE_TRACER.as_posix()}; "
+                f"{bwrap_version}"
+                f"probe=$(mktemp -d {_REMOTE_VFS.as_posix()}/probe.XXXXXX); repo_probe=''; write=''; "
+                "trap 'probe_exit=$?; trap - EXIT; cleanup_exit=0; "
+                "rm -rf \"$probe\" || cleanup_exit=1; "
+                "if test -n \"$repo_probe\"; then rm -f \"$repo_probe\" || cleanup_exit=1; fi; "
+                "if test -n \"$write\"; then rm -f \"$write\" || cleanup_exit=1; fi; "
+                "if test \"$cleanup_exit\" -ne 0; then printf \"task_cleanup=no\\n\" >&2; "
+                "if test \"$probe_exit\" -eq 0; then probe_exit=1; fi; fi; exit \"$probe_exit\"' EXIT; "
+                f"repo_probe=$(mktemp {workspace}/.threadmill-reflink-probe.XXXXXX); "
+                "dd if=/dev/urandom of=\"$repo_probe\" bs=4096 count=1 status=none; "
+                "test -s \"$repo_probe\"; cp --reflink=always \"$repo_probe\" \"$probe/reflink\"; "
+                "cmp \"$repo_probe\" \"$probe/reflink\"; printf 'task_repo_to_vfs_reflink=yes\\n'; "
+                f"for path in {owned}; do "
+                "write=$(mktemp \"$path/.threadmill-write-probe.XXXXXX\"); printf x >\"$write\"; "
+                "test \"$(cat \"$write\")\" = x; rm -f \"$write\"; write=''; done; "
+                "printf 'task_directory_write=yes\\n'; "
+                f") >{task_log} 2>&1; probe_exit=$?; cat {task_log}; log_exit=$?; "
+                "if test \"$probe_exit\" -ne 0; then exit \"$probe_exit\"; fi; exit \"$log_exit\""
+            ),
+            cwd=self._workspace.as_posix(),
+        )
+        if task_probe.return_code != 0:
+            raise RuntimeError(f"Threadmill task-user preflight failed: {task_probe.stdout} {task_probe.stderr}")
+        task_setup = (task_probe.stdout or "").splitlines()
+        if not {"task_repo_to_vfs_reflink=yes", "task_directory_write=yes"}.issubset(task_setup):
+            raise RuntimeError("Threadmill task-user preflight incomplete")
 
     async def _write_configuration(
         self,
@@ -269,6 +369,8 @@ class ThreadmillRunner:
         model: str,
         api_key: str,
     ) -> None:
+        if self._task_owner is None:
+            raise RuntimeError("Threadmill install must establish task user before configuration upload")
         await self.exec_as_agent(
             environment,
             command=(
@@ -300,6 +402,7 @@ class ThreadmillRunner:
                 self._exec_slots,
                 self._model_proxy,
                 self._cache_mode,
+                self._exec_backend,
             ),
             remote_path=_REMOTE_CONFIG.as_posix(),
             filename="config.yaml",
@@ -310,10 +413,23 @@ class ThreadmillRunner:
             remote_path=_REMOTE_CREDENTIALS.as_posix(),
             filename="credentials.yaml",
         )
-        await self.exec_as_agent(
+        private_files = [_REMOTE_CONFIG, _REMOTE_CREDENTIALS]
+        if self.config_source is not None:
+            private_files.append(_REMOTE_USER_CONFIG)
+        uploaded = " ".join(shlex.quote(path.as_posix()) for path in private_files)
+        permissions = await self.exec_as_root(
             environment,
-            command=f"chmod 0600 {shlex.quote(_REMOTE_CREDENTIALS.as_posix())}",
+            command=f"set -eu; chown {self._task_owner} {uploaded}; chmod 0600 {uploaded}",
         )
+        if permissions.return_code != 0:
+            raise RuntimeError(f"Threadmill configuration ownership failed: {permissions.stderr}")
+        readable = await self.exec_as_agent(
+            environment,
+            command=(f"set -eu; for path in {uploaded}; do test -r \"$path\"; done; "
+                     f"stat -c '%n:%u:%g:%a' {uploaded}"),
+        )
+        if readable.return_code != 0:
+            raise RuntimeError("Threadmill task user cannot read private configuration")
 
     def _run_timeout_sec(self) -> int:
         try:
@@ -376,6 +492,8 @@ class ThreadmillRunner:
         expected_enabled = self._cache_mode != "off"
         if preflight.get("exec_dependency_tracing_enabled") is not expected_enabled:
             raise RuntimeError("Threadmill preflight failed: exec_dependency_tracing_enabled")
+        if self._exec_backend == "bwrap" and preflight.get("exec_sandbox_backend") != "bwrap":
+            raise RuntimeError("Threadmill preflight failed: requested bwrap backend")
         command = (
             "set +e; "
             f"{shlex.quote(_REMOTE_BINARY.as_posix())} "
