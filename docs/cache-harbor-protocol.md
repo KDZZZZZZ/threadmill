@@ -36,6 +36,10 @@ benchmarks/harbor/bench doctor --image <preloaded-task-image> > /absolute/evalua
 
 Docker data-root 在 Btrfs 上并不意味着 driver 已是 `btrfs`。依据 [Docker Btrfs 文档](https://docs.docker.com/engine/storage/drivers/btrfs-driver/#configure-docker-to-use-the-btrfs-storage-driver)，两项分别检查。现有 daemon 的配置不由脚本修改；需要独立 daemon 时，通过 `DOCKER_HOST` 指向它，并同时隔离 containerd 的 socket 和 root。
 
+安装探针先取得镜像默认任务用户的数字 UID:GID。root 只准备固定的工具、日志、VFS、HOME、TMPDIR 和配置目录；任务用户再验证 4 KiB reflink、目录可写、二进制 ABI 和 PATH 身份。上传的配置与凭证逐文件设为该用户所有、0600，并由任务用户检查可读。安装、doctor 和正式执行不覆盖镜像 USER。失败的 doctor 也保留原始 JSON stdout、stderr 和退出码。
+
+默认仍使用 `external` 边界。可显式选择现有完整 bwrap 后端，并通过 `THREADMILL_BWRAP_BINARY` 上传兼容任务镜像的普通二进制到 `/usr/bin/bwrap`，安装模式固定为 root:root/0755、不带 file capabilities。任务用户解析到的 bwrap/strace 必须与固定安装路径相同；PATH 遮蔽立即失败。`doctor` 和 `cache-ab prepare` 都接受 `--exec-backend bwrap --bwrap <binary>`，后者固定后端与二进制哈希并传给每个 trial；直接 `run-path` 可设置 `THREADMILL_BENCH_EXEC_BACKEND=bwrap`。这不会赋予任务用户新的宿主权限，完整 namespace/ptrace 探针仍是模型请求前的门禁。参数及探针形状属于 Agent Self-Claimed。
+
 ## 配对运行
 
 先准备本地任务文件和已构建/已下载的任务镜像。`prepare` 要求二进制、tracer、工作目录和 Harbor 版本与 doctor 记录一致；复用 Harbor 的环境内容标识定位镜像，并记录实际 ID。不能在实验中把镜像标签移动到另一个镜像。任务的隐藏测试和 grader 保持原样。provider/model 与基础配置由实验者明确指定，凭证继续使用 Harbor 的既有环境变量，不写进 plan。通过判据也须事前固定：默认 `--reward-key reward --pass-value 1`；SWERefactorBench 的已阅 scorer 使用 `score` 和 100 分上限，应指定 `--reward-key score --pass-value 100`。附加的数值来源字段或阶段计数不当作通过判据。
@@ -106,3 +110,7 @@ Harbor 0.22.0 的 `BaseInstalledAgent._exec` 对非零返回码抛异常，适�
 最终准入记录 `/home/oops/evals/threadmill-cache-bench/doctor-btrfs-lang03-admission.json` 另保存镜像 `User` 和实际 runtime 身份 `uid=2000(agent)`。只读检查 `lang03-user-capabilities.txt` 显示 sudo 不存在、inheritable/permitted/effective/ambient capabilities 均为零，已有 bash/setpriv/unshare 都是普通 0755 文件。当前没有现成受支持的挂载能力。Harbor 阶段 0 的真实任务外部前提因此未满足，pilot/A/B 保持停止；不通过切换 root 或新增特权包装程序解除门禁。复验须固定新的、已获批准的能力配置和镜像 ID，以原任务用户通过 doctor 和首次模型前的诊断，再登记 3 题各 1 次 pilot；正式实验还须满足 PR 进入 `main` 和完整样本条件。
 
 最终源码重建的二进制 `/home/oops/evals/threadmill-cache-bench/threadmill-harbor-final` 的 SHA256 为 `fd5a2ef81550b579e3f54bdcf3750951317896e53e5ce119021729cda9613b3a`。同一二进制重验的 root 预检镜像通过记录为 `doctor-btrfs-root-final.json`，真实 lang03 用户失败记录为 `doctor-btrfs-lang03-final.json`；两者均在同一 evaluation 目录中，不能把前者用作真实任务准入证据。
+
+2026-10-03 的真实任务复验保存在 `/home/oops/evals/threadmill-cache-bench/harbor-admission-20261003/`，未覆盖先前失败。固定 runtime 为 `b839b28747ae398f7badec9d2d0e51ae7e732c74`，静态 strace 6.8 和 lang03 镜像 ID 均保持原值。使用 [Debian Bookworm 的 bubblewrap 0.8.0-2+deb12u1](https://packages.debian.org/bookworm/amd64/bubblewrap/download)，核验镜像内 Debian keyring 对 InRelease 的签名、索引与包的 SHA256；47,320 字节的 deb 哈希为 `3cc9134a3286ad01a323dcd924ba123eb634cefaeec82d774257e06308aeaadb`，解包 ELF 哈希为 `85580dd52ed366ece8844e90fa75ac7c4de8802963071344e123221fb9f6f11e`。
+
+`doctor-bwrap-lang03-diagnostic.json` 显示 UID 2000 的二进制加载、固定 PATH、非空 reflink、目录写入及配置 0600 均通过，但完整运行时仍报告 `sandbox_unavailable`、后端 `unavailable`、追踪不可用并退出 1。`actual-user-namespace-probe.json` 的最小 bwrap 命令也返回 `setting up uid map: Permission denied`；同秒内核审计记录进入 `unprivileged_userns` 后，`setpcap` 和 `proc/177/uid_map` 写入被 AppArmor 拒绝。未修改宿主策略、sysctl、任务 USER 或增加特权包装器，没有模型调用。阶段 0 的实际能力前提仍未满足，pilot/A/B 尚未启动。

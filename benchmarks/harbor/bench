@@ -89,6 +89,12 @@ run_adapter() {
   if [[ -n "${THREADMILL_BENCH_CONFIG:-}" ]]; then
     agent_args+=(--agent-kwarg "config=$THREADMILL_BENCH_CONFIG")
   fi
+  if [[ -n "${THREADMILL_BWRAP_BINARY:-}" ]]; then
+    agent_args+=(--agent-kwarg "bwrap=$THREADMILL_BWRAP_BINARY")
+  fi
+  if [[ -n "${THREADMILL_BENCH_EXEC_BACKEND:-}" ]]; then
+    agent_args+=(--agent-kwarg "exec_backend=$THREADMILL_BENCH_EXEC_BACKEND")
+  fi
   if [[ -n "${THREADMILL_STRACE_BINARY:-}" ]]; then
     agent_args+=(--agent-kwarg "tracer=$THREADMILL_STRACE_BINARY")
   fi
@@ -114,11 +120,11 @@ case "${1:-}" in
     harbor_entry="$(readlink -f -- "$(command -v "$runtime")")"
     harbor_python="$(dirname -- "$harbor_entry")/python"
     [[ -x "$harbor_python" ]] || die "cannot locate Harbor's Python interpreter"
-    test_module=benchmarks.harbor.test_threadmill_agent
+    test_modules=(benchmarks.harbor.test_threadmill_agent benchmarks.harbor.test_threadmill_bwrap)
     if [[ "${runtime##*/}" == pier ]]; then
-      test_module=benchmarks.harbor.test_threadmill_pier_agent
+      test_modules=(benchmarks.harbor.test_threadmill_pier_agent)
     fi
-    (cd "$repo_root" && "$harbor_python" -m unittest "$test_module" benchmarks.harbor.test_cache_ab -v)
+    (cd "$repo_root" && "$harbor_python" -m unittest "${test_modules[@]}" benchmarks.harbor.test_cache_ab -v)
     ;;
   cache-ab)
     harbor_entry="$(readlink -f -- "$(command -v "$runtime")")"

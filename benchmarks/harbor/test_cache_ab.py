@@ -34,6 +34,7 @@ def pilot(directory, *, write_mismatches=0, rewards_by_task=None):
         tasks.append(task)
     args = argparse.Namespace(output=root / "experiment", phase="pilot", task=tasks,
                               doctor=doctor, binary=binary, tracer=tracer,
+                              bwrap=None, exec_backend="external",
                               hints_config=None, config=None, off_tasks=3, seed=1,
                               harbor_arg=[], model="provider/model", runtime="test-harbor",
                               workspace="/workspace/repo", reward_key="reward", pass_value=1.0)
@@ -104,6 +105,46 @@ def row(group, task, attempt, wall, **counts):
 
 
 class CacheABTest(unittest.TestCase):
+    def test_preregistration_rejects_a_different_bwrap_admission(self):
+        for mismatch in ("exec_backend", "runtime_preflight", "bwrap_sha256"):
+            with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as directory:
+                args, process, _ = pilot(directory)
+                args.exec_backend, args.bwrap = "bwrap", Path(directory) / "bwrap"
+                args.bwrap.write_bytes(b"pinned bwrap")
+                doctor = json.loads(args.doctor.read_text())
+                doctor.update(exec_backend="bwrap", runtime_preflight={"exec_sandbox_backend": "bwrap"},
+                              bwrap_sha256=hashlib.sha256(args.bwrap.read_bytes()).hexdigest())
+                doctor[mismatch] = {} if mismatch == "runtime_preflight" else "different"
+                args.doctor.write_text(json.dumps(doctor))
+                with patch("benchmarks.harbor.cache_ab.subprocess.run", side_effect=process):
+                    with self.assertRaisesRegex(ValueError, "doctor.*(backend|bwrap)"):
+                        prepare(args)
+                self.assertFalse((args.output / "plan.json").exists())
+
+    def test_registered_bwrap_is_forwarded_and_cannot_change_before_a_trial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args, process, launched = pilot(directory)
+            args.exec_backend, args.bwrap = "bwrap", Path(directory) / "bwrap"
+            args.bwrap.write_bytes(b"pinned bwrap")
+            doctor = json.loads(args.doctor.read_text())
+            doctor.update(exec_backend="bwrap", runtime_preflight={"exec_sandbox_backend": "bwrap"},
+                          bwrap_sha256=hashlib.sha256(args.bwrap.read_bytes()).hexdigest())
+            args.doctor.write_text(json.dumps(doctor))
+
+            def checked_process(command, **kwargs):
+                if Path(command[0]).name == "bench":
+                    self.assertEqual(kwargs["env"]["THREADMILL_BENCH_EXEC_BACKEND"], "bwrap")
+                    self.assertEqual(kwargs["env"]["THREADMILL_BWRAP_BINARY"], str(args.bwrap))
+                return process(command, **kwargs)
+
+            with patch("benchmarks.harbor.cache_ab.subprocess.run", side_effect=checked_process):
+                prepare(args)
+                run(args.output, "off")
+                args.bwrap.write_bytes(b"changed bwrap")
+                with self.assertRaisesRegex(ValueError, "artifact changed.*bwrap"):
+                    run(args.output, "A")
+            self.assertEqual(launched, ["off"] * 3)
+
     def test_preregistration_rejects_doctor_for_another_binary(self):
         with tempfile.TemporaryDirectory() as directory:
             args, process, _ = pilot(directory)

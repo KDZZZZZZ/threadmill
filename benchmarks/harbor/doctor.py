@@ -49,9 +49,9 @@ class _Container:
 
 
 def check(*, binary: Path, tracer: Path | None, image: str | None,
-          workspace: str, runtime: str) -> dict:
+          workspace: str, runtime: str, bwrap: Path | None = None, exec_backend: str = "external") -> dict:
     report = {"utc": datetime.now(timezone.utc).isoformat(), "kernel": platform.release(),
-              "cpu_count": os.cpu_count(), "workspace": workspace, "failures": []}
+              "cpu_count": os.cpu_count(), "workspace": workspace, "exec_backend": exec_backend, "failures": []}
     failures = report["failures"]
     for name, args in (("runtime_version", [runtime, "--version"]),
                        ("go_version", ["go", "version"])):
@@ -96,6 +96,8 @@ def check(*, binary: Path, tracer: Path | None, image: str | None,
         report["image"] = {key: inspected.get(key) for key in ("Id", "RepoDigests", "Architecture", "Os")}
         report["image"]["User"] = (inspected.get("Config") or {}).get("User", "")
         report["binary_sha256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
+        if bwrap is not None:
+            report["bwrap_sha256"] = hashlib.sha256(bwrap.read_bytes()).hexdigest()
         _command("docker", "create", "--name", name, "--network", "none", "--cap-add", "SYS_ADMIN",
                  "--security-opt", "apparmor=unconfined", "--mount",
                  f"type=volume,source={volume},target=/threadmill-vfs",
@@ -106,6 +108,7 @@ def check(*, binary: Path, tracer: Path | None, image: str | None,
         environment = _Container(name)
         with tempfile.TemporaryDirectory(prefix="threadmill-doctor-") as directory:
             agent = Threadmill(Path(directory), binary=binary, tracer=tracer,
+                               bwrap=bwrap, exec_backend=exec_backend,
                                model_name="openai/preflight", workspace=workspace)
             try:
                 asyncio.run(agent.install(environment))
@@ -114,20 +117,37 @@ def check(*, binary: Path, tracer: Path | None, image: str | None,
                     report["container_setup"] = _command("docker", "exec", name, "cat", "/logs/agent/threadmill/setup.txt")
                 except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                     failures.append(f"container_setup: {error}")
+                try:
+                    report["task_setup"] = _command("docker", "exec", name, "cat", "/logs/agent/threadmill/task-setup.txt")
+                except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                    failures.append(f"task_setup: {error}")
             config = Path(directory) / "config.json"
-            config.write_text(json.dumps({"exec": {"external_sandbox": True,
-                               "external_workspace_isolation": True, "require_dependency_tracing": True,
+            config.write_text(json.dumps({"exec": {"external_sandbox": exec_backend == "external",
+                               "external_workspace_isolation": exec_backend == "external", "require_dependency_tracing": True,
                                "cache": {"enabled": True}}, "vfs": {"live_root": "/threadmill-vfs"}}))
             _command("docker", "cp", str(config), f"{name}:/tmp/doctor.json")
+            _command("docker", "exec", "--user", "root", name, "bash", "-c",
+                     f"chown {agent._task_owner} /tmp/doctor.json && chmod 0600 /tmp/doctor.json")
+            report["configuration_ownership"] = _command("docker", "exec", name, "stat", "-c",
+                                                        "%n:%u:%g:%a", "/tmp/doctor.json")
             report["runtime_identity"] = _command("docker", "exec", name, "id")
-            report["runtime_preflight"] = json.loads(_command(
-                "docker", "exec", "--env", "HOME=/tmp/threadmill-doctor-home",
-                "--env", "TMPDIR=/tmp", name, "/installed-agent/threadmill",
-                "-C", workspace, "-config", "/tmp/doctor.json", "-exec-doctor"))
+            preflight = subprocess.run([
+                "docker", "exec", "--env", "HOME=/tmp/threadmill-agent-home",
+                "--env", "TMPDIR=/tmp/threadmill-agent-tmp", name, "/installed-agent/threadmill",
+                "-C", workspace, "-config", "/tmp/doctor.json", "-exec-doctor"],
+                capture_output=True, text=True, timeout=120)
+            report["runtime_preflight_exit_code"] = preflight.returncode
+            report["runtime_preflight_stderr"] = preflight.stderr
+            report["runtime_preflight_stdout"] = preflight.stdout
+            if preflight.returncode:
+                failures.append(f"runtime_preflight exited {preflight.returncode}: {preflight.stderr.strip()}")
+            report["runtime_preflight"] = json.loads(preflight.stdout)
             if report["runtime_preflight"].get("exec_dependency_tracing") is not True:
                 failures.append("exec_dependency_tracing: unavailable")
             if report["runtime_preflight"].get("exec_dependency_tracing_enabled") is not True:
                 failures.append("exec_dependency_tracing_enabled: unavailable")
+            if exec_backend == "bwrap" and report["runtime_preflight"].get("exec_sandbox_backend") != "bwrap":
+                failures.append("exec_sandbox_backend: expected bwrap")
     except (OSError, RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
         failures.append(f"container_probe: {error}")
     finally:
@@ -145,6 +165,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--tracer", type=Path, default=os.environ.get("THREADMILL_STRACE_BINARY"))
+    parser.add_argument("--bwrap", type=Path, default=os.environ.get("THREADMILL_BWRAP_BINARY"))
+    parser.add_argument("--exec-backend", choices=("external", "bwrap"), default="external")
     parser.add_argument("--image", default=os.environ.get("THREADMILL_BENCH_DOCTOR_IMAGE"))
     parser.add_argument("--workspace", default=os.environ.get("THREADMILL_BENCH_WORKSPACE", "/workspace/repo"))
     parser.add_argument("--runtime", default=os.environ.get("THREADMILL_HARBOR_BIN", "harbor"))

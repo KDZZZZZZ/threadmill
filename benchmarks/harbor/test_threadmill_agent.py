@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import redirect_stdout
+import io
 import json
 import struct
 import subprocess
@@ -24,10 +26,12 @@ from benchmarks.harbor.threadmill_agent import (
 
 class ThreadmillAgentTest(unittest.TestCase):
     def test_doctor_prepares_install_directories_as_root_and_keeps_image_user(self):
-        from benchmarks.harbor.doctor import check
+        from benchmarks.harbor.doctor import check, main
 
         prepared, calls = False, []
+        preflight_code = 0
         setup = "mount_namespace=yes\nrepo_to_vfs_reflink=yes\nstrace_version=6.8\nstrace_probe=yes\n"
+        task_setup = "uid=2000(agent) gid=2000(agent)\ntask_repo_to_vfs_reflink=yes\ntask_directory_write=yes\n"
 
         def process(command, **kwargs):
             nonlocal prepared
@@ -46,9 +50,23 @@ class ThreadmillAgentTest(unittest.TestCase):
                 if "--user" in command and "mkdir -p" in command[-1] and command[command.index("--user") + 1] == "root":
                     prepared = True
                 stdout = setup
+                if "id -u; id -g" in command[-1]:
+                    self.assertNotIn("--user", command)
+                    stdout = "2000\n2000\n"
+                elif "task_directory_write=yes" in command[-1] or command[-1].endswith("/task-setup.txt"):
+                    self.assertNotIn("--user", command)
+                    stdout = task_setup
+                elif command[-1] == "/tmp/doctor.json" and "stat" in command:
+                    self.assertNotIn("--user", command)
+                    stdout = "/tmp/doctor.json:2000:2000:600"
                 if "-exec-doctor" in command:
                     self.assertNotIn("--user", command)
-                    stdout = '{"exec_dependency_tracing":true,"exec_dependency_tracing_enabled":true}'
+                    stdout = json.dumps({"exec_dependency_tracing": preflight_code == 0,
+                                         "exec_dependency_tracing_enabled": preflight_code == 0,
+                                         "exec_sandbox_backend": "external",
+                                         "exec_dependency_tracing_reason": "sandbox_unavailable" if preflight_code else ""})
+                    return subprocess.CompletedProcess(command, preflight_code, stdout=stdout,
+                                                       stderr="sandbox unavailable" if preflight_code else "")
             elif command[:2] == ["docker", "cp"] and "/installed-agent/" in command[-1] and not prepared:
                 return subprocess.CompletedProcess(command, 1, stdout="", stderr="install directory missing")
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
@@ -68,6 +86,22 @@ class ThreadmillAgentTest(unittest.TestCase):
                                workspace="/workspace/repo", runtime="test-harbor")
             self.assertTrue(result["ok"], result["failures"])
             self.assertNotIn("--user", next(call for call in calls if call[:2] == ["docker", "create"]))
+            self.assertIn("uid=2000(agent)", result["task_setup"])
+            self.assertEqual(result["configuration_ownership"], "/tmp/doctor.json:2000:2000:600")
+            private_config = next(call for call in calls if "chown 2000:2000 /tmp/doctor.json" in call[-1])
+            self.assertEqual(private_config[private_config.index("--user") + 1], "root")
+            preflight_code = 1
+            output = io.StringIO()
+            argv = ["doctor", "--binary", str(binary), "--tracer", str(tracer),
+                    "--image", "task/image", "--runtime", "test-harbor"]
+            with patch("benchmarks.harbor.doctor.subprocess.run", side_effect=process), \
+                    patch("sys.argv", argv), redirect_stdout(output):
+                self.assertEqual(main(), 1)
+            result = json.loads(output.getvalue())
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["runtime_preflight"]["exec_dependency_tracing_reason"], "sandbox_unavailable")
+            self.assertEqual(result["runtime_preflight_exit_code"], 1)
+            self.assertIn("sandbox unavailable", result["runtime_preflight_stderr"])
 
     def test_cache_modes_follow_existing_exec_cache_schema(self) -> None:
         for mode, enabled, rate in (("off", False, .01), ("shadow", True, 1.0), ("live", True, .01)):
@@ -101,8 +135,11 @@ class ThreadmillAgentTest(unittest.TestCase):
         class ProbeThreadmill(Threadmill):
             setup = "mount_namespace=yes\nrepo_to_vfs_reflink=no\nstrace_version=6.8\nstrace_probe=yes\n"
 
+            async def exec_as_agent(self, environment, command, **kwargs):
+                return SimpleNamespace(stdout="2000\n2000\n", stderr="", return_code=0)
+
             async def exec_as_root(self, environment, command, **kwargs):
-                return SimpleNamespace(stdout=self.setup)
+                return SimpleNamespace(stdout=self.setup, stderr="", return_code=0)
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -322,46 +359,6 @@ class ThreadmillAgentTest(unittest.TestCase):
             command = str(call["command"])
             self.assertIn("vfs-state.tar", command)
             self.assertIn(".threadmill-exec-*", command)
-
-    def test_write_configuration_secures_uploaded_credentials(self) -> None:
-        class CapturingThreadmill(Threadmill):
-            def __init__(self, *args, **kwargs) -> None:
-                self.commands: list[str] = []
-                self.uploads: list[str] = []
-                super().__init__(*args, **kwargs)
-
-            async def exec_as_agent(self, environment, command, **kwargs):
-                self.commands.append(str(command))
-
-            async def _upload_config_text(
-                self, environment, *, content, remote_path, filename
-            ) -> None:
-                self.uploads.append(str(remote_path))
-
-        with tempfile.TemporaryDirectory() as temp:
-            binary = Path(temp) / "threadmill"
-            binary.write_bytes(b"binary")
-            agent = CapturingThreadmill(
-                Path(temp),
-                model_name="deepseek/deepseek-v4-flash",
-                binary=binary,
-            )
-
-            asyncio.run(
-                agent._write_configuration(
-                    object(),
-                    "https://example.test/v1",
-                    "model",
-                    "test-key",
-                )
-            )
-
-            self.assertTrue(agent.uploads[-1].endswith("credentials.yaml"))
-            self.assertIn(
-                "chmod 0600 /tmp/threadmill-agent-home/.threadmill/credentials.yaml",
-                agent.commands[-1],
-            )
-
 
 if __name__ == "__main__":
     unittest.main()
