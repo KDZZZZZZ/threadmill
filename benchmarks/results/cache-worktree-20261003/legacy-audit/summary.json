@@ -1,0 +1,336 @@
+{
+  "rows_verified": 48,
+  "historical_only": true,
+  "audit_script_sha256": "4f4563a23ada3f2ad6b90fb1b9d9176ab093b99b984de4cb78825b9ae8df28bd",
+  "preregistration_sha256": "534aabba4ccb58eda15cb0ae4ffdeaf73e07ce20dc420e4b1ca0eb347f50bf95",
+  "normal_reaped": 0,
+  "summaries": {
+    "synthetic": {
+      "rows_verified": 24,
+      "capacity": {
+        "threadmill-historical98-overlay-external": {
+          "effective_peak": 64,
+          "stable_width": null,
+          "wall_ns_limit": 34825447445.0,
+          "tiers": [
+            {
+              "agents": 64,
+              "repeats": 3,
+              "wall_ns_median": 27860357956,
+              "errors": 0,
+              "commands_per_second_median": 55.34745829308037,
+              "physical_peak_delta_bytes_median": 4030464,
+              "physical_retained_delta_bytes_median": 4030464,
+              "write_p50_ns_median": 246220,
+              "write_p95_ns_median": 584914,
+              "fork_p50_ns_median": 60815,
+              "fork_p95_ns_median": 327922,
+              "collect_p50_ns_median": 13036849,
+              "collect_p95_ns_median": 23134882
+            },
+            {
+              "agents": 128,
+              "repeats": 3,
+              "wall_ns_median": 43017433789,
+              "errors": 0,
+              "commands_per_second_median": 71.25018231059036,
+              "physical_peak_delta_bytes_median": 8085504,
+              "physical_retained_delta_bytes_median": 8085504,
+              "write_p50_ns_median": 242840,
+              "write_p95_ns_median": 546928,
+              "fork_p50_ns_median": 35914,
+              "fork_p95_ns_median": 252636,
+              "collect_p50_ns_median": 14787029,
+              "collect_p95_ns_median": 43309905
+            },
+            {
+              "agents": 192,
+              "repeats": 3,
+              "wall_ns_median": 61343664235,
+              "errors": 0,
+              "commands_per_second_median": 74.49832117124426,
+              "physical_peak_delta_bytes_median": 12267520,
+              "physical_retained_delta_bytes_median": 12267520,
+              "write_p50_ns_median": 242881,
+              "write_p95_ns_median": 614332,
+              "fork_p50_ns_median": 31079,
+              "fork_p95_ns_median": 300727,
+              "collect_p50_ns_median": 15182450,
+              "collect_p95_ns_median": 29842400
+            },
+            {
+              "agents": 256,
+              "repeats": 3,
+              "wall_ns_median": 81197368188,
+              "errors": 0,
+              "commands_per_second_median": 75.56895176445913,
+              "physical_peak_delta_bytes_median": 16052224,
+              "physical_retained_delta_bytes_median": 16052224,
+              "write_p50_ns_median": 243524,
+              "write_p95_ns_median": 567915,
+              "fork_p50_ns_median": 33063,
+              "fork_p95_ns_median": 276590,
+              "collect_p50_ns_median": 15157144,
+              "collect_p95_ns_median": 37600689
+            },
+            {
+              "agents": 384,
+              "repeats": 3,
+              "wall_ns_median": 124686209291,
+              "errors": 0,
+              "commands_per_second_median": 73.59274174888509,
+              "physical_peak_delta_bytes_median": 24125440,
+              "physical_retained_delta_bytes_median": 24104960,
+              "write_p50_ns_median": 245476,
+              "write_p95_ns_median": 558863,
+              "fork_p50_ns_median": 30432,
+              "fork_p95_ns_median": 277063,
+              "collect_p50_ns_median": 16109931,
+              "collect_p95_ns_median": 35424237
+            },
+            {
+              "agents": 448,
+              "repeats": 3,
+              "wall_ns_median": 147988256505,
+              "errors": 0,
+              "commands_per_second_median": 72.58008340436864,
+              "physical_peak_delta_bytes_median": 27942912,
+              "physical_retained_delta_bytes_median": 27942912,
+              "write_p50_ns_median": 245978,
+              "write_p95_ns_median": 571216,
+              "fork_p50_ns_median": 36947,
+              "fork_p95_ns_median": 229182,
+              "collect_p50_ns_median": 16576945,
+              "collect_p95_ns_median": 50294529
+            },
+            {
+              "agents": 500,
+              "repeats": 3,
+              "wall_ns_median": 165599964669,
+              "errors": 0,
+              "commands_per_second_median": 72.25846952272938,
+              "physical_peak_delta_bytes_median": 31219712,
+              "physical_retained_delta_bytes_median": 31219712,
+              "write_p50_ns_median": 251796,
+              "write_p95_ns_median": 624902,
+              "fork_p50_ns_median": 37233,
+              "fork_p95_ns_median": 605230,
+              "collect_p50_ns_median": 16803619,
+              "collect_p95_ns_median": 49094138
+            },
+            {
+              "agents": 576,
+              "repeats": 3,
+              "wall_ns_median": 191973242673,
+              "errors": 0,
+              "commands_per_second_median": 71.98399009980137,
+              "physical_peak_delta_bytes_median": 36159488,
+              "physical_retained_delta_bytes_median": 36159488,
+              "write_p50_ns_median": 307650,
+              "write_p95_ns_median": 784623,
+              "fork_p50_ns_median": 30392,
+              "fork_p95_ns_median": 405442,
+              "collect_p50_ns_median": 18591808,
+              "collect_p95_ns_median": 49896526
+            }
+          ]
+        }
+      },
+      "failure_kinds": {
+        "none": 24
+      },
+      "operation_errors": 0,
+      "lower_before": {
+        "time_ns": 1791041733564322444,
+        "df_used_bytes": 12582912,
+        "df_available_bytes": 203227136,
+        "scope": "this group's dedicated readonly ext4 loop filesystem bitmap usage; separate from upper physical delta",
+        "fixture_du_raw": "12558336\t/home/oops/evals/threadmill-cache-bench/legacy-validation-20261003/lower/synthetic/mount/fixture",
+        "fixture_du_scope": "fixture subtree allocated file/directory blocks; excludes filesystem metadata"
+      },
+      "lower_after": {
+        "time_ns": 1791045460745835249,
+        "df_used_bytes": 12582912,
+        "df_available_bytes": 203227136,
+        "fixture_du_raw": "12558336\t/home/oops/evals/threadmill-cache-bench/legacy-validation-20261003/lower/synthetic/mount/fixture"
+      },
+      "lower_backing": {
+        "kind": "loop_image",
+        "loop_device": 1825,
+        "block_readonly": true,
+        "image": "/home/oops/evals/threadmill-cache-bench/legacy-validation-20261003/lower/synthetic/lower.ext4",
+        "device": 66306,
+        "inode": 5930423,
+        "allocated_bytes": 30375936,
+        "scope": "backing file allocated blocks; excludes backing filesystem metadata"
+      }
+    },
+    "ipython": {
+      "rows_verified": 24,
+      "capacity": {
+        "threadmill-historical98-overlay-external": {
+          "effective_peak": 64,
+          "stable_width": null,
+          "wall_ns_limit": 34954174423.75,
+          "tiers": [
+            {
+              "agents": 64,
+              "repeats": 3,
+              "wall_ns_median": 27963339539,
+              "errors": 0,
+              "commands_per_second_median": 55.14362824402281,
+              "physical_peak_delta_bytes_median": 4317184,
+              "physical_retained_delta_bytes_median": 4317184,
+              "write_p50_ns_median": 303184,
+              "write_p95_ns_median": 774301,
+              "fork_p50_ns_median": 34937,
+              "fork_p95_ns_median": 114160,
+              "collect_p50_ns_median": 15305462,
+              "collect_p95_ns_median": 27451034
+            },
+            {
+              "agents": 128,
+              "repeats": 3,
+              "wall_ns_median": 43375398117,
+              "errors": 0,
+              "commands_per_second_median": 70.66217563542645,
+              "physical_peak_delta_bytes_median": 8384512,
+              "physical_retained_delta_bytes_median": 8384512,
+              "write_p50_ns_median": 311893,
+              "write_p95_ns_median": 887120,
+              "fork_p50_ns_median": 39744,
+              "fork_p95_ns_median": 218045,
+              "collect_p50_ns_median": 18196624,
+              "collect_p95_ns_median": 66262594
+            },
+            {
+              "agents": 192,
+              "repeats": 3,
+              "wall_ns_median": 61648423866,
+              "errors": 0,
+              "commands_per_second_median": 74.13003793792726,
+              "physical_peak_delta_bytes_median": 12742656,
+              "physical_retained_delta_bytes_median": 12689408,
+              "write_p50_ns_median": 312270,
+              "write_p95_ns_median": 1074439,
+              "fork_p50_ns_median": 38788,
+              "fork_p95_ns_median": 316809,
+              "collect_p50_ns_median": 23230553,
+              "collect_p95_ns_median": 156853803
+            },
+            {
+              "agents": 256,
+              "repeats": 3,
+              "wall_ns_median": 81655653636,
+              "errors": 0,
+              "commands_per_second_median": 75.14482741578087,
+              "physical_peak_delta_bytes_median": 16822272,
+              "physical_retained_delta_bytes_median": 16789504,
+              "write_p50_ns_median": 305521,
+              "write_p95_ns_median": 798870,
+              "fork_p50_ns_median": 37275,
+              "fork_p95_ns_median": 194686,
+              "collect_p50_ns_median": 18838709,
+              "collect_p95_ns_median": 53253818
+            },
+            {
+              "agents": 384,
+              "repeats": 3,
+              "wall_ns_median": 125383878585,
+              "errors": 0,
+              "commands_per_second_median": 73.18325213380143,
+              "physical_peak_delta_bytes_median": 24899584,
+              "physical_retained_delta_bytes_median": 24899584,
+              "write_p50_ns_median": 309618,
+              "write_p95_ns_median": 830875,
+              "fork_p50_ns_median": 34082,
+              "fork_p95_ns_median": 239473,
+              "collect_p50_ns_median": 18027852,
+              "collect_p95_ns_median": 76880720
+            },
+            {
+              "agents": 448,
+              "repeats": 3,
+              "wall_ns_median": 148868585937,
+              "errors": 0,
+              "commands_per_second_median": 72.15088349496048,
+              "physical_peak_delta_bytes_median": 29421568,
+              "physical_retained_delta_bytes_median": 29327360,
+              "write_p50_ns_median": 312491,
+              "write_p95_ns_median": 891872,
+              "fork_p50_ns_median": 37563,
+              "fork_p95_ns_median": 2033777,
+              "collect_p50_ns_median": 19328151,
+              "collect_p95_ns_median": 48784825
+            },
+            {
+              "agents": 500,
+              "repeats": 3,
+              "wall_ns_median": 166588258465,
+              "errors": 0,
+              "commands_per_second_median": 71.82979226902742,
+              "physical_peak_delta_bytes_median": 32763904,
+              "physical_retained_delta_bytes_median": 32763904,
+              "write_p50_ns_median": 314049,
+              "write_p95_ns_median": 887168,
+              "fork_p50_ns_median": 37729,
+              "fork_p95_ns_median": 761861,
+              "collect_p50_ns_median": 19568411,
+              "collect_p95_ns_median": 68456974
+            },
+            {
+              "agents": 576,
+              "repeats": 3,
+              "wall_ns_median": 191367781988,
+              "errors": 0,
+              "commands_per_second_median": 72.21173729685879,
+              "physical_peak_delta_bytes_median": 37736448,
+              "physical_retained_delta_bytes_median": 37736448,
+              "write_p50_ns_median": 269092,
+              "write_p95_ns_median": 783766,
+              "fork_p50_ns_median": 30167,
+              "fork_p95_ns_median": 674751,
+              "collect_p50_ns_median": 17797344,
+              "collect_p95_ns_median": 377507554
+            }
+          ]
+        }
+      },
+      "failure_kinds": {
+        "none": 24
+      },
+      "operation_errors": 0,
+      "lower_before": {
+        "time_ns": 1791045461379504571,
+        "df_used_bytes": 8826880,
+        "df_available_bytes": 206983168,
+        "scope": "this group's dedicated readonly ext4 loop filesystem bitmap usage; separate from upper physical delta",
+        "fixture_du_raw": "8802304\t/home/oops/evals/threadmill-cache-bench/legacy-validation-20261003/lower/ipython/mount/fixture",
+        "fixture_du_scope": "fixture subtree allocated file/directory blocks; excludes filesystem metadata"
+      },
+      "lower_after": {
+        "time_ns": 1791048524936270061,
+        "df_used_bytes": 8826880,
+        "df_available_bytes": 206983168,
+        "fixture_du_raw": "8802304\t/home/oops/evals/threadmill-cache-bench/legacy-validation-20261003/lower/ipython/mount/fixture"
+      },
+      "lower_backing": {
+        "kind": "loop_image",
+        "loop_device": 1826,
+        "block_readonly": true,
+        "image": "/home/oops/evals/threadmill-cache-bench/legacy-validation-20261003/lower/ipython/lower.ext4",
+        "device": 66306,
+        "inode": 5930957,
+        "allocated_bytes": 25968640,
+        "scope": "backing file allocated blocks; excludes backing filesystem metadata"
+      }
+    }
+  },
+  "layout_caveat": "historical readonly dedicated ext4 loop lower plus Btrfs upper; separate historical table; no capacity/disk-saving multiple against main-table storage layout; not a cold-cache experiment",
+  "evidence_limits": [
+    "Saved checkpoint restore proofs are checked; no restore is re-executed.",
+    "Lower images and the tmlegacy binary are not rehashed; their registered identity and recorded admission are checked.",
+    "Lower backing matches storage admission and every saved namespace proof; the final backing check is attested by the complete frozen matrix, not a separate saved after-backing snapshot.",
+    "P50/P95 are the frozen helper's saved per-run statistics; this audit does not recompute operation percentiles."
+  ]
+}

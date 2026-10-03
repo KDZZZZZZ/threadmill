@@ -1,0 +1,9 @@
+{
+  "kind": "reference",
+  "inputs": {
+    "synthetic-reference-audit.json": "c72758770b4b82b054ce3c43f5bb0f8c530598de6298749282dbbfe08210374f",
+    "ipython-reference-audit.json": "59db3aadf469d4a8df742974f8cf70610087fdadcca20ba640a2bd68b1dd9563"
+  },
+  "rows": 16,
+  "script_sha256": "b895448b35bf5e1169302487ca973245e9785679aa2a20074d06146129f95dc2"
+}

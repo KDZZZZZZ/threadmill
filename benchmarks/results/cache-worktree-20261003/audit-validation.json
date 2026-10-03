@@ -1,0 +1,119 @@
+{
+  "validated_utc": "2026-10-03T13:52:22.392661+00:00",
+  "scripts": {
+    "audit-primary.py": "fb74fc6081253093a2e7904bdb38029927904f6cc99e5699e59a115c4e079d7e",
+    "audit-cache.py": "62bd81381f1e8a0647ef5a0dfda75fd57cebd08b23ef340df51bfa86dfcc3a97"
+  },
+  "records": [
+    {
+      "name": "cache-green",
+      "argv": [
+        "/usr/bin/python3",
+        "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/audit-cache.py",
+        "--raw",
+        "/home/oops/evals/threadmill-cache-bench/formal-continuous-b839b28-20261003/cache-pytest",
+        "--project",
+        "/home/oops/repo/threadmill-cache-bench",
+        "--output",
+        "/home/oops/evals/threadmill-cache-bench/report-audit-cli-validation-20261003/pytest-audit.json"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0
+    },
+    {
+      "name": "cache-actual-incomplete-go",
+      "argv": [
+        "/usr/bin/python3",
+        "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/audit-cache.py",
+        "--raw",
+        "/home/oops/evals/threadmill-cache-bench/formal-continuous-b839b28-20261003/cache-go",
+        "--project",
+        "/home/oops/repo/threadmill-cache-bench",
+        "--output",
+        "/home/oops/evals/threadmill-cache-bench/report-audit-cli-validation-20261003/unexpected-go-audit.json"
+      ],
+      "exit_code": 1,
+      "expected_exit": 1
+    },
+    {
+      "name": "wrong-command",
+      "argv": [
+        "/usr/bin/python3",
+        "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/audit-cache.py",
+        "--raw",
+        "/home/oops/evals/threadmill-cache-bench/report-audit-cli-validation-20261003/wrong-command/cache-pytest",
+        "--project",
+        "/home/oops/repo/threadmill-cache-bench",
+        "--output",
+        "/home/oops/evals/threadmill-cache-bench/report-audit-cli-validation-20261003/wrong-command/must-not-exist.json"
+      ],
+      "exit_code": 1,
+      "expected_exit": 1
+    },
+    {
+      "name": "wrong-reaper",
+      "argv": [
+        "/usr/bin/python3",
+        "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/audit-cache.py",
+        "--raw",
+        "/home/oops/evals/threadmill-cache-bench/report-audit-cli-validation-20261003/wrong-reaper/cache-pytest",
+        "--project",
+        "/home/oops/repo/threadmill-cache-bench",
+        "--output",
+        "/home/oops/evals/threadmill-cache-bench/report-audit-cli-validation-20261003/wrong-reaper/must-not-exist.json"
+      ],
+      "exit_code": 1,
+      "expected_exit": 1
+    },
+    {
+      "name": "live-residue",
+      "argv": [
+        "/usr/bin/python3",
+        "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/audit-cache.py",
+        "--raw",
+        "/home/oops/evals/threadmill-cache-bench/report-audit-cli-validation-20261003/live-residue/cache-pytest",
+        "--project",
+        "/home/oops/repo/threadmill-cache-bench",
+        "--output",
+        "/home/oops/evals/threadmill-cache-bench/report-audit-cli-validation-20261003/live-residue/must-not-exist.json"
+      ],
+      "exit_code": 1,
+      "expected_exit": 1
+    },
+    {
+      "name": "wrong-backend",
+      "argv": [
+        "/usr/bin/python3",
+        "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/audit-cache.py",
+        "--raw",
+        "/home/oops/evals/threadmill-cache-bench/report-audit-cli-validation-20261003/wrong-backend/cache-pytest",
+        "--project",
+        "/home/oops/repo/threadmill-cache-bench",
+        "--output",
+        "/home/oops/evals/threadmill-cache-bench/report-audit-cli-validation-20261003/wrong-backend/must-not-exist.json"
+      ],
+      "exit_code": 1,
+      "expected_exit": 1
+    },
+    {
+      "name": "primary-missing-original-repeat",
+      "argv": [
+        "/usr/bin/python3",
+        "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/audit-primary.py",
+        "--raw",
+        "/home/oops/evals/threadmill-cache-bench/report-audit-cli-validation-20261003/original-interrupted-primary",
+        "--project",
+        "/home/oops/repo/threadmill-cache-bench",
+        "--output",
+        "/home/oops/evals/threadmill-cache-bench/report-audit-cli-validation-20261003/primary-missing.json"
+      ],
+      "exit_code": 1,
+      "expected_exit": 1
+    }
+  ],
+  "cache_positive_rows": 40,
+  "primary_positive_rows": 144,
+  "actual_interrupted_primary_rejected": true,
+  "primary_positive_audit_sha256": "8d6542cd22fd2e762c6a9f0ac9457122403ad8a514e7e7383a5ee4e08a8d8745",
+  "cache_positive_audit_sha256": "0e626a0698bf5619269f9787dae4c9e6da3f868f97593855861c78392337348c"
+}

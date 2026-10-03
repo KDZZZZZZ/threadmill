@@ -1,0 +1,860 @@
+{
+  "audit_script_sha256": "62bd81381f1e8a0647ef5a0dfda75fd57cebd08b23ef340df51bfa86dfcc3a97",
+  "control_registration_sha256": "112f75c3e381fe5caa3b1b4e931f40e241a216ea53527dd1c4a5e53bf1bdf6c4",
+  "language": "pytest",
+  "rows_verified": 40,
+  "inventory": [
+    {
+      "path": "cache-off-traced-r1.json",
+      "sha256": "fbf880de801b2cf253135f0c859784a79913e817569f38ba40060c9a2c959da9",
+      "bytes": 33227
+    },
+    {
+      "path": "cache-off-traced-r2.json",
+      "sha256": "dd7066b2bbc7e476f00264b995d00baa616e8a065fddebe6fe2999a7235cd551",
+      "bytes": 33228
+    },
+    {
+      "path": "cache-off-traced-r3.json",
+      "sha256": "2ed48ca2e191563fe2bb39a1d32aeecfc9afce2662f785440dee03ea7688b428",
+      "bytes": 33227
+    },
+    {
+      "path": "cache-off-traced-r4.json",
+      "sha256": "0d2a2249b755c0cde5124acf8bc7849905415cc2f383b423c2f5e175bc34963a",
+      "bytes": 33228
+    },
+    {
+      "path": "cache-off-traced-r5.json",
+      "sha256": "d7a8f3ce6ca45bf62f66a46e2600b8ae59b11422b6024baf5dc95f15c3cf556f",
+      "bytes": 33227
+    },
+    {
+      "path": "cache-off-traced-r6.json",
+      "sha256": "574914c966adf34326a2e2b4c5800afb53524dd5cfef6a97a23cccb715726df0",
+      "bytes": 33228
+    },
+    {
+      "path": "cache-off-traced-r7.json",
+      "sha256": "6d04914e708c9417e89527b7972cbbd534c15f90703bddaaa815fed38d3e289c",
+      "bytes": 33228
+    },
+    {
+      "path": "cache-off-traced-r8.json",
+      "sha256": "cd17aad30e4908ed497d2da00cc304c20af9eaa1674bb5248aaf37b881ede39c",
+      "bytes": 33230
+    },
+    {
+      "path": "cache-off-traced-r9.json",
+      "sha256": "a0a85b3575bfb65a10e2760c31e428937630b22b08b6ff3af4e53ba35aa347ac",
+      "bytes": 33227
+    },
+    {
+      "path": "cache-off-traced-r10.json",
+      "sha256": "4a9646b67078202a0d2c1293b4551cd88969f73d8b399df97f0a25fe3bdc9019",
+      "bytes": 33229
+    },
+    {
+      "path": "cache-on-traced-r1.json",
+      "sha256": "2ba3e4d330ab6244a2a298dbd7d99d11fae4e4982c8a202395d839c803171f19",
+      "bytes": 35147
+    },
+    {
+      "path": "cache-on-traced-r2.json",
+      "sha256": "208f63ea13ac0c12a3f1d32779890a8ba2f99521f7c9982ac8407e2cae30fbaf",
+      "bytes": 35145
+    },
+    {
+      "path": "cache-on-traced-r3.json",
+      "sha256": "bc179db237c9f9936922fc1f949da008557683efe7908d030abe49bc6202c59d",
+      "bytes": 35145
+    },
+    {
+      "path": "cache-on-traced-r4.json",
+      "sha256": "5b5bfc2434b63378deba895ef4fcb19fc9e707486c78941b264b7e1baeadff78",
+      "bytes": 35145
+    },
+    {
+      "path": "cache-on-traced-r5.json",
+      "sha256": "5fdb8902aad9983cb06a05b051843393331d0a6912ab1df6c31d8a1301c7f572",
+      "bytes": 35145
+    },
+    {
+      "path": "cache-on-traced-r6.json",
+      "sha256": "ac0a3656b52143eea0bd52e484ffa1bf5ca027561ec2edbb7fba3d705e5745d3",
+      "bytes": 35144
+    },
+    {
+      "path": "cache-on-traced-r7.json",
+      "sha256": "f9cfec5f4db4794773273080f299abd8266ca01c83e331fd98c32d0e6b34385e",
+      "bytes": 35146
+    },
+    {
+      "path": "cache-on-traced-r8.json",
+      "sha256": "de28dad844abb61e4b8eb33a73681c1cfc8e47d423b0998b0ff2292f3540d425",
+      "bytes": 35145
+    },
+    {
+      "path": "cache-on-traced-r9.json",
+      "sha256": "8b49abceab26efcef5cf182ab9f23c025c645e420e7a85e87031c2ee0b3f4bdc",
+      "bytes": 35146
+    },
+    {
+      "path": "cache-on-traced-r10.json",
+      "sha256": "005fecbae14b93a6248b92a7f283606eefccd4b9415e206ce4c1e0bec5b9d3b0",
+      "bytes": 35146
+    },
+    {
+      "path": "pi-worktree-r1.json",
+      "sha256": "7ddf0c2382d24e649465d68aed36c85d5aca5ec5779fe7722faad133b985f335",
+      "bytes": 39177
+    },
+    {
+      "path": "pi-worktree-r2.json",
+      "sha256": "ba1a83c724a89eeb8513843cf29126e7e51c260096cc55ce18478b0b4396f75d",
+      "bytes": 39180
+    },
+    {
+      "path": "pi-worktree-r3.json",
+      "sha256": "ac576402f547950c64cfc22a535ea4b465378204f2a37a6878c2047218c4f6d4",
+      "bytes": 39176
+    },
+    {
+      "path": "pi-worktree-r4.json",
+      "sha256": "88a322a9eb45cbeb09fa039653b01de7a7eae35655e3a12264370de68c50a3ed",
+      "bytes": 39179
+    },
+    {
+      "path": "pi-worktree-r5.json",
+      "sha256": "d4eba379d97cfc78901e565a52d9d32e0f7bdc46dfa706f626599eab0a8f07d8",
+      "bytes": 39182
+    },
+    {
+      "path": "pi-worktree-r6.json",
+      "sha256": "4f289960f108065ec070bd17e64658d872b6dbd4ceb24c46885d22cf336a9018",
+      "bytes": 39175
+    },
+    {
+      "path": "pi-worktree-r7.json",
+      "sha256": "7e6d2697914c3e1b0ae3848a821eca6c37433d42067e394473e66d7134fdcb17",
+      "bytes": 39169
+    },
+    {
+      "path": "pi-worktree-r8.json",
+      "sha256": "e044823154b7d984b333a9c4227106853f4d5383cb91f3418161ac3e1b664349",
+      "bytes": 39174
+    },
+    {
+      "path": "pi-worktree-r9.json",
+      "sha256": "123a997d4242bd93c94221f4ef66d9a7a608da9637480caad0e3bd98ef838c80",
+      "bytes": 39181
+    },
+    {
+      "path": "pi-worktree-r10.json",
+      "sha256": "16be645f2568aeba19e8bdbf9d68af6b0fc452f486d5d82d7382fc00cd4fd481",
+      "bytes": 39183
+    },
+    {
+      "path": "cache-off-untraced-r1.json",
+      "sha256": "cef78ced50a473e8654a32a13b51e27160248deab3bb8861019d4a12b73eef19",
+      "bytes": 33276
+    },
+    {
+      "path": "cache-off-untraced-r2.json",
+      "sha256": "26b0f4133a9ebd6fab36a4f2e4ff908c80d6195da25eef4855bbd230fc2a971b",
+      "bytes": 33275
+    },
+    {
+      "path": "cache-off-untraced-r3.json",
+      "sha256": "8f15274fa5952385202f8474318cf179f7285f6ddcbd3c17fb5c7d4fd6ac9116",
+      "bytes": 33276
+    },
+    {
+      "path": "cache-off-untraced-r4.json",
+      "sha256": "b6a28febfa4e9370614834b46a9326ba609e249c2669a4f4b8ebf2ac0f17d73f",
+      "bytes": 33275
+    },
+    {
+      "path": "cache-off-untraced-r5.json",
+      "sha256": "dcdd6f12f222275518736f8544e4f24ae14cc361ec58096d5366ffaca318df46",
+      "bytes": 33275
+    },
+    {
+      "path": "cache-off-untraced-r6.json",
+      "sha256": "2833785f66c7d287cc700c2c96c8b70a3e3073a31ad5c50ee5839192756726d9",
+      "bytes": 33276
+    },
+    {
+      "path": "cache-off-untraced-r7.json",
+      "sha256": "bf8b6bb0d56e8e53fdd2b753219b400d432275096126d2b7f8b24d5eea11db26",
+      "bytes": 33275
+    },
+    {
+      "path": "cache-off-untraced-r8.json",
+      "sha256": "b78af31cf36eded9e012cf4528538972faae059c7871ea34b8f1ef84a09cb9e4",
+      "bytes": 33276
+    },
+    {
+      "path": "cache-off-untraced-r9.json",
+      "sha256": "575c75b33e97093a8b26d5d8b95d0c2595b882375fa75e621bc77dafccb8ddf5",
+      "bytes": 33276
+    },
+    {
+      "path": "cache-off-untraced-r10.json",
+      "sha256": "40c7cc05d8373e5c64a00a54f85d62e90f45f9b38bbbc073ee5041332c7552ed",
+      "bytes": 33276
+    }
+  ],
+  "registration_sha256": "7abaa9e2243d0fc04138b5573e1b46f4bc25c508d0589fd9c840a390ef05f9d2",
+  "trace_sha256": "59aaa2551ec84abba58144da2a8de66fa5a458565dd43a1d8f27922f111e6688",
+  "supervisor_sha256": "5e6c2b239d233798542c610fe6ec40fe198a6363aed7758f8d1ef9ee027a0c09",
+  "normal_reaped": 1390,
+  "summary": {
+    "language": "pytest",
+    "fixture_commit": "82a4374e89d909377773c1a32208e1de1b9b498e",
+    "threadmill_commit": "b839b28747ae398f7badec9d2d0e51ae7e732c74",
+    "trace_sha256": "59aaa2551ec84abba58144da2a8de66fa5a458565dd43a1d8f27922f111e6688",
+    "repeats": 10,
+    "wall_ns_median": {
+      "cache-off-traced": 24341209649.5,
+      "cache-on-traced": 2530227781.5,
+      "pi-worktree": 16462933579.5,
+      "cache-off-untraced": 17049711234.0
+    },
+    "tracing_tax_ns": 7291498415.5,
+    "store_duration_ns": 52299540.5,
+    "historical_service_saved_ns": 23104406530.0,
+    "tracing_tax_command": {
+      "agent": "agent-0",
+      "index": 1,
+      "command": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 /usr/local/share/threadmill-bench/pytest-venv/bin/python -m pytest -p no:cacheprovider -q",
+      "sampling_rule": "first agent's first full test command, once per fresh repeated replay",
+      "timing_scope": "Exec.Run duration, including on-demand materialize, scheduler queue, execution and dependency tracing; Absorb is timed in collect"
+    },
+    "command_duration_ns_median": {
+      "cache-off-traced": 379299432.5,
+      "cache-off-untraced": 261747372.5
+    },
+    "command_tracing_tax_ns": 117552060.0,
+    "net_wall_saved_ns": 14519483452.5,
+    "estimated_net_service_saved_ns": 15760608574.0,
+    "benchstat_available": true,
+    "benchstat_command": [
+      "benchstat",
+      "/home/oops/evals/threadmill-cache-bench/formal-continuous-b839b28-20261003/cache-pytest/tracing-off.txt",
+      "/home/oops/evals/threadmill-cache-bench/formal-continuous-b839b28-20261003/cache-pytest/tracing-on.txt"
+    ],
+    "pi_shared_gocache": "one fresh per-repeat shared-gocache directory outside all worktrees",
+    "warm_policy": "each repeated round starts cold; Pi shares native GOCACHE across agents within a round; TM current per-env HOME policy",
+    "go_executable": "/usr/local/share/threadmill-bench/go1.24.2/bin/go",
+    "python_executable": "/usr/local/share/threadmill-bench/pytest-venv/bin/python",
+    "formal": true
+  },
+  "cached_runs": [
+    {
+      "repeat": 1,
+      "oracle": {
+        "expected_reusable": 60,
+        "actual_replayed": 60,
+        "missed_reuse": 0,
+        "unexpected_replay": 0,
+        "interpretation": "semantic oracle; safe rejection is missed reuse, not a false hit; inspect execution.cache rejection counters"
+      },
+      "snapshot": {
+        "lookups": 64,
+        "hits": 60,
+        "stores": 4,
+        "rejected": 0,
+        "replay_errors": 0,
+        "artifact_reflinks": 0,
+        "reflink_bytes": 0,
+        "artifact_copies": 0,
+        "copied_bytes": 0,
+        "verifications": 0,
+        "verify_mismatches": 0,
+        "saved_duration": 22812443261,
+        "matched_duration": 22812443261,
+        "executed_duration": 1523427389,
+        "verification_duration": 0,
+        "time_weighted_hit_rate": 0.9373999224884934,
+        "time_weighted_reuse_rate": 0.9373999224884934,
+        "replays": 60,
+        "miss_no_key": 2,
+        "miss_read_set": 2,
+        "miss_artifacts": 0,
+        "miss_corrupt": 0,
+        "miss_path_types": {
+          "workspace_file": 20
+        },
+        "rejected_reasons": {},
+        "roles": {
+          "unknown": {
+            "lookups": 64,
+            "hits": 60,
+            "stores": 4,
+            "replays": 60,
+            "executions": 4,
+            "matched_duration": 22812443261,
+            "saved_duration": 22812443261,
+            "executed_duration": 1523427389
+          }
+        },
+        "cross_role_hits": 0,
+        "verify_exit_mismatches": 0,
+        "verify_write_mismatches": 0,
+        "verify_output_mismatches": 0,
+        "verify_unavailable": 0,
+        "lookup_duration": 856812959,
+        "lookup_max_duration": 20372592,
+        "store_duration": 50912818,
+        "near_miss_ast": 0,
+        "near_miss_pipeline": 0
+      }
+    },
+    {
+      "repeat": 2,
+      "oracle": {
+        "expected_reusable": 60,
+        "actual_replayed": 60,
+        "missed_reuse": 0,
+        "unexpected_replay": 0,
+        "interpretation": "semantic oracle; safe rejection is missed reuse, not a false hit; inspect execution.cache rejection counters"
+      },
+      "snapshot": {
+        "lookups": 64,
+        "hits": 60,
+        "stores": 4,
+        "rejected": 0,
+        "replay_errors": 0,
+        "artifact_reflinks": 0,
+        "reflink_bytes": 0,
+        "artifact_copies": 0,
+        "copied_bytes": 0,
+        "verifications": 0,
+        "verify_mismatches": 0,
+        "saved_duration": 23358497372,
+        "matched_duration": 23358497372,
+        "executed_duration": 1556357540,
+        "verification_duration": 0,
+        "time_weighted_hit_rate": 0.9375329478940535,
+        "time_weighted_reuse_rate": 0.9375329478940535,
+        "replays": 60,
+        "miss_no_key": 2,
+        "miss_read_set": 2,
+        "miss_artifacts": 0,
+        "miss_corrupt": 0,
+        "miss_path_types": {
+          "workspace_file": 20
+        },
+        "rejected_reasons": {},
+        "roles": {
+          "unknown": {
+            "lookups": 64,
+            "hits": 60,
+            "stores": 4,
+            "replays": 60,
+            "executions": 4,
+            "matched_duration": 23358497372,
+            "saved_duration": 23358497372,
+            "executed_duration": 1556357540
+          }
+        },
+        "cross_role_hits": 0,
+        "verify_exit_mismatches": 0,
+        "verify_write_mismatches": 0,
+        "verify_output_mismatches": 0,
+        "verify_unavailable": 0,
+        "lookup_duration": 837300828,
+        "lookup_max_duration": 20471724,
+        "store_duration": 54991873,
+        "near_miss_ast": 0,
+        "near_miss_pipeline": 0
+      }
+    },
+    {
+      "repeat": 3,
+      "oracle": {
+        "expected_reusable": 60,
+        "actual_replayed": 60,
+        "missed_reuse": 0,
+        "unexpected_replay": 0,
+        "interpretation": "semantic oracle; safe rejection is missed reuse, not a false hit; inspect execution.cache rejection counters"
+      },
+      "snapshot": {
+        "lookups": 64,
+        "hits": 60,
+        "stores": 4,
+        "rejected": 0,
+        "replay_errors": 0,
+        "artifact_reflinks": 0,
+        "reflink_bytes": 0,
+        "artifact_copies": 0,
+        "copied_bytes": 0,
+        "verifications": 0,
+        "verify_mismatches": 0,
+        "saved_duration": 23943606438,
+        "matched_duration": 23943606438,
+        "executed_duration": 1599933118,
+        "verification_duration": 0,
+        "time_weighted_hit_rate": 0.9373644707894765,
+        "time_weighted_reuse_rate": 0.9373644707894765,
+        "replays": 60,
+        "miss_no_key": 2,
+        "miss_read_set": 2,
+        "miss_artifacts": 0,
+        "miss_corrupt": 0,
+        "miss_path_types": {
+          "workspace_file": 20
+        },
+        "rejected_reasons": {},
+        "roles": {
+          "unknown": {
+            "lookups": 64,
+            "hits": 60,
+            "stores": 4,
+            "replays": 60,
+            "executions": 4,
+            "matched_duration": 23943606438,
+            "saved_duration": 23943606438,
+            "executed_duration": 1599933118
+          }
+        },
+        "cross_role_hits": 0,
+        "verify_exit_mismatches": 0,
+        "verify_write_mismatches": 0,
+        "verify_output_mismatches": 0,
+        "verify_unavailable": 0,
+        "lookup_duration": 815328086,
+        "lookup_max_duration": 17881801,
+        "store_duration": 52356745,
+        "near_miss_ast": 0,
+        "near_miss_pipeline": 0
+      }
+    },
+    {
+      "repeat": 4,
+      "oracle": {
+        "expected_reusable": 60,
+        "actual_replayed": 60,
+        "missed_reuse": 0,
+        "unexpected_replay": 0,
+        "interpretation": "semantic oracle; safe rejection is missed reuse, not a false hit; inspect execution.cache rejection counters"
+      },
+      "snapshot": {
+        "lookups": 64,
+        "hits": 60,
+        "stores": 4,
+        "rejected": 0,
+        "replay_errors": 0,
+        "artifact_reflinks": 0,
+        "reflink_bytes": 0,
+        "artifact_copies": 0,
+        "copied_bytes": 0,
+        "verifications": 0,
+        "verify_mismatches": 0,
+        "saved_duration": 22481788833,
+        "matched_duration": 22481788833,
+        "executed_duration": 1498567141,
+        "verification_duration": 0,
+        "time_weighted_hit_rate": 0.9375085531413805,
+        "time_weighted_reuse_rate": 0.9375085531413805,
+        "replays": 60,
+        "miss_no_key": 2,
+        "miss_read_set": 2,
+        "miss_artifacts": 0,
+        "miss_corrupt": 0,
+        "miss_path_types": {
+          "workspace_file": 20
+        },
+        "rejected_reasons": {},
+        "roles": {
+          "unknown": {
+            "lookups": 64,
+            "hits": 60,
+            "stores": 4,
+            "replays": 60,
+            "executions": 4,
+            "matched_duration": 22481788833,
+            "saved_duration": 22481788833,
+            "executed_duration": 1498567141
+          }
+        },
+        "cross_role_hits": 0,
+        "verify_exit_mismatches": 0,
+        "verify_write_mismatches": 0,
+        "verify_output_mismatches": 0,
+        "verify_unavailable": 0,
+        "lookup_duration": 830923666,
+        "lookup_max_duration": 19156660,
+        "store_duration": 50363147,
+        "near_miss_ast": 0,
+        "near_miss_pipeline": 0
+      }
+    },
+    {
+      "repeat": 5,
+      "oracle": {
+        "expected_reusable": 60,
+        "actual_replayed": 60,
+        "missed_reuse": 0,
+        "unexpected_replay": 0,
+        "interpretation": "semantic oracle; safe rejection is missed reuse, not a false hit; inspect execution.cache rejection counters"
+      },
+      "snapshot": {
+        "lookups": 64,
+        "hits": 60,
+        "stores": 4,
+        "rejected": 0,
+        "replay_errors": 0,
+        "artifact_reflinks": 0,
+        "reflink_bytes": 0,
+        "artifact_copies": 0,
+        "copied_bytes": 0,
+        "verifications": 0,
+        "verify_mismatches": 0,
+        "saved_duration": 23040039910,
+        "matched_duration": 23040039910,
+        "executed_duration": 1528816114,
+        "verification_duration": 0,
+        "time_weighted_hit_rate": 0.9377742247133288,
+        "time_weighted_reuse_rate": 0.9377742247133288,
+        "replays": 60,
+        "miss_no_key": 2,
+        "miss_read_set": 2,
+        "miss_artifacts": 0,
+        "miss_corrupt": 0,
+        "miss_path_types": {
+          "workspace_file": 20
+        },
+        "rejected_reasons": {},
+        "roles": {
+          "unknown": {
+            "lookups": 64,
+            "hits": 60,
+            "stores": 4,
+            "replays": 60,
+            "executions": 4,
+            "matched_duration": 23040039910,
+            "saved_duration": 23040039910,
+            "executed_duration": 1528816114
+          }
+        },
+        "cross_role_hits": 0,
+        "verify_exit_mismatches": 0,
+        "verify_write_mismatches": 0,
+        "verify_output_mismatches": 0,
+        "verify_unavailable": 0,
+        "lookup_duration": 802607245,
+        "lookup_max_duration": 19506624,
+        "store_duration": 50106034,
+        "near_miss_ast": 0,
+        "near_miss_pipeline": 0
+      }
+    },
+    {
+      "repeat": 6,
+      "oracle": {
+        "expected_reusable": 60,
+        "actual_replayed": 60,
+        "missed_reuse": 0,
+        "unexpected_replay": 0,
+        "interpretation": "semantic oracle; safe rejection is missed reuse, not a false hit; inspect execution.cache rejection counters"
+      },
+      "snapshot": {
+        "lookups": 64,
+        "hits": 60,
+        "stores": 4,
+        "rejected": 0,
+        "replay_errors": 0,
+        "artifact_reflinks": 0,
+        "reflink_bytes": 0,
+        "artifact_copies": 0,
+        "copied_bytes": 0,
+        "verifications": 0,
+        "verify_mismatches": 0,
+        "saved_duration": 22922377361,
+        "matched_duration": 22922377361,
+        "executed_duration": 1540631657,
+        "verification_duration": 0,
+        "time_weighted_hit_rate": 0.937021988755905,
+        "time_weighted_reuse_rate": 0.937021988755905,
+        "replays": 60,
+        "miss_no_key": 2,
+        "miss_read_set": 2,
+        "miss_artifacts": 0,
+        "miss_corrupt": 0,
+        "miss_path_types": {
+          "workspace_file": 20
+        },
+        "rejected_reasons": {},
+        "roles": {
+          "unknown": {
+            "lookups": 64,
+            "hits": 60,
+            "stores": 4,
+            "replays": 60,
+            "executions": 4,
+            "matched_duration": 22922377361,
+            "saved_duration": 22922377361,
+            "executed_duration": 1540631657
+          }
+        },
+        "cross_role_hits": 0,
+        "verify_exit_mismatches": 0,
+        "verify_write_mismatches": 0,
+        "verify_output_mismatches": 0,
+        "verify_unavailable": 0,
+        "lookup_duration": 833724796,
+        "lookup_max_duration": 17129572,
+        "store_duration": 52242336,
+        "near_miss_ast": 0,
+        "near_miss_pipeline": 0
+      }
+    },
+    {
+      "repeat": 7,
+      "oracle": {
+        "expected_reusable": 60,
+        "actual_replayed": 60,
+        "missed_reuse": 0,
+        "unexpected_replay": 0,
+        "interpretation": "semantic oracle; safe rejection is missed reuse, not a false hit; inspect execution.cache rejection counters"
+      },
+      "snapshot": {
+        "lookups": 64,
+        "hits": 60,
+        "stores": 4,
+        "rejected": 0,
+        "replay_errors": 0,
+        "artifact_reflinks": 0,
+        "reflink_bytes": 0,
+        "artifact_copies": 0,
+        "copied_bytes": 0,
+        "verifications": 0,
+        "verify_mismatches": 0,
+        "saved_duration": 23168773150,
+        "matched_duration": 23168773150,
+        "executed_duration": 1554190950,
+        "verification_duration": 0,
+        "time_weighted_hit_rate": 0.9371357356782313,
+        "time_weighted_reuse_rate": 0.9371357356782313,
+        "replays": 60,
+        "miss_no_key": 2,
+        "miss_read_set": 2,
+        "miss_artifacts": 0,
+        "miss_corrupt": 0,
+        "miss_path_types": {
+          "workspace_file": 20
+        },
+        "rejected_reasons": {},
+        "roles": {
+          "unknown": {
+            "lookups": 64,
+            "hits": 60,
+            "stores": 4,
+            "replays": 60,
+            "executions": 4,
+            "matched_duration": 23168773150,
+            "saved_duration": 23168773150,
+            "executed_duration": 1554190950
+          }
+        },
+        "cross_role_hits": 0,
+        "verify_exit_mismatches": 0,
+        "verify_write_mismatches": 0,
+        "verify_output_mismatches": 0,
+        "verify_unavailable": 0,
+        "lookup_duration": 832830793,
+        "lookup_max_duration": 18678472,
+        "store_duration": 51617728,
+        "near_miss_ast": 0,
+        "near_miss_pipeline": 0
+      }
+    },
+    {
+      "repeat": 8,
+      "oracle": {
+        "expected_reusable": 60,
+        "actual_replayed": 60,
+        "missed_reuse": 0,
+        "unexpected_replay": 0,
+        "interpretation": "semantic oracle; safe rejection is missed reuse, not a false hit; inspect execution.cache rejection counters"
+      },
+      "snapshot": {
+        "lookups": 64,
+        "hits": 60,
+        "stores": 4,
+        "rejected": 0,
+        "replay_errors": 0,
+        "artifact_reflinks": 0,
+        "reflink_bytes": 0,
+        "artifact_copies": 0,
+        "copied_bytes": 0,
+        "verifications": 0,
+        "verify_mismatches": 0,
+        "saved_duration": 22299103180,
+        "matched_duration": 22299103180,
+        "executed_duration": 1485721092,
+        "verification_duration": 0,
+        "time_weighted_hit_rate": 0.9375349140691772,
+        "time_weighted_reuse_rate": 0.9375349140691772,
+        "replays": 60,
+        "miss_no_key": 2,
+        "miss_read_set": 2,
+        "miss_artifacts": 0,
+        "miss_corrupt": 0,
+        "miss_path_types": {
+          "workspace_file": 20
+        },
+        "rejected_reasons": {},
+        "roles": {
+          "unknown": {
+            "lookups": 64,
+            "hits": 60,
+            "stores": 4,
+            "replays": 60,
+            "executions": 4,
+            "matched_duration": 22299103180,
+            "saved_duration": 22299103180,
+            "executed_duration": 1485721092
+          }
+        },
+        "cross_role_hits": 0,
+        "verify_exit_mismatches": 0,
+        "verify_write_mismatches": 0,
+        "verify_output_mismatches": 0,
+        "verify_unavailable": 0,
+        "lookup_duration": 797134137,
+        "lookup_max_duration": 20927149,
+        "store_duration": 60168559,
+        "near_miss_ast": 0,
+        "near_miss_pipeline": 0
+      }
+    },
+    {
+      "repeat": 9,
+      "oracle": {
+        "expected_reusable": 60,
+        "actual_replayed": 60,
+        "missed_reuse": 0,
+        "unexpected_replay": 0,
+        "interpretation": "semantic oracle; safe rejection is missed reuse, not a false hit; inspect execution.cache rejection counters"
+      },
+      "snapshot": {
+        "lookups": 64,
+        "hits": 60,
+        "stores": 4,
+        "rejected": 0,
+        "replay_errors": 0,
+        "artifact_reflinks": 0,
+        "reflink_bytes": 0,
+        "artifact_copies": 0,
+        "copied_bytes": 0,
+        "verifications": 0,
+        "verify_mismatches": 0,
+        "saved_duration": 24629197523,
+        "matched_duration": 24629197523,
+        "executed_duration": 1658549935,
+        "verification_duration": 0,
+        "time_weighted_hit_rate": 0.9369078717128628,
+        "time_weighted_reuse_rate": 0.9369078717128628,
+        "replays": 60,
+        "miss_no_key": 2,
+        "miss_read_set": 2,
+        "miss_artifacts": 0,
+        "miss_corrupt": 0,
+        "miss_path_types": {
+          "workspace_file": 20
+        },
+        "rejected_reasons": {},
+        "roles": {
+          "unknown": {
+            "lookups": 64,
+            "hits": 60,
+            "stores": 4,
+            "replays": 60,
+            "executions": 4,
+            "matched_duration": 24629197523,
+            "saved_duration": 24629197523,
+            "executed_duration": 1658549935
+          }
+        },
+        "cross_role_hits": 0,
+        "verify_exit_mismatches": 0,
+        "verify_write_mismatches": 0,
+        "verify_output_mismatches": 0,
+        "verify_unavailable": 0,
+        "lookup_duration": 915624989,
+        "lookup_max_duration": 21373511,
+        "store_duration": 59798110,
+        "near_miss_ast": 0,
+        "near_miss_pipeline": 0
+      }
+    },
+    {
+      "repeat": 10,
+      "oracle": {
+        "expected_reusable": 60,
+        "actual_replayed": 60,
+        "missed_reuse": 0,
+        "unexpected_replay": 0,
+        "interpretation": "semantic oracle; safe rejection is missed reuse, not a false hit; inspect execution.cache rejection counters"
+      },
+      "snapshot": {
+        "lookups": 64,
+        "hits": 60,
+        "stores": 4,
+        "rejected": 0,
+        "replay_errors": 0,
+        "artifact_reflinks": 0,
+        "reflink_bytes": 0,
+        "artifact_copies": 0,
+        "copied_bytes": 0,
+        "verifications": 0,
+        "verify_mismatches": 0,
+        "saved_duration": 23324152623,
+        "matched_duration": 23324152623,
+        "executed_duration": 1560138607,
+        "verification_duration": 0,
+        "time_weighted_hit_rate": 0.9373042779245756,
+        "time_weighted_reuse_rate": 0.9373042779245756,
+        "replays": 60,
+        "miss_no_key": 2,
+        "miss_read_set": 2,
+        "miss_artifacts": 0,
+        "miss_corrupt": 0,
+        "miss_path_types": {
+          "workspace_file": 20
+        },
+        "rejected_reasons": {},
+        "roles": {
+          "unknown": {
+            "lookups": 64,
+            "hits": 60,
+            "stores": 4,
+            "replays": 60,
+            "executions": 4,
+            "matched_duration": 23324152623,
+            "saved_duration": 23324152623,
+            "executed_duration": 1560138607
+          }
+        },
+        "cross_role_hits": 0,
+        "verify_exit_mismatches": 0,
+        "verify_write_mismatches": 0,
+        "verify_output_mismatches": 0,
+        "verify_unavailable": 0,
+        "lookup_duration": 877183276,
+        "lookup_max_duration": 32529112,
+        "store_duration": 58894505,
+        "near_miss_ast": 0,
+        "near_miss_pipeline": 0
+      }
+    }
+  ],
+  "median_time_weighted_hit_rate": 0.9373821966389849,
+  "total_expected_reusable": 600,
+  "total_replayed": 600,
+  "total_unexpected_replay": 0,
+  "shadow_audit": false
+}

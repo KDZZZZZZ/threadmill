@@ -1,0 +1,48 @@
+{
+  "validated_utc": "2026-10-03T17:34:21.813838+00:00",
+  "red": {
+    "command": [
+      "/usr/bin/python3",
+      "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/test_render_comparisons.py"
+    ],
+    "returncode": 1,
+    "test_sha256": "b5a1c1fdf55c20ecd939c550caf887a8d7a6b96edb550b531172c8a4f89445df",
+    "expected_failure": true
+  },
+  "green": {
+    "command": [
+      "/usr/bin/python3",
+      "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/test_render_comparisons.py"
+    ],
+    "returncode": 0,
+    "tests": 1
+  },
+  "script_sha256": "07a569f8043650e6e88d1effd5b5fc1d862f06bb264e3d06a7eee9e59706291c",
+  "reference_csv_and_markdown_unchanged": true,
+  "reference_rows": 16,
+  "legacy_rows": 16,
+  "logs": {
+    "red.log": "5fa99d5510706471e0a888507d0fb27de5c5b938dc065bff2bcc2fb5a11c7881",
+    "green.log": "4ce4b259b27650df250c38fd5fede04ece05e638aa348014a22d256979f7fd63"
+  },
+  "formatting_followup": {
+    "reason": "Remove the redundant trailing blank line reported by git diff --check; numeric CSV and Markdown content unchanged.",
+    "script_sha256": "b895448b35bf5e1169302487ca973245e9785679aa2a20074d06146129f95dc2",
+    "test_command": [
+      "/usr/bin/python3",
+      "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/test_render_comparisons.py"
+    ],
+    "test_returncode": 0,
+    "test_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.047s\n\nOK\n",
+    "comparisons": {
+      "reference": {
+        "csv_byte_identical": true,
+        "markdown_only_removed_trailing_blank_line": true
+      },
+      "legacy": {
+        "csv_byte_identical": true,
+        "markdown_only_removed_trailing_blank_line": true
+      }
+    }
+  }
+}

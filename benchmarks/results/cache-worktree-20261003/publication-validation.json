@@ -1,0 +1,122 @@
+{
+  "validated_utc": "2026-10-03T17:42:12.705814+00:00",
+  "extraction": {
+    "readme_sha256": "37eb4636f20c7f290585a942246c29fbfef6ee924ef26e46a860d1c38bb19407",
+    "extraction_code_sha256": "eabd2458c48653165d7223fe86691d58c1731d65edcf88990933dfe3f70eba0b",
+    "output": "/tmp/threadmill-evidence",
+    "archives": 19,
+    "compressed_bytes": 326218018,
+    "all_archive_digests_verified": true,
+    "extraction_completed": true,
+    "elapsed_seconds": 10.252559423446655
+  },
+  "final_readme_sha256": "c883877068e4709daf0e95daad115b151c6caa0881d6b61cb4993803a7c2a6e5",
+  "extraction_code_unchanged_after_prose_updates": true,
+  "audits": {
+    "checks": [
+      {
+        "name": "primary",
+        "command": [
+          "/usr/bin/python3",
+          "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/audit-primary.py",
+          "--raw",
+          "/tmp/threadmill-evidence/primary",
+          "--project",
+          "/home/oops/repo/threadmill-cache-bench",
+          "--output",
+          "/home/oops/evals/threadmill-cache-bench/publication-validation-20261004/audits/primary.json"
+        ],
+        "returncode": 0,
+        "elapsed_seconds": 25.76081347465515,
+        "script_sha256": "fb74fc6081253093a2e7904bdb38029927904f6cc99e5699e59a115c4e079d7e",
+        "stdout": "{\"completed\": 144, \"missing\": [], \"failed_checks\": 0, \"failure_examples\": [], \"artifact\": \"/home/oops/evals/threadmill-cache-bench/publication-validation-20261004/audits/primary.json\"}"
+      },
+      {
+        "name": "pytest",
+        "command": [
+          "/usr/bin/python3",
+          "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/audit-cache.py",
+          "--raw",
+          "/tmp/threadmill-evidence/continuous/cache-pytest",
+          "--project",
+          "/home/oops/repo/threadmill-cache-bench",
+          "--output",
+          "/home/oops/evals/threadmill-cache-bench/publication-validation-20261004/audits/pytest.json"
+        ],
+        "returncode": 0,
+        "elapsed_seconds": 0.1681668758392334,
+        "script_sha256": "62bd81381f1e8a0647ef5a0dfda75fd57cebd08b23ef340df51bfa86dfcc3a97",
+        "stdout": "{\"audit_script_sha256\": \"62bd81381f1e8a0647ef5a0dfda75fd57cebd08b23ef340df51bfa86dfcc3a97\", \"control_registration_sha256\": \"112f75c3e381fe5caa3b1b4e931f40e241a216ea53527dd1c4a5e53bf1bdf6c4\", \"language\": \"pytest\", \"rows_verified\": 40, \"registration_sha256\": \"7abaa9e2243d0fc04138b5573e1b46f4bc25c508d0589fd9c840a390ef05f9d2\", \"trace_sha256\": \"59aaa2551ec84abba58144da2a8de66fa5a458565dd43a1d8f27922f111e6688\", \"supervisor_sha256\": \"5e6c2b239d233798542c610fe6ec40fe198a6363aed7758f8d1ef9ee027a0c09\", \"normal_reaped\": 1390, \"median_time_weighted_hit_rate\": 0.9373821966389849, \"total_expected_reusable\": 600, \"total_replayed\": 600, \"total_unexpected_replay\": 0, \"shadow_audit\": false}"
+      },
+      {
+        "name": "synthetic-reference",
+        "command": [
+          "/usr/bin/python3",
+          "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/audit-reference.py",
+          "--raw",
+          "/tmp/threadmill-evidence/continuous/synthetic-shared-cwd-reference",
+          "--primary-registration",
+          "/tmp/threadmill-evidence/primary/preregistration.json",
+          "--project",
+          "/home/oops/repo/threadmill-cache-bench",
+          "--fixture",
+          "synthetic",
+          "--output",
+          "/home/oops/evals/threadmill-cache-bench/publication-validation-20261004/audits/synthetic-reference.json"
+        ],
+        "returncode": 0,
+        "elapsed_seconds": 5.315392255783081,
+        "script_sha256": "acf15fc4c34bce2f9fadc7ecd61e0c0053af5474ec9d85dde46b837c160de1af",
+        "stdout": "{\"fixture\": \"synthetic\", \"rows_verified\": 24, \"errors\": 0, \"reference_only\": true}"
+      },
+      {
+        "name": "ipython-reference",
+        "command": [
+          "/usr/bin/python3",
+          "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/audit-reference.py",
+          "--raw",
+          "/tmp/threadmill-evidence/continuous/ipython-shared-cwd-reference",
+          "--primary-registration",
+          "/tmp/threadmill-evidence/primary/preregistration.json",
+          "--project",
+          "/home/oops/repo/threadmill-cache-bench",
+          "--fixture",
+          "ipython",
+          "--output",
+          "/home/oops/evals/threadmill-cache-bench/publication-validation-20261004/audits/ipython-reference.json"
+        ],
+        "returncode": 0,
+        "elapsed_seconds": 5.132904052734375,
+        "script_sha256": "acf15fc4c34bce2f9fadc7ecd61e0c0053af5474ec9d85dde46b837c160de1af",
+        "stdout": "{\"fixture\": \"ipython\", \"rows_verified\": 24, \"errors\": 0, \"reference_only\": true}"
+      },
+      {
+        "name": "legacy",
+        "command": [
+          "/usr/bin/python3",
+          "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/audit-legacy.py",
+          "--raw",
+          "/tmp/threadmill-evidence/legacy",
+          "--primary-raw",
+          "/tmp/threadmill-evidence/primary",
+          "--project",
+          "/home/oops/repo/threadmill-legacy-overlay",
+          "--output",
+          "/home/oops/evals/threadmill-cache-bench/publication-validation-20261004/audits/legacy"
+        ],
+        "returncode": 0,
+        "elapsed_seconds": 25.5897319316864,
+        "script_sha256": "4f4563a23ada3f2ad6b90fb1b9d9176ab093b99b984de4cb78825b9ae8df28bd",
+        "stdout": "{\"rows_verified\": 48, \"historical_only\": true, \"capacity_failures\": 0}"
+      }
+    ],
+    "complete": true,
+    "passed": true
+  },
+  "formal_measurements_rerun": false,
+  "model_calls": 0,
+  "limits": [
+    "Go formal cache matrix remains 2/40 and is not accepted as a complete result.",
+    "This verifies archived evidence and saved statistics, not a fresh execution of workloads or independent recomputation of each run percentile."
+  ]
+}

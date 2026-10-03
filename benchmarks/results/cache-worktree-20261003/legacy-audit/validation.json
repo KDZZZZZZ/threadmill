@@ -1,0 +1,86 @@
+{
+  "audit_sha256": "4f4563a23ada3f2ad6b90fb1b9d9176ab093b99b984de4cb78825b9ae8df28bd",
+  "validator_sha256": "986f990d102ba3a2ead487c1ef4556867d52aa76fb2adf514ec77a7bb60f91aa",
+  "source_supervisor_sha256": "ad24151ba767b8cf7b21dea6f8828de2d438cd02ddfe6aaaf7a2ce7ddcefe823",
+  "checks": [
+    {
+      "name": "missing-first-final",
+      "command": [
+        "/usr/bin/python3",
+        "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/audit-legacy.py",
+        "--raw",
+        "/home/oops/evals/threadmill-cache-bench/legacy-report-audit-20261003/cli-validation/missing-first-final-kaz0_uav/legacy",
+        "--primary-raw",
+        "/home/oops/evals/threadmill-cache-bench/formal-b839b28",
+        "--project",
+        "/home/oops/repo/threadmill-legacy-overlay",
+        "--output",
+        "/home/oops/evals/threadmill-cache-bench/legacy-report-audit-20261003/cli-validation/missing-first-final-kaz0_uav/audit-output"
+      ],
+      "returncode": 1,
+      "timed_out": false,
+      "no_success_summary": true,
+      "expected_error_markers": [
+        "FileNotFoundError",
+        "threadmill-historical98-overlay-external-w64-r1.json"
+      ],
+      "output_preserved": true,
+      "passed": true,
+      "stdout": "missing-first-final.stdout.log",
+      "stderr": "missing-first-final.stderr.log"
+    },
+    {
+      "name": "wrong-supervisor-command",
+      "command": [
+        "/usr/bin/python3",
+        "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/audit-legacy.py",
+        "--raw",
+        "/home/oops/evals/threadmill-cache-bench/legacy-report-audit-20261003/cli-validation/wrong-supervisor-command-g1qfp9wh/legacy",
+        "--primary-raw",
+        "/home/oops/evals/threadmill-cache-bench/formal-b839b28",
+        "--project",
+        "/home/oops/repo/threadmill-legacy-overlay",
+        "--output",
+        "/home/oops/evals/threadmill-cache-bench/legacy-report-audit-20261003/cli-validation/wrong-supervisor-command-g1qfp9wh/audit-output"
+      ],
+      "returncode": 1,
+      "timed_out": false,
+      "no_success_summary": true,
+      "expected_error_markers": [
+        "supervised driver differs"
+      ],
+      "output_preserved": true,
+      "passed": true,
+      "stdout": "wrong-supervisor-command.stdout.log",
+      "stderr": "wrong-supervisor-command.stderr.log"
+    },
+    {
+      "name": "existing-output",
+      "command": [
+        "/usr/bin/python3",
+        "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/audit-legacy.py",
+        "--raw",
+        "/home/oops/evals/threadmill-cache-bench/legacy-report-audit-20261003/cli-validation/existing-output-4bv53i0_/legacy",
+        "--primary-raw",
+        "/home/oops/evals/threadmill-cache-bench/formal-b839b28",
+        "--project",
+        "/home/oops/repo/threadmill-legacy-overlay",
+        "--output",
+        "/home/oops/evals/threadmill-cache-bench/legacy-report-audit-20261003/cli-validation/existing-output-4bv53i0_/audit-output"
+      ],
+      "returncode": 1,
+      "timed_out": false,
+      "no_success_summary": true,
+      "expected_error_markers": [
+        "FileExistsError",
+        "/home/oops/evals/threadmill-cache-bench/legacy-report-audit-20261003/cli-validation/existing-output-4bv53i0_/audit-output"
+      ],
+      "output_preserved": true,
+      "passed": true,
+      "stdout": "existing-output.stdout.log",
+      "stderr": "existing-output.stderr.log"
+    }
+  ],
+  "passed": true,
+  "scope": "Three negative public CLI checks only; the positive full audit is separate."
+}
