@@ -1,0 +1,2260 @@
+{
+  "audited_utc": "2026-10-03T13:40:32.316080+00:00",
+  "completed_rows": 144,
+  "expected_rows": 144,
+  "missing": [],
+  "failures": [],
+  "inventory": [
+    {
+      "path": "synthetic/threadmill-bwrap-w64-r1.json",
+      "sha256": "5c55be9d38cf037f6c1e0b112b9bf14348bfee041f37d0d3f1ec90ec4bd312b8",
+      "bytes": 1050303
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w64-r2.json",
+      "sha256": "3c051893c42cbcef95b07970dcd4910a76a03baa829d734a9dbc351166ae42f0",
+      "bytes": 1050563
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w64-r3.json",
+      "sha256": "429ca6d3403b7d8650b6248334772939fe9202af8559a9ae241ec102dae5d02d",
+      "bytes": 1051018
+    },
+    {
+      "path": "synthetic/threadmill-external-w64-r1.json",
+      "sha256": "b77877f383cc4cd019535f7967e3b6a4b5e76d876318c94ed81c196e6e950ed6",
+      "bytes": 1052704
+    },
+    {
+      "path": "synthetic/threadmill-external-w64-r2.json",
+      "sha256": "9de8c17c35e00083eae89cef721565923b865c0a4455ac8432bfc369b156caec",
+      "bytes": 1048098
+    },
+    {
+      "path": "synthetic/threadmill-external-w64-r3.json",
+      "sha256": "51bc515a28c8e9be9ed414a4d49349a1410d8962dc029f1ca58a67879c083292",
+      "bytes": 1048622
+    },
+    {
+      "path": "synthetic/pi-worktree-w64-r1.json",
+      "sha256": "3d54e87bb91208485e5aafb30c7b88b3f9f78acacdc6974afbd9192dbc3a4fb3",
+      "bytes": 1165631
+    },
+    {
+      "path": "synthetic/pi-worktree-w64-r2.json",
+      "sha256": "d22c0a1de38b94244dd8efaaaea2300ee0059a297dfb76e6fc9b50e95d1c8e34",
+      "bytes": 1165709
+    },
+    {
+      "path": "synthetic/pi-worktree-w64-r3.json",
+      "sha256": "fe56cb9d249107b90b55b61ba3efe757da0344f31bffe8884bb9c8953859828c",
+      "bytes": 1165665
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w128-r1.json",
+      "sha256": "d3addf68db559f429a2fc5550cd0fb16f81e58e7bab8b46d7e832653d35c2f2f",
+      "bytes": 2097739
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w128-r2.json",
+      "sha256": "bd039c2a2c36c53d0cc5eeb8ecdcb7a1cf696fc38112ddd87c824c8e58d980fa",
+      "bytes": 2097887
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w128-r3.json",
+      "sha256": "bcf34e9f906fdd997b9557e458c71ec8103fe759c864a0bb18b1c2cceff873fb",
+      "bytes": 2098259
+    },
+    {
+      "path": "synthetic/threadmill-external-w128-r1.json",
+      "sha256": "0f02a40f0edef52c256607a437035c84f6a70bf9b3ca92235c6c2b4c4101920e",
+      "bytes": 2090793
+    },
+    {
+      "path": "synthetic/threadmill-external-w128-r2.json",
+      "sha256": "e3cb9b06d63c59e6300572e5d555303279d75248006b87eeec5a8dbe58051ca1",
+      "bytes": 2092059
+    },
+    {
+      "path": "synthetic/threadmill-external-w128-r3.json",
+      "sha256": "05f87b085aae8545414d3b2ed301a10092e1af00bdea65dc1f69b12b46ce5d77",
+      "bytes": 2091937
+    },
+    {
+      "path": "synthetic/pi-worktree-w128-r1.json",
+      "sha256": "be2676fb3265c64339ef4241160355b92e8135286a89b900bf3ea5305651b60c",
+      "bytes": 2310168
+    },
+    {
+      "path": "synthetic/pi-worktree-w128-r2.json",
+      "sha256": "8c96b6564436157766323384edec60c0733a336e61a296a61c87aed227138073",
+      "bytes": 2311362
+    },
+    {
+      "path": "synthetic/pi-worktree-w128-r3.json",
+      "sha256": "a4b55e3ffe00adbd65db41d461d0656244957e5cb5c69fc06a205ad545cd4e2e",
+      "bytes": 2311062
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w192-r1.json",
+      "sha256": "d292fce79095ee32407b528c92821bdfd2d6cd6d138f36b430895d335cb1dd15",
+      "bytes": 3148156
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w192-r2.json",
+      "sha256": "98d8b2cf60878328471b532ce03fc737663401f4ac060ffaeb1ae15d1ffc0675",
+      "bytes": 3149257
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w192-r3.json",
+      "sha256": "c9f85ee00aaa002b555e56bf5cd2587c3025f14823a4fff693903c9d6e657062",
+      "bytes": 3147405
+    },
+    {
+      "path": "synthetic/threadmill-external-w192-r1.json",
+      "sha256": "cd650d4cbcd83d232fed6cf0af2a2939115545a81db1b66cfd30577535d2125b",
+      "bytes": 3136512
+    },
+    {
+      "path": "synthetic/threadmill-external-w192-r2.json",
+      "sha256": "e7f8a7fec146cb597f00449c56723499b76e81815541b1f2bdd48519014c5cf6",
+      "bytes": 3137682
+    },
+    {
+      "path": "synthetic/threadmill-external-w192-r3.json",
+      "sha256": "c915456e9e7424fe4680a42a5cf773d6ac8ce181af3d8707fde9f77473e17c03",
+      "bytes": 3137088
+    },
+    {
+      "path": "synthetic/pi-worktree-w192-r1.json",
+      "sha256": "aa3df058014aa685fc472021fecaaa8491f12bbef24498e54502bbb0a775a065",
+      "bytes": 3456448
+    },
+    {
+      "path": "synthetic/pi-worktree-w192-r2.json",
+      "sha256": "23b807b644d4a652158c2f72165ad5b682382fb2a0c66726fe1eccd3be145b51",
+      "bytes": 3457582
+    },
+    {
+      "path": "synthetic/pi-worktree-w192-r3.json",
+      "sha256": "3c0f6313395dc2dfe308c410e0cb2a26855b7ecfe3b87d95d50e88b75ee56e90",
+      "bytes": 3457280
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w256-r1.json",
+      "sha256": "95bc6762ba92afdbbd0f8cd96fae20898ef1517bd00f426ed7f67d3b505ec382",
+      "bytes": 4219317
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w256-r2.json",
+      "sha256": "0449fbaa8a48432038c403cb022764e80b61d1e2d1ba40566fb5a1ce8b53822d",
+      "bytes": 4218125
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w256-r3.json",
+      "sha256": "c9328033dfe13e2ba4bc46d5d26afe3f9dd7f7a9028e11b5a924a7af4df4f8a5",
+      "bytes": 4221603
+    },
+    {
+      "path": "synthetic/threadmill-external-w256-r1.json",
+      "sha256": "79b3f9b74e9c236e9f575c7b25cf762ebe25bfde18ce116a7513cb22fc2deff7",
+      "bytes": 4205287
+    },
+    {
+      "path": "synthetic/threadmill-external-w256-r2.json",
+      "sha256": "06711fa34da8bc2a01dbb34c3a4705aa4ddb7dc812b448b86ed6269f329ce577",
+      "bytes": 4206478
+    },
+    {
+      "path": "synthetic/threadmill-external-w256-r3.json",
+      "sha256": "f5baec045ac787ae88e7f8e37d316820f947d59b3c57955f44dad9b6fd75c89c",
+      "bytes": 4203698
+    },
+    {
+      "path": "synthetic/pi-worktree-w256-r1.json",
+      "sha256": "08e6dbf1ff0ead0f50ab1121421f361146181d94cbb552c748541ef2721a9b16",
+      "bytes": 4631367
+    },
+    {
+      "path": "synthetic/pi-worktree-w256-r2.json",
+      "sha256": "15f3ecd6a711036e457c9861a7c2abba1082ca605760c367754d586c6de8d8b1",
+      "bytes": 4626937
+    },
+    {
+      "path": "synthetic/pi-worktree-w256-r3.json",
+      "sha256": "5765466668dc0903d35a8ab060bec3b463235f8c9e0ca4ec71b64033da802915",
+      "bytes": 4633119
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w384-r1.json",
+      "sha256": "bf4cccddfb7b24ff7fd023d8fb25d89cb6016e30792adb071dbe48c848bac154",
+      "bytes": 6344339
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w384-r2.json",
+      "sha256": "b1d237616ae7f4049da8fed1df84bf135a0ef57f14c957d2f35864fe0c3f3ff3",
+      "bytes": 6359645
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w384-r3.json",
+      "sha256": "327de06076a65e492291dc76ba3fa9985333232b1e514be074dd7c0fd722a184",
+      "bytes": 6347214
+    },
+    {
+      "path": "synthetic/threadmill-external-w384-r1.json",
+      "sha256": "2810cf16540b612687061a1e7bf9cc051e7ee65917179eef432cb6bcdb1d42cb",
+      "bytes": 6326140
+    },
+    {
+      "path": "synthetic/threadmill-external-w384-r2.json",
+      "sha256": "aee7a24ad1123b1f5c001ba7345152bd4a0699bcc8fd6382df5f7960eba994a3",
+      "bytes": 6357710
+    },
+    {
+      "path": "synthetic/threadmill-external-w384-r3.json",
+      "sha256": "8cba4c2d66e7c24e43377ab19062a1ecab6eb6ec97c948a48c4a12649acf35b6",
+      "bytes": 6331979
+    },
+    {
+      "path": "synthetic/pi-worktree-w384-r1.json",
+      "sha256": "4a8657868305a02fba4571f91e7904f46c8e4470310992363381b9b8a81a1cd0",
+      "bytes": 6960151
+    },
+    {
+      "path": "synthetic/pi-worktree-w384-r2.json",
+      "sha256": "ea5493203f6a25989c25a7d2e4aed62967f5baa4c9744693be81dc617757964f",
+      "bytes": 6955362
+    },
+    {
+      "path": "synthetic/pi-worktree-w384-r3.json",
+      "sha256": "62fac4fdb2502ec82d49cae679177b3d2a0f2f69673df47ec78abb49a889f972",
+      "bytes": 6961044
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w448-r1.json",
+      "sha256": "2d93d4b1132d74230bf540e6708b617da2ed023cf20c3663540039981279d793",
+      "bytes": 7429623
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w448-r2.json",
+      "sha256": "289bd8b622f3b28ed2cca0ff19ddf390dafe3fdc1df9f2e2aa566f5f9cc9ff3b",
+      "bytes": 7430708
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w448-r3.json",
+      "sha256": "0394b8d5b36b8e75cc97961d2b2ba1c5e76caa59b93b5422ab6bb2878382ac2d",
+      "bytes": 7454237
+    },
+    {
+      "path": "synthetic/threadmill-external-w448-r1.json",
+      "sha256": "6dc86b7e83abe077354a1047cbf9c0b63644e8c641c2d0bc7f71bcd22d57829d",
+      "bytes": 7433076
+    },
+    {
+      "path": "synthetic/threadmill-external-w448-r2.json",
+      "sha256": "141ec88ecf2cbce35117a951546738eff747c4b55593c379de99a7d304a60a48",
+      "bytes": 7413342
+    },
+    {
+      "path": "synthetic/threadmill-external-w448-r3.json",
+      "sha256": "3eaef8085147a0b20cc1186a66dd222a7891b0de7a7416106bd9f531ae6ef38e",
+      "bytes": 7441499
+    },
+    {
+      "path": "synthetic/pi-worktree-w448-r1.json",
+      "sha256": "fce26eeaf0974264f067234af103ea79f8120034677b297032e3d95d4dba2e77",
+      "bytes": 8141706
+    },
+    {
+      "path": "synthetic/pi-worktree-w448-r2.json",
+      "sha256": "2b8cc179520912f1c96a4b98dff64f4b2d14d629441775b12a2993882e4297e2",
+      "bytes": 8140720
+    },
+    {
+      "path": "synthetic/pi-worktree-w448-r3.json",
+      "sha256": "80f1484b0b01f2017df73ee711abb2483517695c69749efcbb620e273b418945",
+      "bytes": 8144401
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w500-r1.json",
+      "sha256": "c0bf2451629ce56736faab5ee8af380bfee7a3eff341caa3bb88ac6b8b33a0a8",
+      "bytes": 8318477
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w500-r2.json",
+      "sha256": "7b1bfb826091dd64d3f928510c313c3f0ed409ae1bd45f3c2fda625f50f28dde",
+      "bytes": 8321410
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w500-r3.json",
+      "sha256": "21bf2f0281c31066c14a11ff011d46eb471b817843ef615ced0261cc73084211",
+      "bytes": 8329329
+    },
+    {
+      "path": "synthetic/threadmill-external-w500-r1.json",
+      "sha256": "999522625f16630d706872eaea6aeb4519f255c8eaa4c105aec10a7009174545",
+      "bytes": 8306083
+    },
+    {
+      "path": "synthetic/threadmill-external-w500-r2.json",
+      "sha256": "128cef3cc6eed20ccfd444e47a814374304a9d05e3c4455235378926fd287149",
+      "bytes": 8297308
+    },
+    {
+      "path": "synthetic/threadmill-external-w500-r3.json",
+      "sha256": "bf4ff3d88451b3a2502b36ef44d0885d7add004d9108737c4160c7c6ceec301c",
+      "bytes": 8322439
+    },
+    {
+      "path": "synthetic/pi-worktree-w500-r1.json",
+      "sha256": "4a29b30de32c2f291635bd203a6d9b9b4d48d8f49e25bf2d31730bf90899728c",
+      "bytes": 9092109
+    },
+    {
+      "path": "synthetic/pi-worktree-w500-r2.json",
+      "sha256": "67c02a9e36355f96f0ad3a751ca31a784e062dd936b170e45a567d913f3d6045",
+      "bytes": 9088219
+    },
+    {
+      "path": "synthetic/pi-worktree-w500-r3.json",
+      "sha256": "abff26656b8d602a758395350929d07844d01e4d249b74c8f0b6d0713f1cdf27",
+      "bytes": 9091702
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w576-r1.json",
+      "sha256": "8115bf750c040076a5d6409f33ce65c70a02621dbb793db21d3978d1ce573ce2",
+      "bytes": 9628492
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w576-r2.json",
+      "sha256": "45c288b9a6e19f9286dcbc648079cf884598264fcbdffa0b802a2c4a326d2852",
+      "bytes": 9647620
+    },
+    {
+      "path": "synthetic/threadmill-bwrap-w576-r3.json",
+      "sha256": "93637e79fa2629f8c9bade00ad8b4c3f9e9db6f2d89ff540d9e499f53a848593",
+      "bytes": 9656175
+    },
+    {
+      "path": "synthetic/threadmill-external-w576-r1.json",
+      "sha256": "1103cad30ab4c95c7375c279fdefc499e6a5a1f033484d5b6f273a42846368d7",
+      "bytes": 9648446
+    },
+    {
+      "path": "synthetic/threadmill-external-w576-r2.json",
+      "sha256": "d8edd5a04e9c8beb531ae0a8f0082e9e02d6b15ca017da83ab81878cf2e88642",
+      "bytes": 9610640
+    },
+    {
+      "path": "synthetic/threadmill-external-w576-r3.json",
+      "sha256": "71671539e6fd410b1c997fc4a99a75913797488b205cc8ba80a09e70622c0c34",
+      "bytes": 9647742
+    },
+    {
+      "path": "synthetic/pi-worktree-w576-r1.json",
+      "sha256": "5acc932a2d34e413db6cc343492807c038d2f1ac3bda6973b5d22c2f0dce00fc",
+      "bytes": 10494101
+    },
+    {
+      "path": "synthetic/pi-worktree-w576-r2.json",
+      "sha256": "e34783f057641960817c2d2fab6b6a1f786baf27c99bc86dfee2c9cb966eeb3b",
+      "bytes": 10494431
+    },
+    {
+      "path": "synthetic/pi-worktree-w576-r3.json",
+      "sha256": "aad1d949de21522aabe46a252bca4cdfa0b75ac708557f70cd153ca18dfb6c6a",
+      "bytes": 10494497
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w64-r1.json",
+      "sha256": "7017ef1de92fea096c8783f7f09e9b1766420a488bcff18cbb602060075047f8",
+      "bytes": 1043290
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w64-r2.json",
+      "sha256": "e1ce282df8e9e13a37a8a7ca1c5c8089abd6a7487356aac92a1f2ebd357a11aa",
+      "bytes": 1042906
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w64-r3.json",
+      "sha256": "9b3aec8f2a154da62f02a46f525074f3a9cce0495b95558ba552ea45cf7af2e9",
+      "bytes": 1042764
+    },
+    {
+      "path": "ipython/threadmill-external-w64-r1.json",
+      "sha256": "cd188becec0d22d3f7398385d560f79257320bfc86227eed74f8c8416b12d737",
+      "bytes": 1041164
+    },
+    {
+      "path": "ipython/threadmill-external-w64-r2.json",
+      "sha256": "9b36b275f4b5ec835373b65b763f51e353db85c5ed9139b49f0ce00f29e77245",
+      "bytes": 1041145
+    },
+    {
+      "path": "ipython/threadmill-external-w64-r3.json",
+      "sha256": "81c685753c3083a35ffad320e295f7b00c7e4273a0fd20ba8590f1199642453e",
+      "bytes": 1041121
+    },
+    {
+      "path": "ipython/pi-worktree-w64-r1.json",
+      "sha256": "82cd8600613231f10993554ef3374065eb43953f36466ea102458f93fc19dbc0",
+      "bytes": 1161793
+    },
+    {
+      "path": "ipython/pi-worktree-w64-r2.json",
+      "sha256": "8dc464fe0e4f0c2557f43cc24df830038f23d7e1c0f2167cc8f524da65c28517",
+      "bytes": 1161192
+    },
+    {
+      "path": "ipython/pi-worktree-w64-r3.json",
+      "sha256": "111f180324d712038621d9ddc6eb30b5d66a778b27d292def8cd04740b706ba3",
+      "bytes": 1161455
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w128-r1.json",
+      "sha256": "378a83ad519dfaee462ec72a0ff8a99421ce4a3b9bde7be1935a0f8d9658a32d",
+      "bytes": 2081510
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w128-r2.json",
+      "sha256": "227d3cb5d87866ce8f510b88139258944da39d041e34e5f7ae017b18481bca28",
+      "bytes": 2082384
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w128-r3.json",
+      "sha256": "a75a09c4c24273f879da50b2493ed99e2ab07aa926c65b8ed261497f479fbb1c",
+      "bytes": 2081799
+    },
+    {
+      "path": "ipython/threadmill-external-w128-r1.json",
+      "sha256": "69d84316d0a5a2874b4dc6bd7bd5129c9e6035254ac43fd1d3ebc999457a4541",
+      "bytes": 2076600
+    },
+    {
+      "path": "ipython/threadmill-external-w128-r2.json",
+      "sha256": "273781cf7cea858d9294e41d563e7126e087b9273d2a568dbd65667fe908c596",
+      "bytes": 2076678
+    },
+    {
+      "path": "ipython/threadmill-external-w128-r3.json",
+      "sha256": "82dc1761074de2061099adf8bc8f934d2c37590fd320bed5c0baa36959182ed1",
+      "bytes": 2076862
+    },
+    {
+      "path": "ipython/pi-worktree-w128-r1.json",
+      "sha256": "777bab29e9ddbc4022f623814cd8b0495c48eed53e59d3c7a2806a9eec2cfb17",
+      "bytes": 2315285
+    },
+    {
+      "path": "ipython/pi-worktree-w128-r2.json",
+      "sha256": "49bdad16acf6f22552bc1567a49de6eca0ee4fe4a25986e9d37a4138617b58be",
+      "bytes": 2315351
+    },
+    {
+      "path": "ipython/pi-worktree-w128-r3.json",
+      "sha256": "9f411671dd5e8bea8d93b37968dbfdd2528c5aec4ba3e6725591475e9634a238",
+      "bytes": 2314477
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w192-r1.json",
+      "sha256": "864e328720abe21580af7d861d3fd4cee3fd36939e09763f51aa9deb878edd50",
+      "bytes": 3123831
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w192-r2.json",
+      "sha256": "b5f32693e95ea1db6f1796a883c004154683b3ce5460c56101a7e0376cd83d25",
+      "bytes": 3123524
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w192-r3.json",
+      "sha256": "7f7b442955706565b084f63d32d9f6b6035a32f9d375102f1c9b54545367d2f7",
+      "bytes": 3124138
+    },
+    {
+      "path": "ipython/threadmill-external-w192-r1.json",
+      "sha256": "7e7b72a831ea1f5ed8ac8da0ec428cd29f1b3cc7ce3900f386d16718d06d8833",
+      "bytes": 3116698
+    },
+    {
+      "path": "ipython/threadmill-external-w192-r2.json",
+      "sha256": "d75ab544e519cc0374b2558b141d41323366310ddc20470a76b86621e76591a8",
+      "bytes": 3116783
+    },
+    {
+      "path": "ipython/threadmill-external-w192-r3.json",
+      "sha256": "1c6027c1ad5d881a83db2e32215fdc909e86e81ee4711436386f2c180bd201f1",
+      "bytes": 3116838
+    },
+    {
+      "path": "ipython/pi-worktree-w192-r1.json",
+      "sha256": "5bd422dbd66195ea4a7c850205dd962d9b62b5f37c9e4d7b2f01f16e494f1990",
+      "bytes": 3479435
+    },
+    {
+      "path": "ipython/pi-worktree-w192-r2.json",
+      "sha256": "a357818489ee58ae41a55f932c3f7577272b90e97215a0bc4041fd713349e8c8",
+      "bytes": 3476816
+    },
+    {
+      "path": "ipython/pi-worktree-w192-r3.json",
+      "sha256": "525560ac49c03501ed807a21ccce16e6cbdcaf6fbf47a43b8fbfffed46df18a9",
+      "bytes": 3477208
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w256-r1.json",
+      "sha256": "5fc165b137c1acf9b83bed5c498e2ca6fe996414100b877b0cb7997e3dc941a3",
+      "bytes": 4184019
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w256-r2.json",
+      "sha256": "fa439a68c9273d68f84837edba073634b98261c6d64d8d0d63227d6786427469",
+      "bytes": 4184068
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w256-r3.json",
+      "sha256": "b75f93e41888f303b9b1f2e600fa30a34d69ffc25b1f5b1470bd7a091cbfce20",
+      "bytes": 4184090
+    },
+    {
+      "path": "ipython/threadmill-external-w256-r1.json",
+      "sha256": "684d7cb9bd2858066823dee5d2f191d61cb64e6726e3700b3e85a9c9e2f38609",
+      "bytes": 4175101
+    },
+    {
+      "path": "ipython/threadmill-external-w256-r2.json",
+      "sha256": "ff97fd528ed6812c35015c6149e7af1b56317c9f255952c902c4658517fcd3b0",
+      "bytes": 4174243
+    },
+    {
+      "path": "ipython/threadmill-external-w256-r3.json",
+      "sha256": "ce593f0db51e404038d530fee3f3633ccc50ea1bb06e211b31c80af6912a5566",
+      "bytes": 4174319
+    },
+    {
+      "path": "ipython/pi-worktree-w256-r1.json",
+      "sha256": "d5369ef9e31f811bcc51c8a1194a96c824074ff4a163c72b8c56dd489fe9c402",
+      "bytes": 4660313
+    },
+    {
+      "path": "ipython/pi-worktree-w256-r2.json",
+      "sha256": "e8dceeb99e8943b199638bd1c6003dde9a97fe599d11eff39876b2bc818f3407",
+      "bytes": 4664631
+    },
+    {
+      "path": "ipython/pi-worktree-w256-r3.json",
+      "sha256": "d539282bfbd0fff57148798d23efa688d13a2328f3455cd27fe93dcff57a5511",
+      "bytes": 4665233
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w384-r1.json",
+      "sha256": "50d20f435e0d5d065321b86d8ab7ee2fe462962b6c4ed98fa03f75944e8b1e67",
+      "bytes": 6287911
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w384-r2.json",
+      "sha256": "57000fa9760813029a601b6690692958c4898a346c809beccdef718930b9986f",
+      "bytes": 6289885
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w384-r3.json",
+      "sha256": "e9c0db306e087f82da0b61ed0d8c93df0b3bf18b668457db43443a7a40767082",
+      "bytes": 6287186
+    },
+    {
+      "path": "ipython/threadmill-external-w384-r1.json",
+      "sha256": "241620548b8990f8e807c58bc391269f44c0734544a0b8c71c5e34c2013d41de",
+      "bytes": 6273491
+    },
+    {
+      "path": "ipython/threadmill-external-w384-r2.json",
+      "sha256": "3dc5a8ebdc852fba30dc3984c66579e2f4ba29cb0987d73f613927d62c1a0632",
+      "bytes": 6272866
+    },
+    {
+      "path": "ipython/threadmill-external-w384-r3.json",
+      "sha256": "f3e6222b67217a1b5b606f5361f518f8414c63d68e901ce5552744263780b51c",
+      "bytes": 6273274
+    },
+    {
+      "path": "ipython/pi-worktree-w384-r1.json",
+      "sha256": "9b50c473ef1c163eade11c9a51115e3d8dc979fa46921478c58b6874d43bbc23",
+      "bytes": 7008960
+    },
+    {
+      "path": "ipython/pi-worktree-w384-r2.json",
+      "sha256": "b8162cb9c4b7233312dd2d87e4e65910a63a218210c304e540502257b0912909",
+      "bytes": 7010349
+    },
+    {
+      "path": "ipython/pi-worktree-w384-r3.json",
+      "sha256": "5e809d932207fc5ce812654c2f1f657235b493e993ab47f6bd5ec7c914f9c0f8",
+      "bytes": 7006598
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w448-r1.json",
+      "sha256": "8fe0486d193236ac80913b4e4887ffd2a40d9ee6c627bd3ba1c57cf2f601db89",
+      "bytes": 7353673
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w448-r2.json",
+      "sha256": "77c33e54142d0de8c6d7312d2e4e1a8409f0794c7172e5ec605f00a9d59db51d",
+      "bytes": 7355322
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w448-r3.json",
+      "sha256": "b3ac731fbe9deef05e659f929eb89c9f588c6ceecfe2749cd18aa9af9948bfd6",
+      "bytes": 7354033
+    },
+    {
+      "path": "ipython/threadmill-external-w448-r1.json",
+      "sha256": "45ccad4fbd8650e4c43bafc356567fb9dcad03fb05312ef13fa470c1965ce363",
+      "bytes": 7337629
+    },
+    {
+      "path": "ipython/threadmill-external-w448-r2.json",
+      "sha256": "acafa92a0b2422e35a4b71fd70bccddd7eb538b6efda49d2e3f87c7c5da98644",
+      "bytes": 7337656
+    },
+    {
+      "path": "ipython/threadmill-external-w448-r3.json",
+      "sha256": "b9e62962e438546a9c002c794b2fbe2f15c5d9e51fce1ee113ea95fb3459ee7b",
+      "bytes": 7338468
+    },
+    {
+      "path": "ipython/pi-worktree-w448-r1.json",
+      "sha256": "0a048083e3af4f908a5a6dec29b088fcef2d18aeb08aeaf4575afd9f0fc8fbf6",
+      "bytes": 8202627
+    },
+    {
+      "path": "ipython/pi-worktree-w448-r2.json",
+      "sha256": "57d5bf8bd2dc18118d788244008f9852825932e7275c0fba47bc04b280330bfe",
+      "bytes": 8199397
+    },
+    {
+      "path": "ipython/pi-worktree-w448-r3.json",
+      "sha256": "4c4370a539e2dcb17f74350f242b4affde822c2a25567b156d929f397a396503",
+      "bytes": 8197556
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w500-r1.json",
+      "sha256": "1f45ac0ae61cbc83ef8dac28bf7086c693745fa953a2154b8303249e6419af10",
+      "bytes": 8209911
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w500-r2.json",
+      "sha256": "1461c501552afaa0a2ad0d89f49f8121e7121546b4aa134540ca13cbe088fcb7",
+      "bytes": 8211300
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w500-r3.json",
+      "sha256": "713f4ee4c43ab328aa923cdd7f6b9d8ab09846aeaea19445563d73fa02bc9f81",
+      "bytes": 8209833
+    },
+    {
+      "path": "ipython/threadmill-external-w500-r1.json",
+      "sha256": "ce5b51777d07fe5f8541bc57a828b08baee70e1c50120f62fcc0d7ead8a1e133",
+      "bytes": 8192356
+    },
+    {
+      "path": "ipython/threadmill-external-w500-r2.json",
+      "sha256": "84f2c91f26a7d4d3dff721abe1c0d39c67c059a4f7a9135f9d9fe665652a6dbe",
+      "bytes": 8192038
+    },
+    {
+      "path": "ipython/threadmill-external-w500-r3.json",
+      "sha256": "d3bfe713e654f2107e1ed02edcbd6d6cc14bd179d6d047d2570183ef905c9e02",
+      "bytes": 8192542
+    },
+    {
+      "path": "ipython/pi-worktree-w500-r1.json",
+      "sha256": "c11bb53158cc5ef2a4cf90b158c184a9cad2bddde64c9078a8a29ccd0ea75360",
+      "bytes": 9149158
+    },
+    {
+      "path": "ipython/pi-worktree-w500-r2.json",
+      "sha256": "ecdfddd09462996d06cd73b581bf2c109ac8e118c26a4ebda95d367a2fecba2c",
+      "bytes": 9155735
+    },
+    {
+      "path": "ipython/pi-worktree-w500-r3.json",
+      "sha256": "383c4ef2c7ad7eeec951a52e181ba919264100bb64a6f72b2364fb45c6e57a71",
+      "bytes": 9153431
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w576-r1.json",
+      "sha256": "33b3975d2e09b437c8d187c54407ed2828794de49fe64423a863f054c9ec3462",
+      "bytes": 9472352
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w576-r2.json",
+      "sha256": "d1c9da4bfe99209144926f82ef5be63d78c82142b57a41364b6ebe40a6a98030",
+      "bytes": 9472493
+    },
+    {
+      "path": "ipython/threadmill-bwrap-w576-r3.json",
+      "sha256": "4353e715e12cff04de60f0cae1579ce404dafc2a6237ed1b989bb08f2a6625b3",
+      "bytes": 9472754
+    },
+    {
+      "path": "ipython/threadmill-external-w576-r1.json",
+      "sha256": "e170c57e64349b01f608a47a10ad343abca28e1a221ead9f426814f75a318c3f",
+      "bytes": 9450891
+    },
+    {
+      "path": "ipython/threadmill-external-w576-r2.json",
+      "sha256": "8dd32ad6b044fd5e85dcd53b706d99ea903d6945e810d54e9b716453856edaac",
+      "bytes": 9452560
+    },
+    {
+      "path": "continuation-20261003/ipython/threadmill-external-w576-r3.json",
+      "sha256": "4bb027045e7db08b44861d37355b9b4da1ad8b189e53ac1abe32e97f231247ab",
+      "bytes": 9454191
+    },
+    {
+      "path": "ipython/pi-worktree-w576-r1.json",
+      "sha256": "fc69c6208a2a7473d4ac27d1e0a813d9097ea088d113544a358a3e1f78fce283",
+      "bytes": 10558499
+    },
+    {
+      "path": "ipython/pi-worktree-w576-r2.json",
+      "sha256": "fb8924782f925a849b41d378e59ae44712ca8dc0a72694fad4b503a5f1050359",
+      "bytes": 10558313
+    },
+    {
+      "path": "ipython/pi-worktree-w576-r3.json",
+      "sha256": "41f5f29a8e5abba0e6f2bf44656d12fd6fe17aff356868c7d65bcb5ca1422e90",
+      "bytes": 10557802
+    }
+  ],
+  "summaries": {
+    "synthetic": {
+      "pi-worktree": {
+        "effective_peak": 64,
+        "stable_width": null,
+        "wall_ns_limit": 48703577901.25,
+        "tiers": [
+          {
+            "agents": 64,
+            "repeats": 3,
+            "wall_ns_median": 38962862321,
+            "errors": 0,
+            "commands_per_second_median": 39.57614785320587,
+            "physical_peak_delta_bytes_median": 1060749312,
+            "physical_retained_delta_bytes_median": 5029888,
+            "write_p50_ns_median": 401375,
+            "write_p95_ns_median": 2428497,
+            "fork_p50_ns_median": 6848959446,
+            "fork_p95_ns_median": 13155343660,
+            "collect_p50_ns_median": 106112404,
+            "collect_p95_ns_median": 158862106
+          },
+          {
+            "agents": 128,
+            "repeats": 3,
+            "wall_ns_median": 55670921848,
+            "errors": 0,
+            "commands_per_second_median": 55.05567176287222,
+            "physical_peak_delta_bytes_median": 2119958528,
+            "physical_retained_delta_bytes_median": 10346496,
+            "write_p50_ns_median": 466332,
+            "write_p95_ns_median": 4796827,
+            "fork_p50_ns_median": 14347343281,
+            "fork_p95_ns_median": 29387665902,
+            "collect_p50_ns_median": 129300609,
+            "collect_p95_ns_median": 330359171
+          },
+          {
+            "agents": 192,
+            "repeats": 3,
+            "wall_ns_median": 72120586469,
+            "errors": 0,
+            "commands_per_second_median": 63.36609591998186,
+            "physical_peak_delta_bytes_median": 3181789184,
+            "physical_retained_delta_bytes_median": 15896576,
+            "write_p50_ns_median": 460595,
+            "write_p95_ns_median": 8136264,
+            "fork_p50_ns_median": 21693840917,
+            "fork_p95_ns_median": 45791731029,
+            "collect_p50_ns_median": 142460844,
+            "collect_p95_ns_median": 212496112
+          },
+          {
+            "agents": 256,
+            "repeats": 3,
+            "wall_ns_median": 96935211061,
+            "errors": 0,
+            "commands_per_second_median": 63.300011758768434,
+            "physical_peak_delta_bytes_median": 4235915264,
+            "physical_retained_delta_bytes_median": 13168640,
+            "write_p50_ns_median": 501152,
+            "write_p95_ns_median": 7595627,
+            "fork_p50_ns_median": 31711466210,
+            "fork_p95_ns_median": 65531740209,
+            "collect_p50_ns_median": 222710341,
+            "collect_p95_ns_median": 602088753
+          },
+          {
+            "agents": 384,
+            "repeats": 3,
+            "wall_ns_median": 152488064347,
+            "errors": 0,
+            "commands_per_second_median": 60.17520151032414,
+            "physical_peak_delta_bytes_median": 6372589568,
+            "physical_retained_delta_bytes_median": 35864576,
+            "write_p50_ns_median": 535866,
+            "write_p95_ns_median": 10341095,
+            "fork_p50_ns_median": 50192738789,
+            "fork_p95_ns_median": 104293033911,
+            "collect_p50_ns_median": 309170209,
+            "collect_p95_ns_median": 656077127
+          },
+          {
+            "agents": 448,
+            "repeats": 3,
+            "wall_ns_median": 180656081096,
+            "errors": 0,
+            "commands_per_second_median": 59.45551312104612,
+            "physical_peak_delta_bytes_median": 7448936448,
+            "physical_retained_delta_bytes_median": 48943104,
+            "write_p50_ns_median": 546960,
+            "write_p95_ns_median": 12009310,
+            "fork_p50_ns_median": 60421484574,
+            "fork_p95_ns_median": 123646275494,
+            "collect_p50_ns_median": 308869977,
+            "collect_p95_ns_median": 780432147
+          },
+          {
+            "agents": 500,
+            "repeats": 3,
+            "wall_ns_median": 207263201732,
+            "errors": 0,
+            "commands_per_second_median": 57.7333549805553,
+            "physical_peak_delta_bytes_median": 8309186560,
+            "physical_retained_delta_bytes_median": 40579072,
+            "write_p50_ns_median": 559794,
+            "write_p95_ns_median": 12575065,
+            "fork_p50_ns_median": 70258580361,
+            "fork_p95_ns_median": 143527604904,
+            "collect_p50_ns_median": 356043552,
+            "collect_p95_ns_median": 787730834
+          },
+          {
+            "agents": 576,
+            "repeats": 3,
+            "wall_ns_median": 245893157814,
+            "errors": 0,
+            "commands_per_second_median": 56.199205064717795,
+            "physical_peak_delta_bytes_median": 9573896192,
+            "physical_retained_delta_bytes_median": 45051904,
+            "write_p50_ns_median": 572714,
+            "write_p95_ns_median": 15108579,
+            "fork_p50_ns_median": 83080417702,
+            "fork_p95_ns_median": 168917596253,
+            "collect_p50_ns_median": 364621344,
+            "collect_p95_ns_median": 764027632
+          }
+        ]
+      },
+      "threadmill-bwrap": {
+        "effective_peak": 64,
+        "stable_width": null,
+        "wall_ns_limit": 49553624187.5,
+        "tiers": [
+          {
+            "agents": 64,
+            "repeats": 3,
+            "wall_ns_median": 39642899350,
+            "errors": 0,
+            "commands_per_second_median": 38.897255883984684,
+            "physical_peak_delta_bytes_median": 360882176,
+            "physical_retained_delta_bytes_median": 263622656,
+            "write_p50_ns_median": 189111,
+            "write_p95_ns_median": 4263471,
+            "fork_p50_ns_median": 24388,
+            "fork_p95_ns_median": 82492,
+            "collect_p50_ns_median": 4165809340,
+            "collect_p95_ns_median": 7311969718
+          },
+          {
+            "agents": 128,
+            "repeats": 3,
+            "wall_ns_median": 71482921323,
+            "errors": 0,
+            "commands_per_second_median": 42.87737466898713,
+            "physical_peak_delta_bytes_median": 679903232,
+            "physical_retained_delta_bytes_median": 507899904,
+            "write_p50_ns_median": 257170,
+            "write_p95_ns_median": 7491201,
+            "fork_p50_ns_median": 24108,
+            "fork_p95_ns_median": 108657,
+            "collect_p50_ns_median": 8824854563,
+            "collect_p95_ns_median": 14868123584
+          },
+          {
+            "agents": 192,
+            "repeats": 3,
+            "wall_ns_median": 104029687235,
+            "errors": 0,
+            "commands_per_second_median": 43.92976775635694,
+            "physical_peak_delta_bytes_median": 1015296000,
+            "physical_retained_delta_bytes_median": 752762880,
+            "write_p50_ns_median": 444964,
+            "write_p95_ns_median": 63668023,
+            "fork_p50_ns_median": 25737,
+            "fork_p95_ns_median": 195422,
+            "collect_p50_ns_median": 6606217341,
+            "collect_p95_ns_median": 20198495886
+          },
+          {
+            "agents": 256,
+            "repeats": 3,
+            "wall_ns_median": 141155428661,
+            "errors": 0,
+            "commands_per_second_median": 43.46981237778864,
+            "physical_peak_delta_bytes_median": 1358819328,
+            "physical_retained_delta_bytes_median": 999243776,
+            "write_p50_ns_median": 1030722,
+            "write_p95_ns_median": 559593080,
+            "fork_p50_ns_median": 24561,
+            "fork_p95_ns_median": 149074,
+            "collect_p50_ns_median": 12273899818,
+            "collect_p95_ns_median": 29516336533
+          },
+          {
+            "agents": 384,
+            "repeats": 3,
+            "wall_ns_median": 217733312790,
+            "errors": 0,
+            "commands_per_second_median": 42.14329852616578,
+            "physical_peak_delta_bytes_median": 2051989504,
+            "physical_retained_delta_bytes_median": 1487429632,
+            "write_p50_ns_median": 1889819,
+            "write_p95_ns_median": 517198023,
+            "fork_p50_ns_median": 26496,
+            "fork_p95_ns_median": 221979,
+            "collect_p50_ns_median": 17644468275,
+            "collect_p95_ns_median": 43210154267
+          },
+          {
+            "agents": 448,
+            "repeats": 3,
+            "wall_ns_median": 266971522489,
+            "errors": 0,
+            "commands_per_second_median": 40.23275553834608,
+            "physical_peak_delta_bytes_median": 2345050112,
+            "physical_retained_delta_bytes_median": 1695559680,
+            "write_p50_ns_median": 2121066,
+            "write_p95_ns_median": 617642797,
+            "fork_p50_ns_median": 23685,
+            "fork_p95_ns_median": 78002,
+            "collect_p50_ns_median": 30820376489,
+            "collect_p95_ns_median": 67604031183
+          },
+          {
+            "agents": 500,
+            "repeats": 3,
+            "wall_ns_median": 335385724793,
+            "errors": 0,
+            "commands_per_second_median": 35.6783223477547,
+            "physical_peak_delta_bytes_median": 2553602048,
+            "physical_retained_delta_bytes_median": 1916465152,
+            "write_p50_ns_median": 2563441,
+            "write_p95_ns_median": 604615766,
+            "fork_p50_ns_median": 25896,
+            "fork_p95_ns_median": 231926,
+            "collect_p50_ns_median": 42510773264,
+            "collect_p95_ns_median": 102543932350
+          },
+          {
+            "agents": 576,
+            "repeats": 3,
+            "wall_ns_median": 449110659029,
+            "errors": 0,
+            "commands_per_second_median": 30.769699454199948,
+            "physical_peak_delta_bytes_median": 3146338304,
+            "physical_retained_delta_bytes_median": 2230816768,
+            "write_p50_ns_median": 3024088,
+            "write_p95_ns_median": 520680518,
+            "fork_p50_ns_median": 23687,
+            "fork_p95_ns_median": 188561,
+            "collect_p50_ns_median": 78844556693,
+            "collect_p95_ns_median": 183699335251
+          }
+        ]
+      },
+      "threadmill-external": {
+        "effective_peak": 64,
+        "stable_width": null,
+        "wall_ns_limit": 46987019802.5,
+        "tiers": [
+          {
+            "agents": 64,
+            "repeats": 3,
+            "wall_ns_median": 37589615842,
+            "errors": 0,
+            "commands_per_second_median": 41.021967515748784,
+            "physical_peak_delta_bytes_median": 361934848,
+            "physical_retained_delta_bytes_median": 263819264,
+            "write_p50_ns_median": 174336,
+            "write_p95_ns_median": 4116298,
+            "fork_p50_ns_median": 25392,
+            "fork_p95_ns_median": 69754,
+            "collect_p50_ns_median": 3591813411,
+            "collect_p95_ns_median": 6344534152
+          },
+          {
+            "agents": 128,
+            "repeats": 3,
+            "wall_ns_median": 64623058455,
+            "errors": 0,
+            "commands_per_second_median": 47.428891068879075,
+            "physical_peak_delta_bytes_median": 676044800,
+            "physical_retained_delta_bytes_median": 509145088,
+            "write_p50_ns_median": 215883,
+            "write_p95_ns_median": 4555033,
+            "fork_p50_ns_median": 27754,
+            "fork_p95_ns_median": 77807,
+            "collect_p50_ns_median": 7043381640,
+            "collect_p95_ns_median": 14936958091
+          },
+          {
+            "agents": 192,
+            "repeats": 3,
+            "wall_ns_median": 89533017531,
+            "errors": 0,
+            "commands_per_second_median": 51.042622331115766,
+            "physical_peak_delta_bytes_median": 1001627648,
+            "physical_retained_delta_bytes_median": 748240896,
+            "write_p50_ns_median": 348816,
+            "write_p95_ns_median": 111328755,
+            "fork_p50_ns_median": 25421,
+            "fork_p95_ns_median": 78439,
+            "collect_p50_ns_median": 6127531632,
+            "collect_p95_ns_median": 20640775819
+          },
+          {
+            "agents": 256,
+            "repeats": 3,
+            "wall_ns_median": 122316543109,
+            "errors": 0,
+            "commands_per_second_median": 50.16492327233303,
+            "physical_peak_delta_bytes_median": 1321799680,
+            "physical_retained_delta_bytes_median": 990707712,
+            "write_p50_ns_median": 697111,
+            "write_p95_ns_median": 624127435,
+            "fork_p50_ns_median": 26449,
+            "fork_p95_ns_median": 199133,
+            "collect_p50_ns_median": 8294209301,
+            "collect_p95_ns_median": 30204304379
+          },
+          {
+            "agents": 384,
+            "repeats": 3,
+            "wall_ns_median": 197902009006,
+            "errors": 0,
+            "commands_per_second_median": 46.36638125144956,
+            "physical_peak_delta_bytes_median": 2016440320,
+            "physical_retained_delta_bytes_median": 1491329024,
+            "write_p50_ns_median": 1716991,
+            "write_p95_ns_median": 503117235,
+            "fork_p50_ns_median": 25759,
+            "fork_p95_ns_median": 185643,
+            "collect_p50_ns_median": 21373282841,
+            "collect_p95_ns_median": 56320604675
+          },
+          {
+            "agents": 448,
+            "repeats": 3,
+            "wall_ns_median": 270218201857,
+            "errors": 0,
+            "commands_per_second_median": 39.74935783816724,
+            "physical_peak_delta_bytes_median": 2376699904,
+            "physical_retained_delta_bytes_median": 1729785856,
+            "write_p50_ns_median": 1859213,
+            "write_p95_ns_median": 509147080,
+            "fork_p50_ns_median": 23574,
+            "fork_p95_ns_median": 132856,
+            "collect_p50_ns_median": 32985696293,
+            "collect_p95_ns_median": 103282307654
+          },
+          {
+            "agents": 500,
+            "repeats": 3,
+            "wall_ns_median": 314624521350,
+            "errors": 0,
+            "commands_per_second_median": 38.03263632680613,
+            "physical_peak_delta_bytes_median": 2748858368,
+            "physical_retained_delta_bytes_median": 1934569472,
+            "write_p50_ns_median": 1754371,
+            "write_p95_ns_median": 542925005,
+            "fork_p50_ns_median": 23158,
+            "fork_p95_ns_median": 251392,
+            "collect_p50_ns_median": 47045912048,
+            "collect_p95_ns_median": 111225145432
+          },
+          {
+            "agents": 576,
+            "repeats": 3,
+            "wall_ns_median": 448911242830,
+            "errors": 0,
+            "commands_per_second_median": 30.783368028127494,
+            "physical_peak_delta_bytes_median": 3225612288,
+            "physical_retained_delta_bytes_median": 2241499136,
+            "write_p50_ns_median": 2159873,
+            "write_p95_ns_median": 831278304,
+            "fork_p50_ns_median": 23134,
+            "fork_p95_ns_median": 248368,
+            "collect_p50_ns_median": 88621752220,
+            "collect_p95_ns_median": 226770089210
+          }
+        ]
+      }
+    },
+    "ipython": {
+      "pi-worktree": {
+        "effective_peak": 64,
+        "stable_width": null,
+        "wall_ns_limit": 37788767233.75,
+        "tiers": [
+          {
+            "agents": 64,
+            "repeats": 3,
+            "wall_ns_median": 30231013787,
+            "errors": 0,
+            "commands_per_second_median": 51.00722095740944,
+            "physical_peak_delta_bytes_median": 546357248,
+            "physical_retained_delta_bytes_median": 5468160,
+            "write_p50_ns_median": 436072,
+            "write_p95_ns_median": 5888976,
+            "fork_p50_ns_median": 2031876813,
+            "fork_p95_ns_median": 3941722569,
+            "collect_p50_ns_median": 88003867,
+            "collect_p95_ns_median": 122404021
+          },
+          {
+            "agents": 128,
+            "repeats": 3,
+            "wall_ns_median": 40453765232,
+            "errors": 0,
+            "commands_per_second_median": 75.76550618767877,
+            "physical_peak_delta_bytes_median": 1132646400,
+            "physical_retained_delta_bytes_median": 10596352,
+            "write_p50_ns_median": 33554524,
+            "write_p95_ns_median": 151967219,
+            "fork_p50_ns_median": 4254366492,
+            "fork_p95_ns_median": 9456008747,
+            "collect_p50_ns_median": 135529051,
+            "collect_p95_ns_median": 303582036
+          },
+          {
+            "agents": 192,
+            "repeats": 3,
+            "wall_ns_median": 60076878369,
+            "errors": 0,
+            "commands_per_second_median": 76.06919873450258,
+            "physical_peak_delta_bytes_median": 1701847040,
+            "physical_retained_delta_bytes_median": 15519744,
+            "write_p50_ns_median": 267094068,
+            "write_p95_ns_median": 1012872479,
+            "fork_p50_ns_median": 6759909642,
+            "fork_p95_ns_median": 17436761335,
+            "collect_p50_ns_median": 159883689,
+            "collect_p95_ns_median": 282888771
+          },
+          {
+            "agents": 256,
+            "repeats": 3,
+            "wall_ns_median": 85811404764,
+            "errors": 0,
+            "commands_per_second_median": 71.50564679456457,
+            "physical_peak_delta_bytes_median": 2261782528,
+            "physical_retained_delta_bytes_median": 20094976,
+            "write_p50_ns_median": 1137826027,
+            "write_p95_ns_median": 2878524432,
+            "fork_p50_ns_median": 10358095859,
+            "fork_p95_ns_median": 28241266603,
+            "collect_p50_ns_median": 213973288,
+            "collect_p95_ns_median": 315582201
+          },
+          {
+            "agents": 384,
+            "repeats": 3,
+            "wall_ns_median": 129802788599,
+            "errors": 0,
+            "commands_per_second_median": 70.69185569154014,
+            "physical_peak_delta_bytes_median": 3395915776,
+            "physical_retained_delta_bytes_median": 30982144,
+            "write_p50_ns_median": 3253922892,
+            "write_p95_ns_median": 6970162131,
+            "fork_p50_ns_median": 19234940137,
+            "fork_p95_ns_median": 50060634979,
+            "collect_p50_ns_median": 241268149,
+            "collect_p95_ns_median": 365239667
+          },
+          {
+            "agents": 448,
+            "repeats": 3,
+            "wall_ns_median": 154280711182,
+            "errors": 0,
+            "commands_per_second_median": 69.61985019196072,
+            "physical_peak_delta_bytes_median": 3974483968,
+            "physical_retained_delta_bytes_median": 36225024,
+            "write_p50_ns_median": 4440496342,
+            "write_p95_ns_median": 8083324128,
+            "fork_p50_ns_median": 25723158241,
+            "fork_p95_ns_median": 62931659134,
+            "collect_p50_ns_median": 258163757,
+            "collect_p95_ns_median": 392794954
+          },
+          {
+            "agents": 500,
+            "repeats": 3,
+            "wall_ns_median": 174554971298,
+            "errors": 0,
+            "commands_per_second_median": 68.55147069728345,
+            "physical_peak_delta_bytes_median": 4428197888,
+            "physical_retained_delta_bytes_median": 41058304,
+            "write_p50_ns_median": 5440183168,
+            "write_p95_ns_median": 9381777493,
+            "fork_p50_ns_median": 30994178240,
+            "fork_p95_ns_median": 72523080595,
+            "collect_p50_ns_median": 256505599,
+            "collect_p95_ns_median": 394174688
+          },
+          {
+            "agents": 576,
+            "repeats": 3,
+            "wall_ns_median": 197257755350,
+            "errors": 0,
+            "commands_per_second_median": 70.05554724822129,
+            "physical_peak_delta_bytes_median": 5103468544,
+            "physical_retained_delta_bytes_median": 47243264,
+            "write_p50_ns_median": 6512302674,
+            "write_p95_ns_median": 11041542940,
+            "fork_p50_ns_median": 36660443123,
+            "fork_p95_ns_median": 87354217405,
+            "collect_p50_ns_median": 264902180,
+            "collect_p95_ns_median": 391502130
+          }
+        ]
+      },
+      "threadmill-bwrap": {
+        "effective_peak": 64,
+        "stable_width": null,
+        "wall_ns_limit": 36950179466.25,
+        "tiers": [
+          {
+            "agents": 64,
+            "repeats": 3,
+            "wall_ns_median": 29560143573,
+            "errors": 0,
+            "commands_per_second_median": 52.16483459195545,
+            "physical_peak_delta_bytes_median": 80211968,
+            "physical_retained_delta_bytes_median": 72208384,
+            "write_p50_ns_median": 143859,
+            "write_p95_ns_median": 1838607,
+            "fork_p50_ns_median": 24449,
+            "fork_p95_ns_median": 65215,
+            "collect_p50_ns_median": 53217430,
+            "collect_p95_ns_median": 71839138
+          },
+          {
+            "agents": 128,
+            "repeats": 3,
+            "wall_ns_median": 50481411941,
+            "errors": 0,
+            "commands_per_second_median": 60.71541746063303,
+            "physical_peak_delta_bytes_median": 154890240,
+            "physical_retained_delta_bytes_median": 134864896,
+            "write_p50_ns_median": 155313,
+            "write_p95_ns_median": 3573547,
+            "fork_p50_ns_median": 27832,
+            "fork_p95_ns_median": 79514,
+            "collect_p50_ns_median": 57948843,
+            "collect_p95_ns_median": 128658456
+          },
+          {
+            "agents": 192,
+            "repeats": 3,
+            "wall_ns_median": 71442446153,
+            "errors": 0,
+            "commands_per_second_median": 63.96757454543145,
+            "physical_peak_delta_bytes_median": 230125568,
+            "physical_retained_delta_bytes_median": 197300224,
+            "write_p50_ns_median": 164228,
+            "write_p95_ns_median": 3843962,
+            "fork_p50_ns_median": 22948,
+            "fork_p95_ns_median": 81377,
+            "collect_p50_ns_median": 67342942,
+            "collect_p95_ns_median": 454880434
+          },
+          {
+            "agents": 256,
+            "repeats": 3,
+            "wall_ns_median": 95169279119,
+            "errors": 0,
+            "commands_per_second_median": 64.47458735426086,
+            "physical_peak_delta_bytes_median": 299044864,
+            "physical_retained_delta_bytes_median": 259989504,
+            "write_p50_ns_median": 171229,
+            "write_p95_ns_median": 3164644,
+            "fork_p50_ns_median": 26328,
+            "fork_p95_ns_median": 101916,
+            "collect_p50_ns_median": 69879672,
+            "collect_p95_ns_median": 808036871
+          },
+          {
+            "agents": 384,
+            "repeats": 3,
+            "wall_ns_median": 144543130779,
+            "errors": 0,
+            "commands_per_second_median": 63.482781579082406,
+            "physical_peak_delta_bytes_median": 439496704,
+            "physical_retained_delta_bytes_median": 384065536,
+            "write_p50_ns_median": 173212,
+            "write_p95_ns_median": 3751121,
+            "fork_p50_ns_median": 22722,
+            "fork_p95_ns_median": 66240,
+            "collect_p50_ns_median": 75609660,
+            "collect_p95_ns_median": 1349823521
+          },
+          {
+            "agents": 448,
+            "repeats": 3,
+            "wall_ns_median": 170570822325,
+            "errors": 0,
+            "commands_per_second_median": 62.970910578917504,
+            "physical_peak_delta_bytes_median": 508313600,
+            "physical_retained_delta_bytes_median": 446263296,
+            "write_p50_ns_median": 173447,
+            "write_p95_ns_median": 3313575,
+            "fork_p50_ns_median": 23169,
+            "fork_p95_ns_median": 89349,
+            "collect_p50_ns_median": 67324097,
+            "collect_p95_ns_median": 464782970
+          },
+          {
+            "agents": 500,
+            "repeats": 3,
+            "wall_ns_median": 191066415682,
+            "errors": 0,
+            "commands_per_second_median": 62.62743746611924,
+            "physical_peak_delta_bytes_median": 574500864,
+            "physical_retained_delta_bytes_median": 496459776,
+            "write_p50_ns_median": 172955,
+            "write_p95_ns_median": 3601050,
+            "fork_p50_ns_median": 25969,
+            "fork_p95_ns_median": 359598,
+            "collect_p50_ns_median": 61702894,
+            "collect_p95_ns_median": 233607805
+          },
+          {
+            "agents": 576,
+            "repeats": 3,
+            "wall_ns_median": 221459818099,
+            "errors": 0,
+            "commands_per_second_median": 62.3995816424921,
+            "physical_peak_delta_bytes_median": 654823424,
+            "physical_retained_delta_bytes_median": 570605568,
+            "write_p50_ns_median": 172733,
+            "write_p95_ns_median": 3628700,
+            "fork_p50_ns_median": 23318,
+            "fork_p95_ns_median": 163774,
+            "collect_p50_ns_median": 67721005,
+            "collect_p95_ns_median": 2140126765
+          }
+        ]
+      },
+      "threadmill-external": {
+        "effective_peak": 64,
+        "stable_width": null,
+        "wall_ns_limit": 34757772380.0,
+        "tiers": [
+          {
+            "agents": 64,
+            "repeats": 3,
+            "wall_ns_median": 27806217904,
+            "errors": 0,
+            "commands_per_second_median": 55.455222473034674,
+            "physical_peak_delta_bytes_median": 78934016,
+            "physical_retained_delta_bytes_median": 72142848,
+            "write_p50_ns_median": 135299,
+            "write_p95_ns_median": 415871,
+            "fork_p50_ns_median": 27354,
+            "fork_p95_ns_median": 125269,
+            "collect_p50_ns_median": 51420916,
+            "collect_p95_ns_median": 63065851
+          },
+          {
+            "agents": 128,
+            "repeats": 3,
+            "wall_ns_median": 44308855463,
+            "errors": 0,
+            "commands_per_second_median": 69.17353129465104,
+            "physical_peak_delta_bytes_median": 156196864,
+            "physical_retained_delta_bytes_median": 134537216,
+            "write_p50_ns_median": 154298,
+            "write_p95_ns_median": 2113718,
+            "fork_p50_ns_median": 24412,
+            "fork_p95_ns_median": 72819,
+            "collect_p50_ns_median": 59862357,
+            "collect_p95_ns_median": 463026442
+          },
+          {
+            "agents": 192,
+            "repeats": 3,
+            "wall_ns_median": 61795217623,
+            "errors": 0,
+            "commands_per_second_median": 73.95394297145512,
+            "physical_peak_delta_bytes_median": 231174144,
+            "physical_retained_delta_bytes_median": 196644864,
+            "write_p50_ns_median": 155017,
+            "write_p95_ns_median": 2890832,
+            "fork_p50_ns_median": 22955,
+            "fork_p95_ns_median": 54845,
+            "collect_p50_ns_median": 66851915,
+            "collect_p95_ns_median": 1077510470
+          },
+          {
+            "agents": 256,
+            "repeats": 3,
+            "wall_ns_median": 81979507983,
+            "errors": 0,
+            "commands_per_second_median": 74.84797299920872,
+            "physical_peak_delta_bytes_median": 306561024,
+            "physical_retained_delta_bytes_median": 260022272,
+            "write_p50_ns_median": 159277,
+            "write_p95_ns_median": 2366440,
+            "fork_p50_ns_median": 23870,
+            "fork_p95_ns_median": 120325,
+            "collect_p50_ns_median": 72162295,
+            "collect_p95_ns_median": 974642699
+          },
+          {
+            "agents": 384,
+            "repeats": 3,
+            "wall_ns_median": 124942820604,
+            "errors": 0,
+            "commands_per_second_median": 73.44159476824099,
+            "physical_peak_delta_bytes_median": 442896384,
+            "physical_retained_delta_bytes_median": 383344640,
+            "write_p50_ns_median": 161517,
+            "write_p95_ns_median": 2656549,
+            "fork_p50_ns_median": 23103,
+            "fork_p95_ns_median": 84600,
+            "collect_p50_ns_median": 57453033,
+            "collect_p95_ns_median": 124421787
+          },
+          {
+            "agents": 448,
+            "repeats": 3,
+            "wall_ns_median": 148351682867,
+            "errors": 0,
+            "commands_per_second_median": 72.40227945125169,
+            "physical_peak_delta_bytes_median": 511881216,
+            "physical_retained_delta_bytes_median": 446656512,
+            "write_p50_ns_median": 163988,
+            "write_p95_ns_median": 3055814,
+            "fork_p50_ns_median": 22551,
+            "fork_p95_ns_median": 77050,
+            "collect_p50_ns_median": 62594016,
+            "collect_p95_ns_median": 888793829
+          },
+          {
+            "agents": 500,
+            "repeats": 3,
+            "wall_ns_median": 166081979095,
+            "errors": 0,
+            "commands_per_second_median": 72.04875607338089,
+            "physical_peak_delta_bytes_median": 570859520,
+            "physical_retained_delta_bytes_median": 496361472,
+            "write_p50_ns_median": 162039,
+            "write_p95_ns_median": 2897268,
+            "fork_p50_ns_median": 24476,
+            "fork_p95_ns_median": 418852,
+            "collect_p50_ns_median": 63822112,
+            "collect_p95_ns_median": 1617544302
+          },
+          {
+            "agents": 576,
+            "repeats": 2,
+            "wall_ns_median": 192346642046.0,
+            "errors": 0,
+            "commands_per_second_median": 71.84533374215499,
+            "physical_peak_delta_bytes_median": 668454912.0,
+            "physical_retained_delta_bytes_median": 571785216.0,
+            "write_p50_ns_median": 164660.5,
+            "write_p95_ns_median": 2897940.0,
+            "fork_p50_ns_median": 23432.5,
+            "fork_p95_ns_median": 278403.0,
+            "collect_p50_ns_median": 314153167.0,
+            "collect_p95_ns_median": 2643921541.0,
+            "interrupted_attempts": 1,
+            "uninterrupted_completed_repeats": 2,
+            "supplemental_completed_repeats": 1,
+            "formal_capacity_eligible": false,
+            "caveat": "Two original completed repeats, one unresolved interrupted attempt; any continuation is supplemental, never a replacement success."
+          }
+        ]
+      }
+    }
+  },
+  "descriptive_summaries_including_supplemental": {
+    "synthetic": {
+      "pi-worktree": {
+        "tiers": [
+          {
+            "agents": 64,
+            "repeats": 3,
+            "wall_ns_median": 38962862321,
+            "errors": 0,
+            "commands_per_second_median": 39.57614785320587,
+            "physical_peak_delta_bytes_median": 1060749312,
+            "physical_retained_delta_bytes_median": 5029888,
+            "write_p50_ns_median": 401375,
+            "write_p95_ns_median": 2428497,
+            "fork_p50_ns_median": 6848959446,
+            "fork_p95_ns_median": 13155343660,
+            "collect_p50_ns_median": 106112404,
+            "collect_p95_ns_median": 158862106
+          },
+          {
+            "agents": 128,
+            "repeats": 3,
+            "wall_ns_median": 55670921848,
+            "errors": 0,
+            "commands_per_second_median": 55.05567176287222,
+            "physical_peak_delta_bytes_median": 2119958528,
+            "physical_retained_delta_bytes_median": 10346496,
+            "write_p50_ns_median": 466332,
+            "write_p95_ns_median": 4796827,
+            "fork_p50_ns_median": 14347343281,
+            "fork_p95_ns_median": 29387665902,
+            "collect_p50_ns_median": 129300609,
+            "collect_p95_ns_median": 330359171
+          },
+          {
+            "agents": 192,
+            "repeats": 3,
+            "wall_ns_median": 72120586469,
+            "errors": 0,
+            "commands_per_second_median": 63.36609591998186,
+            "physical_peak_delta_bytes_median": 3181789184,
+            "physical_retained_delta_bytes_median": 15896576,
+            "write_p50_ns_median": 460595,
+            "write_p95_ns_median": 8136264,
+            "fork_p50_ns_median": 21693840917,
+            "fork_p95_ns_median": 45791731029,
+            "collect_p50_ns_median": 142460844,
+            "collect_p95_ns_median": 212496112
+          },
+          {
+            "agents": 256,
+            "repeats": 3,
+            "wall_ns_median": 96935211061,
+            "errors": 0,
+            "commands_per_second_median": 63.300011758768434,
+            "physical_peak_delta_bytes_median": 4235915264,
+            "physical_retained_delta_bytes_median": 13168640,
+            "write_p50_ns_median": 501152,
+            "write_p95_ns_median": 7595627,
+            "fork_p50_ns_median": 31711466210,
+            "fork_p95_ns_median": 65531740209,
+            "collect_p50_ns_median": 222710341,
+            "collect_p95_ns_median": 602088753
+          },
+          {
+            "agents": 384,
+            "repeats": 3,
+            "wall_ns_median": 152488064347,
+            "errors": 0,
+            "commands_per_second_median": 60.17520151032414,
+            "physical_peak_delta_bytes_median": 6372589568,
+            "physical_retained_delta_bytes_median": 35864576,
+            "write_p50_ns_median": 535866,
+            "write_p95_ns_median": 10341095,
+            "fork_p50_ns_median": 50192738789,
+            "fork_p95_ns_median": 104293033911,
+            "collect_p50_ns_median": 309170209,
+            "collect_p95_ns_median": 656077127
+          },
+          {
+            "agents": 448,
+            "repeats": 3,
+            "wall_ns_median": 180656081096,
+            "errors": 0,
+            "commands_per_second_median": 59.45551312104612,
+            "physical_peak_delta_bytes_median": 7448936448,
+            "physical_retained_delta_bytes_median": 48943104,
+            "write_p50_ns_median": 546960,
+            "write_p95_ns_median": 12009310,
+            "fork_p50_ns_median": 60421484574,
+            "fork_p95_ns_median": 123646275494,
+            "collect_p50_ns_median": 308869977,
+            "collect_p95_ns_median": 780432147
+          },
+          {
+            "agents": 500,
+            "repeats": 3,
+            "wall_ns_median": 207263201732,
+            "errors": 0,
+            "commands_per_second_median": 57.7333549805553,
+            "physical_peak_delta_bytes_median": 8309186560,
+            "physical_retained_delta_bytes_median": 40579072,
+            "write_p50_ns_median": 559794,
+            "write_p95_ns_median": 12575065,
+            "fork_p50_ns_median": 70258580361,
+            "fork_p95_ns_median": 143527604904,
+            "collect_p50_ns_median": 356043552,
+            "collect_p95_ns_median": 787730834
+          },
+          {
+            "agents": 576,
+            "repeats": 3,
+            "wall_ns_median": 245893157814,
+            "errors": 0,
+            "commands_per_second_median": 56.199205064717795,
+            "physical_peak_delta_bytes_median": 9573896192,
+            "physical_retained_delta_bytes_median": 45051904,
+            "write_p50_ns_median": 572714,
+            "write_p95_ns_median": 15108579,
+            "fork_p50_ns_median": 83080417702,
+            "fork_p95_ns_median": 168917596253,
+            "collect_p50_ns_median": 364621344,
+            "collect_p95_ns_median": 764027632
+          }
+        ]
+      },
+      "threadmill-bwrap": {
+        "tiers": [
+          {
+            "agents": 64,
+            "repeats": 3,
+            "wall_ns_median": 39642899350,
+            "errors": 0,
+            "commands_per_second_median": 38.897255883984684,
+            "physical_peak_delta_bytes_median": 360882176,
+            "physical_retained_delta_bytes_median": 263622656,
+            "write_p50_ns_median": 189111,
+            "write_p95_ns_median": 4263471,
+            "fork_p50_ns_median": 24388,
+            "fork_p95_ns_median": 82492,
+            "collect_p50_ns_median": 4165809340,
+            "collect_p95_ns_median": 7311969718
+          },
+          {
+            "agents": 128,
+            "repeats": 3,
+            "wall_ns_median": 71482921323,
+            "errors": 0,
+            "commands_per_second_median": 42.87737466898713,
+            "physical_peak_delta_bytes_median": 679903232,
+            "physical_retained_delta_bytes_median": 507899904,
+            "write_p50_ns_median": 257170,
+            "write_p95_ns_median": 7491201,
+            "fork_p50_ns_median": 24108,
+            "fork_p95_ns_median": 108657,
+            "collect_p50_ns_median": 8824854563,
+            "collect_p95_ns_median": 14868123584
+          },
+          {
+            "agents": 192,
+            "repeats": 3,
+            "wall_ns_median": 104029687235,
+            "errors": 0,
+            "commands_per_second_median": 43.92976775635694,
+            "physical_peak_delta_bytes_median": 1015296000,
+            "physical_retained_delta_bytes_median": 752762880,
+            "write_p50_ns_median": 444964,
+            "write_p95_ns_median": 63668023,
+            "fork_p50_ns_median": 25737,
+            "fork_p95_ns_median": 195422,
+            "collect_p50_ns_median": 6606217341,
+            "collect_p95_ns_median": 20198495886
+          },
+          {
+            "agents": 256,
+            "repeats": 3,
+            "wall_ns_median": 141155428661,
+            "errors": 0,
+            "commands_per_second_median": 43.46981237778864,
+            "physical_peak_delta_bytes_median": 1358819328,
+            "physical_retained_delta_bytes_median": 999243776,
+            "write_p50_ns_median": 1030722,
+            "write_p95_ns_median": 559593080,
+            "fork_p50_ns_median": 24561,
+            "fork_p95_ns_median": 149074,
+            "collect_p50_ns_median": 12273899818,
+            "collect_p95_ns_median": 29516336533
+          },
+          {
+            "agents": 384,
+            "repeats": 3,
+            "wall_ns_median": 217733312790,
+            "errors": 0,
+            "commands_per_second_median": 42.14329852616578,
+            "physical_peak_delta_bytes_median": 2051989504,
+            "physical_retained_delta_bytes_median": 1487429632,
+            "write_p50_ns_median": 1889819,
+            "write_p95_ns_median": 517198023,
+            "fork_p50_ns_median": 26496,
+            "fork_p95_ns_median": 221979,
+            "collect_p50_ns_median": 17644468275,
+            "collect_p95_ns_median": 43210154267
+          },
+          {
+            "agents": 448,
+            "repeats": 3,
+            "wall_ns_median": 266971522489,
+            "errors": 0,
+            "commands_per_second_median": 40.23275553834608,
+            "physical_peak_delta_bytes_median": 2345050112,
+            "physical_retained_delta_bytes_median": 1695559680,
+            "write_p50_ns_median": 2121066,
+            "write_p95_ns_median": 617642797,
+            "fork_p50_ns_median": 23685,
+            "fork_p95_ns_median": 78002,
+            "collect_p50_ns_median": 30820376489,
+            "collect_p95_ns_median": 67604031183
+          },
+          {
+            "agents": 500,
+            "repeats": 3,
+            "wall_ns_median": 335385724793,
+            "errors": 0,
+            "commands_per_second_median": 35.6783223477547,
+            "physical_peak_delta_bytes_median": 2553602048,
+            "physical_retained_delta_bytes_median": 1916465152,
+            "write_p50_ns_median": 2563441,
+            "write_p95_ns_median": 604615766,
+            "fork_p50_ns_median": 25896,
+            "fork_p95_ns_median": 231926,
+            "collect_p50_ns_median": 42510773264,
+            "collect_p95_ns_median": 102543932350
+          },
+          {
+            "agents": 576,
+            "repeats": 3,
+            "wall_ns_median": 449110659029,
+            "errors": 0,
+            "commands_per_second_median": 30.769699454199948,
+            "physical_peak_delta_bytes_median": 3146338304,
+            "physical_retained_delta_bytes_median": 2230816768,
+            "write_p50_ns_median": 3024088,
+            "write_p95_ns_median": 520680518,
+            "fork_p50_ns_median": 23687,
+            "fork_p95_ns_median": 188561,
+            "collect_p50_ns_median": 78844556693,
+            "collect_p95_ns_median": 183699335251
+          }
+        ]
+      },
+      "threadmill-external": {
+        "tiers": [
+          {
+            "agents": 64,
+            "repeats": 3,
+            "wall_ns_median": 37589615842,
+            "errors": 0,
+            "commands_per_second_median": 41.021967515748784,
+            "physical_peak_delta_bytes_median": 361934848,
+            "physical_retained_delta_bytes_median": 263819264,
+            "write_p50_ns_median": 174336,
+            "write_p95_ns_median": 4116298,
+            "fork_p50_ns_median": 25392,
+            "fork_p95_ns_median": 69754,
+            "collect_p50_ns_median": 3591813411,
+            "collect_p95_ns_median": 6344534152
+          },
+          {
+            "agents": 128,
+            "repeats": 3,
+            "wall_ns_median": 64623058455,
+            "errors": 0,
+            "commands_per_second_median": 47.428891068879075,
+            "physical_peak_delta_bytes_median": 676044800,
+            "physical_retained_delta_bytes_median": 509145088,
+            "write_p50_ns_median": 215883,
+            "write_p95_ns_median": 4555033,
+            "fork_p50_ns_median": 27754,
+            "fork_p95_ns_median": 77807,
+            "collect_p50_ns_median": 7043381640,
+            "collect_p95_ns_median": 14936958091
+          },
+          {
+            "agents": 192,
+            "repeats": 3,
+            "wall_ns_median": 89533017531,
+            "errors": 0,
+            "commands_per_second_median": 51.042622331115766,
+            "physical_peak_delta_bytes_median": 1001627648,
+            "physical_retained_delta_bytes_median": 748240896,
+            "write_p50_ns_median": 348816,
+            "write_p95_ns_median": 111328755,
+            "fork_p50_ns_median": 25421,
+            "fork_p95_ns_median": 78439,
+            "collect_p50_ns_median": 6127531632,
+            "collect_p95_ns_median": 20640775819
+          },
+          {
+            "agents": 256,
+            "repeats": 3,
+            "wall_ns_median": 122316543109,
+            "errors": 0,
+            "commands_per_second_median": 50.16492327233303,
+            "physical_peak_delta_bytes_median": 1321799680,
+            "physical_retained_delta_bytes_median": 990707712,
+            "write_p50_ns_median": 697111,
+            "write_p95_ns_median": 624127435,
+            "fork_p50_ns_median": 26449,
+            "fork_p95_ns_median": 199133,
+            "collect_p50_ns_median": 8294209301,
+            "collect_p95_ns_median": 30204304379
+          },
+          {
+            "agents": 384,
+            "repeats": 3,
+            "wall_ns_median": 197902009006,
+            "errors": 0,
+            "commands_per_second_median": 46.36638125144956,
+            "physical_peak_delta_bytes_median": 2016440320,
+            "physical_retained_delta_bytes_median": 1491329024,
+            "write_p50_ns_median": 1716991,
+            "write_p95_ns_median": 503117235,
+            "fork_p50_ns_median": 25759,
+            "fork_p95_ns_median": 185643,
+            "collect_p50_ns_median": 21373282841,
+            "collect_p95_ns_median": 56320604675
+          },
+          {
+            "agents": 448,
+            "repeats": 3,
+            "wall_ns_median": 270218201857,
+            "errors": 0,
+            "commands_per_second_median": 39.74935783816724,
+            "physical_peak_delta_bytes_median": 2376699904,
+            "physical_retained_delta_bytes_median": 1729785856,
+            "write_p50_ns_median": 1859213,
+            "write_p95_ns_median": 509147080,
+            "fork_p50_ns_median": 23574,
+            "fork_p95_ns_median": 132856,
+            "collect_p50_ns_median": 32985696293,
+            "collect_p95_ns_median": 103282307654
+          },
+          {
+            "agents": 500,
+            "repeats": 3,
+            "wall_ns_median": 314624521350,
+            "errors": 0,
+            "commands_per_second_median": 38.03263632680613,
+            "physical_peak_delta_bytes_median": 2748858368,
+            "physical_retained_delta_bytes_median": 1934569472,
+            "write_p50_ns_median": 1754371,
+            "write_p95_ns_median": 542925005,
+            "fork_p50_ns_median": 23158,
+            "fork_p95_ns_median": 251392,
+            "collect_p50_ns_median": 47045912048,
+            "collect_p95_ns_median": 111225145432
+          },
+          {
+            "agents": 576,
+            "repeats": 3,
+            "wall_ns_median": 448911242830,
+            "errors": 0,
+            "commands_per_second_median": 30.783368028127494,
+            "physical_peak_delta_bytes_median": 3225612288,
+            "physical_retained_delta_bytes_median": 2241499136,
+            "write_p50_ns_median": 2159873,
+            "write_p95_ns_median": 831278304,
+            "fork_p50_ns_median": 23134,
+            "fork_p95_ns_median": 248368,
+            "collect_p50_ns_median": 88621752220,
+            "collect_p95_ns_median": 226770089210
+          }
+        ]
+      }
+    },
+    "ipython": {
+      "pi-worktree": {
+        "tiers": [
+          {
+            "agents": 64,
+            "repeats": 3,
+            "wall_ns_median": 30231013787,
+            "errors": 0,
+            "commands_per_second_median": 51.00722095740944,
+            "physical_peak_delta_bytes_median": 546357248,
+            "physical_retained_delta_bytes_median": 5468160,
+            "write_p50_ns_median": 436072,
+            "write_p95_ns_median": 5888976,
+            "fork_p50_ns_median": 2031876813,
+            "fork_p95_ns_median": 3941722569,
+            "collect_p50_ns_median": 88003867,
+            "collect_p95_ns_median": 122404021
+          },
+          {
+            "agents": 128,
+            "repeats": 3,
+            "wall_ns_median": 40453765232,
+            "errors": 0,
+            "commands_per_second_median": 75.76550618767877,
+            "physical_peak_delta_bytes_median": 1132646400,
+            "physical_retained_delta_bytes_median": 10596352,
+            "write_p50_ns_median": 33554524,
+            "write_p95_ns_median": 151967219,
+            "fork_p50_ns_median": 4254366492,
+            "fork_p95_ns_median": 9456008747,
+            "collect_p50_ns_median": 135529051,
+            "collect_p95_ns_median": 303582036
+          },
+          {
+            "agents": 192,
+            "repeats": 3,
+            "wall_ns_median": 60076878369,
+            "errors": 0,
+            "commands_per_second_median": 76.06919873450258,
+            "physical_peak_delta_bytes_median": 1701847040,
+            "physical_retained_delta_bytes_median": 15519744,
+            "write_p50_ns_median": 267094068,
+            "write_p95_ns_median": 1012872479,
+            "fork_p50_ns_median": 6759909642,
+            "fork_p95_ns_median": 17436761335,
+            "collect_p50_ns_median": 159883689,
+            "collect_p95_ns_median": 282888771
+          },
+          {
+            "agents": 256,
+            "repeats": 3,
+            "wall_ns_median": 85811404764,
+            "errors": 0,
+            "commands_per_second_median": 71.50564679456457,
+            "physical_peak_delta_bytes_median": 2261782528,
+            "physical_retained_delta_bytes_median": 20094976,
+            "write_p50_ns_median": 1137826027,
+            "write_p95_ns_median": 2878524432,
+            "fork_p50_ns_median": 10358095859,
+            "fork_p95_ns_median": 28241266603,
+            "collect_p50_ns_median": 213973288,
+            "collect_p95_ns_median": 315582201
+          },
+          {
+            "agents": 384,
+            "repeats": 3,
+            "wall_ns_median": 129802788599,
+            "errors": 0,
+            "commands_per_second_median": 70.69185569154014,
+            "physical_peak_delta_bytes_median": 3395915776,
+            "physical_retained_delta_bytes_median": 30982144,
+            "write_p50_ns_median": 3253922892,
+            "write_p95_ns_median": 6970162131,
+            "fork_p50_ns_median": 19234940137,
+            "fork_p95_ns_median": 50060634979,
+            "collect_p50_ns_median": 241268149,
+            "collect_p95_ns_median": 365239667
+          },
+          {
+            "agents": 448,
+            "repeats": 3,
+            "wall_ns_median": 154280711182,
+            "errors": 0,
+            "commands_per_second_median": 69.61985019196072,
+            "physical_peak_delta_bytes_median": 3974483968,
+            "physical_retained_delta_bytes_median": 36225024,
+            "write_p50_ns_median": 4440496342,
+            "write_p95_ns_median": 8083324128,
+            "fork_p50_ns_median": 25723158241,
+            "fork_p95_ns_median": 62931659134,
+            "collect_p50_ns_median": 258163757,
+            "collect_p95_ns_median": 392794954
+          },
+          {
+            "agents": 500,
+            "repeats": 3,
+            "wall_ns_median": 174554971298,
+            "errors": 0,
+            "commands_per_second_median": 68.55147069728345,
+            "physical_peak_delta_bytes_median": 4428197888,
+            "physical_retained_delta_bytes_median": 41058304,
+            "write_p50_ns_median": 5440183168,
+            "write_p95_ns_median": 9381777493,
+            "fork_p50_ns_median": 30994178240,
+            "fork_p95_ns_median": 72523080595,
+            "collect_p50_ns_median": 256505599,
+            "collect_p95_ns_median": 394174688
+          },
+          {
+            "agents": 576,
+            "repeats": 3,
+            "wall_ns_median": 197257755350,
+            "errors": 0,
+            "commands_per_second_median": 70.05554724822129,
+            "physical_peak_delta_bytes_median": 5103468544,
+            "physical_retained_delta_bytes_median": 47243264,
+            "write_p50_ns_median": 6512302674,
+            "write_p95_ns_median": 11041542940,
+            "fork_p50_ns_median": 36660443123,
+            "fork_p95_ns_median": 87354217405,
+            "collect_p50_ns_median": 264902180,
+            "collect_p95_ns_median": 391502130
+          }
+        ]
+      },
+      "threadmill-bwrap": {
+        "tiers": [
+          {
+            "agents": 64,
+            "repeats": 3,
+            "wall_ns_median": 29560143573,
+            "errors": 0,
+            "commands_per_second_median": 52.16483459195545,
+            "physical_peak_delta_bytes_median": 80211968,
+            "physical_retained_delta_bytes_median": 72208384,
+            "write_p50_ns_median": 143859,
+            "write_p95_ns_median": 1838607,
+            "fork_p50_ns_median": 24449,
+            "fork_p95_ns_median": 65215,
+            "collect_p50_ns_median": 53217430,
+            "collect_p95_ns_median": 71839138
+          },
+          {
+            "agents": 128,
+            "repeats": 3,
+            "wall_ns_median": 50481411941,
+            "errors": 0,
+            "commands_per_second_median": 60.71541746063303,
+            "physical_peak_delta_bytes_median": 154890240,
+            "physical_retained_delta_bytes_median": 134864896,
+            "write_p50_ns_median": 155313,
+            "write_p95_ns_median": 3573547,
+            "fork_p50_ns_median": 27832,
+            "fork_p95_ns_median": 79514,
+            "collect_p50_ns_median": 57948843,
+            "collect_p95_ns_median": 128658456
+          },
+          {
+            "agents": 192,
+            "repeats": 3,
+            "wall_ns_median": 71442446153,
+            "errors": 0,
+            "commands_per_second_median": 63.96757454543145,
+            "physical_peak_delta_bytes_median": 230125568,
+            "physical_retained_delta_bytes_median": 197300224,
+            "write_p50_ns_median": 164228,
+            "write_p95_ns_median": 3843962,
+            "fork_p50_ns_median": 22948,
+            "fork_p95_ns_median": 81377,
+            "collect_p50_ns_median": 67342942,
+            "collect_p95_ns_median": 454880434
+          },
+          {
+            "agents": 256,
+            "repeats": 3,
+            "wall_ns_median": 95169279119,
+            "errors": 0,
+            "commands_per_second_median": 64.47458735426086,
+            "physical_peak_delta_bytes_median": 299044864,
+            "physical_retained_delta_bytes_median": 259989504,
+            "write_p50_ns_median": 171229,
+            "write_p95_ns_median": 3164644,
+            "fork_p50_ns_median": 26328,
+            "fork_p95_ns_median": 101916,
+            "collect_p50_ns_median": 69879672,
+            "collect_p95_ns_median": 808036871
+          },
+          {
+            "agents": 384,
+            "repeats": 3,
+            "wall_ns_median": 144543130779,
+            "errors": 0,
+            "commands_per_second_median": 63.482781579082406,
+            "physical_peak_delta_bytes_median": 439496704,
+            "physical_retained_delta_bytes_median": 384065536,
+            "write_p50_ns_median": 173212,
+            "write_p95_ns_median": 3751121,
+            "fork_p50_ns_median": 22722,
+            "fork_p95_ns_median": 66240,
+            "collect_p50_ns_median": 75609660,
+            "collect_p95_ns_median": 1349823521
+          },
+          {
+            "agents": 448,
+            "repeats": 3,
+            "wall_ns_median": 170570822325,
+            "errors": 0,
+            "commands_per_second_median": 62.970910578917504,
+            "physical_peak_delta_bytes_median": 508313600,
+            "physical_retained_delta_bytes_median": 446263296,
+            "write_p50_ns_median": 173447,
+            "write_p95_ns_median": 3313575,
+            "fork_p50_ns_median": 23169,
+            "fork_p95_ns_median": 89349,
+            "collect_p50_ns_median": 67324097,
+            "collect_p95_ns_median": 464782970
+          },
+          {
+            "agents": 500,
+            "repeats": 3,
+            "wall_ns_median": 191066415682,
+            "errors": 0,
+            "commands_per_second_median": 62.62743746611924,
+            "physical_peak_delta_bytes_median": 574500864,
+            "physical_retained_delta_bytes_median": 496459776,
+            "write_p50_ns_median": 172955,
+            "write_p95_ns_median": 3601050,
+            "fork_p50_ns_median": 25969,
+            "fork_p95_ns_median": 359598,
+            "collect_p50_ns_median": 61702894,
+            "collect_p95_ns_median": 233607805
+          },
+          {
+            "agents": 576,
+            "repeats": 3,
+            "wall_ns_median": 221459818099,
+            "errors": 0,
+            "commands_per_second_median": 62.3995816424921,
+            "physical_peak_delta_bytes_median": 654823424,
+            "physical_retained_delta_bytes_median": 570605568,
+            "write_p50_ns_median": 172733,
+            "write_p95_ns_median": 3628700,
+            "fork_p50_ns_median": 23318,
+            "fork_p95_ns_median": 163774,
+            "collect_p50_ns_median": 67721005,
+            "collect_p95_ns_median": 2140126765
+          }
+        ]
+      },
+      "threadmill-external": {
+        "tiers": [
+          {
+            "agents": 64,
+            "repeats": 3,
+            "wall_ns_median": 27806217904,
+            "errors": 0,
+            "commands_per_second_median": 55.455222473034674,
+            "physical_peak_delta_bytes_median": 78934016,
+            "physical_retained_delta_bytes_median": 72142848,
+            "write_p50_ns_median": 135299,
+            "write_p95_ns_median": 415871,
+            "fork_p50_ns_median": 27354,
+            "fork_p95_ns_median": 125269,
+            "collect_p50_ns_median": 51420916,
+            "collect_p95_ns_median": 63065851
+          },
+          {
+            "agents": 128,
+            "repeats": 3,
+            "wall_ns_median": 44308855463,
+            "errors": 0,
+            "commands_per_second_median": 69.17353129465104,
+            "physical_peak_delta_bytes_median": 156196864,
+            "physical_retained_delta_bytes_median": 134537216,
+            "write_p50_ns_median": 154298,
+            "write_p95_ns_median": 2113718,
+            "fork_p50_ns_median": 24412,
+            "fork_p95_ns_median": 72819,
+            "collect_p50_ns_median": 59862357,
+            "collect_p95_ns_median": 463026442
+          },
+          {
+            "agents": 192,
+            "repeats": 3,
+            "wall_ns_median": 61795217623,
+            "errors": 0,
+            "commands_per_second_median": 73.95394297145512,
+            "physical_peak_delta_bytes_median": 231174144,
+            "physical_retained_delta_bytes_median": 196644864,
+            "write_p50_ns_median": 155017,
+            "write_p95_ns_median": 2890832,
+            "fork_p50_ns_median": 22955,
+            "fork_p95_ns_median": 54845,
+            "collect_p50_ns_median": 66851915,
+            "collect_p95_ns_median": 1077510470
+          },
+          {
+            "agents": 256,
+            "repeats": 3,
+            "wall_ns_median": 81979507983,
+            "errors": 0,
+            "commands_per_second_median": 74.84797299920872,
+            "physical_peak_delta_bytes_median": 306561024,
+            "physical_retained_delta_bytes_median": 260022272,
+            "write_p50_ns_median": 159277,
+            "write_p95_ns_median": 2366440,
+            "fork_p50_ns_median": 23870,
+            "fork_p95_ns_median": 120325,
+            "collect_p50_ns_median": 72162295,
+            "collect_p95_ns_median": 974642699
+          },
+          {
+            "agents": 384,
+            "repeats": 3,
+            "wall_ns_median": 124942820604,
+            "errors": 0,
+            "commands_per_second_median": 73.44159476824099,
+            "physical_peak_delta_bytes_median": 442896384,
+            "physical_retained_delta_bytes_median": 383344640,
+            "write_p50_ns_median": 161517,
+            "write_p95_ns_median": 2656549,
+            "fork_p50_ns_median": 23103,
+            "fork_p95_ns_median": 84600,
+            "collect_p50_ns_median": 57453033,
+            "collect_p95_ns_median": 124421787
+          },
+          {
+            "agents": 448,
+            "repeats": 3,
+            "wall_ns_median": 148351682867,
+            "errors": 0,
+            "commands_per_second_median": 72.40227945125169,
+            "physical_peak_delta_bytes_median": 511881216,
+            "physical_retained_delta_bytes_median": 446656512,
+            "write_p50_ns_median": 163988,
+            "write_p95_ns_median": 3055814,
+            "fork_p50_ns_median": 22551,
+            "fork_p95_ns_median": 77050,
+            "collect_p50_ns_median": 62594016,
+            "collect_p95_ns_median": 888793829
+          },
+          {
+            "agents": 500,
+            "repeats": 3,
+            "wall_ns_median": 166081979095,
+            "errors": 0,
+            "commands_per_second_median": 72.04875607338089,
+            "physical_peak_delta_bytes_median": 570859520,
+            "physical_retained_delta_bytes_median": 496361472,
+            "write_p50_ns_median": 162039,
+            "write_p95_ns_median": 2897268,
+            "fork_p50_ns_median": 24476,
+            "fork_p95_ns_median": 418852,
+            "collect_p50_ns_median": 63822112,
+            "collect_p95_ns_median": 1617544302
+          },
+          {
+            "agents": 576,
+            "repeats": 3,
+            "wall_ns_median": 193094115715,
+            "errors": 0,
+            "commands_per_second_median": 71.56613731511295,
+            "physical_peak_delta_bytes_median": 665186304,
+            "physical_retained_delta_bytes_median": 572047360,
+            "write_p50_ns_median": 165512,
+            "write_p95_ns_median": 3111013,
+            "fork_p50_ns_median": 23061,
+            "fork_p95_ns_median": 217362,
+            "collect_p50_ns_median": 560279883,
+            "collect_p95_ns_median": 3408921075,
+            "interrupted_attempts": 1,
+            "uninterrupted_completed_repeats": 2,
+            "supplemental_completed_repeats": 1,
+            "formal_capacity_eligible": false,
+            "caveat": "Two original completed repeats, one unresolved interrupted attempt; any continuation is supplemental, never a replacement success."
+          }
+        ]
+      }
+    }
+  },
+  "capacity_basis": "Original uninterrupted repeats only; supplemental IPython external576 repeat is not used to replace the unknown interrupted attempt in capacity acceptance.",
+  "interrupted_attempt_count": 1,
+  "interruption_record": "interruption-20261003/observation.json"
+}

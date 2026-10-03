@@ -1,0 +1,182 @@
+{
+  "archives": [
+    {
+      "archive": "raw/primary-synthetic-pi-worktree.tar.gz",
+      "sha256": "aa1a40ef50792ded938efa3caf4c23d7fafb2d04286514caa41bc53b8727161f",
+      "bytes": 10373253,
+      "members_verified": 24,
+      "raw_bytes": 138750773
+    },
+    {
+      "archive": "raw/primary-synthetic-threadmill-external.tar.gz",
+      "sha256": "a7223450fbb9719eb29e19c4957831dc2c18933899b6c0c7bd16bfed0954cc85",
+      "bytes": 10350221,
+      "members_verified": 24,
+      "raw_bytes": 126587362
+    },
+    {
+      "archive": "raw/primary-synthetic-threadmill-bwrap.tar.gz",
+      "sha256": "0fc2a3d5c1ba100a2fc2b8d36abbcfcd4166404a3735aa8eb628fb663fd28a9d",
+      "bytes": 10406105,
+      "members_verified": 24,
+      "raw_bytes": 126816901
+    },
+    {
+      "archive": "raw/primary-ipython-pi-worktree.tar.gz",
+      "sha256": "19b9307ba9e5c2b8f5ac77095175e75b7270bcee76dbba2274b6c74257da7402",
+      "bytes": 11049332,
+      "members_verified": 24,
+      "raw_bytes": 139611614
+    },
+    {
+      "archive": "raw/primary-ipython-threadmill-external.tar.gz",
+      "sha256": "1d3f0ad2362d9d6ad9f742e265d9c5a95a6e2aaf220482f6f1107dac4109ea45",
+      "bytes": 9964158,
+      "members_verified": 24,
+      "raw_bytes": 124995514
+    },
+    {
+      "archive": "raw/primary-ipython-threadmill-bwrap.tar.gz",
+      "sha256": "9aa8bb348e8e8a9b78f370179d38e269698ff68d5046cb0fd4baca11614de9cc",
+      "bytes": 9997532,
+      "members_verified": 24,
+      "raw_bytes": 125274976
+    }
+  ],
+  "members_verified": 144,
+  "csv_byte_matches": {
+    "ipython-pi-worktree.csv": true,
+    "ipython-threadmill-bwrap.csv": true,
+    "ipython-threadmill-external.csv": true,
+    "primary-metrics.csv": true,
+    "synthetic-pi-worktree.csv": true,
+    "synthetic-threadmill-bwrap.csv": true,
+    "synthetic-threadmill-external.csv": true
+  },
+  "capacity": [
+    {
+      "fixture": "synthetic",
+      "backend": "pi-worktree",
+      "wall_ns_limit": 48703577901.25,
+      "effective_peak": 64,
+      "stable_width": null
+    },
+    {
+      "fixture": "synthetic",
+      "backend": "threadmill-external",
+      "wall_ns_limit": 46987019802.5,
+      "effective_peak": 64,
+      "stable_width": null
+    },
+    {
+      "fixture": "synthetic",
+      "backend": "threadmill-bwrap",
+      "wall_ns_limit": 49553624187.5,
+      "effective_peak": 64,
+      "stable_width": null
+    },
+    {
+      "fixture": "ipython",
+      "backend": "pi-worktree",
+      "wall_ns_limit": 37788767233.75,
+      "effective_peak": 64,
+      "stable_width": null
+    },
+    {
+      "fixture": "ipython",
+      "backend": "threadmill-external",
+      "wall_ns_limit": 34757772380.0,
+      "effective_peak": 64,
+      "stable_width": null
+    },
+    {
+      "fixture": "ipython",
+      "backend": "threadmill-bwrap",
+      "wall_ns_limit": 36950179466.25,
+      "effective_peak": 64,
+      "stable_width": null
+    }
+  ],
+  "interrupted_tier": {
+    "fixture": "ipython",
+    "backend": "threadmill-external",
+    "agents": 576,
+    "uninterrupted_completed_repeats": 2,
+    "supplemental_completed_repeats": 1,
+    "interrupted_attempts": 1,
+    "formal_capacity_eligible": false,
+    "termination_time_and_cause": "unknown",
+    "descriptive_aggregation": "three completed repeats"
+  },
+  "verified_utc": "2026-10-03T13:18:10.454382+00:00",
+  "script": {
+    "path": "reproduce-primary.py",
+    "sha256": "153e383bcdc9966bf2f77fcbade5b9e325fa25e3e09becf9d191739c1aa427b9",
+    "python_version_used": "3.12.3"
+  },
+  "command": "python3 reproduce-primary.py --output /tmp/threadmill-primary-reproduced",
+  "executed_command": [
+    "/usr/bin/python3",
+    "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/reproduce-primary.py",
+    "--output",
+    "/home/oops/evals/threadmill-cache-bench/primary-reproduce-review-20261003/reproduced"
+  ],
+  "manifest_sha256": "957ea59a3d719a5a1f8cd67f05b236251b33245f3a85456fbef85555e6ae6fad",
+  "tables_byte_match": true,
+  "tables_reference_sha256": "b68f96e03e39c69bef5a7fac736b2a816974fddcb34618d2ca60ae0415e6a18c",
+  "capacity_matches_independent_audit": true,
+  "independent_audit_sha256": "04eb8a3240fd35b47cebe09e0c0c9dc3cc89e98434faeaccc3b71932a8458c5f",
+  "outputs": {
+    "ipython-pi-worktree.csv": {
+      "sha256": "3a32fa91a357aecf3b4543bde1879c51f9ffc0a42ae8aec04f9392c7bfee23c9",
+      "bytes": 463
+    },
+    "ipython-threadmill-bwrap.csv": {
+      "sha256": "f494fa8321b44d6c7c5532927fdeb86f3eee6d304ac482736bede90eaa4df06c",
+      "bytes": 450
+    },
+    "ipython-threadmill-external.csv": {
+      "sha256": "3748f4c80e42e2d95672f6f9e65b9361346e984976918700df05f98d8b2aa4a6",
+      "bytes": 452
+    },
+    "primary-metrics.csv": {
+      "sha256": "f3c55ca65a7b1ed010d1b61c856399d8f1eb55a2e91b21fb30dc9b56d07a9861",
+      "bytes": 7444
+    },
+    "primary-tables.md": {
+      "sha256": "b68f96e03e39c69bef5a7fac736b2a816974fddcb34618d2ca60ae0415e6a18c",
+      "bytes": 8518
+    },
+    "synthetic-pi-worktree.csv": {
+      "sha256": "7bc6a1fe151d472439442418cac1f1ee47d61511aaa02b54af9c07214c47fea5",
+      "bytes": 449
+    },
+    "synthetic-threadmill-bwrap.csv": {
+      "sha256": "7c89a9af113f4b531d50c931b64191fa6b1f1844671992b062ec5ad701b10691",
+      "bytes": 466
+    },
+    "synthetic-threadmill-external.csv": {
+      "sha256": "9321be625340b31318ca7d254ff134c9fc80f8f37213aba5a9c1cecaad1015e6",
+      "bytes": 467
+    }
+  },
+  "negative_checks": {
+    "unsafe_paths_rejected": [
+      "/tmp/escaped.json",
+      "../escaped.json",
+      "a/../../escaped.json",
+      "a//b",
+      "./a"
+    ],
+    "existing_output_rejected_without_modification": true
+  },
+  "review": {
+    "verdict": "approve",
+    "correctness": "144 exact matrix identities; archive and member bytes/SHA verified; seven CSVs and Markdown table byte-identical; capacity matches the independent audit.",
+    "readability": "Single stdlib script; fixed matrix constants and separate archive, aggregate, table and CLI functions.",
+    "architecture": "Offline reporting artifact only; no runtime dependencies or architecture arrows added.",
+    "security": "Never extracts tar members, rejects unsafe/noncanonical names and nonregular members, confines archive paths to source, refuses existing output directories.",
+    "performance": "Serial archive traversal and one JSON member at a time; only aggregation inputs retained; no benchmark or model calls."
+  },
+  "scope": "Integrity and aggregation reproduction; full operation/trace/terminal correctness remains the separate frozen-harness primary audit."
+}
