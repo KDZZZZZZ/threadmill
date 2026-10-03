@@ -1,0 +1,8 @@
+{
+  "kind": "legacy",
+  "inputs": {
+    "legacy-audit/summary.json": "7611b5728bc69db331941a2896e1659e29eb4e70db1f17390a647c1c04150ca9"
+  },
+  "rows": 16,
+  "script_sha256": "b895448b35bf5e1169302487ca973245e9785679aa2a20074d06146129f95dc2"
+}

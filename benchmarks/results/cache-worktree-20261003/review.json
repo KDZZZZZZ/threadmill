@@ -1,0 +1,57 @@
+{
+  "reviewed_utc": "2026-10-03T17:43:12.518244+00:00",
+  "verdict": "Approve",
+  "reviewers": [
+    "/root/primary_reproduce",
+    "/root/harbor_scope_review",
+    "/root"
+  ],
+  "scope": [
+    "Independent review of audit scripts, renderer and failure regression; saved execution evidence checked.",
+    "Independent static review of public evidence allowlist; root executed all archive/member checks and portable offline audit entrypoints.",
+    "Report primary/reference tables previously checked against CSV; final legacy 16 tiers and lower allocation compared against audit summaries.",
+    "Root final prose changes clarify frozen source scope and add verified archive size and portable audit record links."
+  ],
+  "axes": {
+    "correctness": "All 280 completed rows audited through unpacked evidence; incomplete Go and one separately labeled primary supplement stay explicit.",
+    "readability": "Separate lifecycle, storage and validation scopes; reproducible CLI documentation.",
+    "architecture": "Standard-library offline analysis and existing frozen helpers; no runtime dependency change.",
+    "security": "Allowlist excludes private environments/configuration and binaries; archive paths and member hashes validated; no archived policy/diagnostic is executed by extraction or audits.",
+    "performance": "Measurement finished before packaging or audit workloads; 19 compressed files, each below 100 MiB."
+  },
+  "files": {
+    "benchmarks/results/cache-worktree-20261003/audit-cache.py": "62bd81381f1e8a0647ef5a0dfda75fd57cebd08b23ef340df51bfa86dfcc3a97",
+    "benchmarks/results/cache-worktree-20261003/audit-legacy.py": "4f4563a23ada3f2ad6b90fb1b9d9176ab093b99b984de4cb78825b9ae8df28bd",
+    "benchmarks/results/cache-worktree-20261003/audit-primary.py": "fb74fc6081253093a2e7904bdb38029927904f6cc99e5699e59a115c4e079d7e",
+    "benchmarks/results/cache-worktree-20261003/audit-reference.py": "acf15fc4c34bce2f9fadc7ecd61e0c0053af5474ec9d85dde46b837c160de1af",
+    "benchmarks/results/cache-worktree-20261003/render-comparisons.py": "b895448b35bf5e1169302487ca973245e9785679aa2a20074d06146129f95dc2",
+    "benchmarks/results/cache-worktree-20261003/reproduce-primary.py": "153e383bcdc9966bf2f77fcbade5b9e325fa25e3e09becf9d191739c1aa427b9",
+    "benchmarks/results/cache-worktree-20261003/test_render_comparisons.py": "b5a1c1fdf55c20ecd939c550caf887a8d7a6b96edb550b531172c8a4f89445df",
+    "benchmarks/results/cache-worktree-20261003/README.md": "c883877068e4709daf0e95daad115b151c6caa0881d6b61cb4993803a7c2a6e5",
+    "benchmarks/results/cache-worktree-20261003/legacy-metrics.csv": "4915d121fcaebfa7d61d8f53612f1161728ef8d7b8bd9a646c68826c07d1280e",
+    "benchmarks/results/cache-worktree-20261003/legacy-tables.md": "8b2b49bef1c0448ed2cbbd1032e4d627993083cfae01f9b3f5fe5f9ae5d31550",
+    "benchmarks/results/cache-worktree-20261003/legacy-audit/summary.json": "7611b5728bc69db331941a2896e1659e29eb4e70db1f17390a647c1c04150ca9",
+    "docs/threadmill-vs-pi-worktree-performance.md": "20d05eafd211c98561363c33b1730b79c19a1debedba11ead53fa43093f72840",
+    "benchmarks/results/cache-worktree-20261003/reference-tables.md": "07fe1af7c2262dfe0bdd6ad26778f74d1446b4d373e57238a24d58fa73f226a9"
+  },
+  "formatting_followup": {
+    "reason": "Remove the redundant trailing blank line reported by git diff --check; numeric CSV and Markdown content unchanged.",
+    "script_sha256": "b895448b35bf5e1169302487ca973245e9785679aa2a20074d06146129f95dc2",
+    "test_command": [
+      "/usr/bin/python3",
+      "/home/oops/repo/threadmill-cache-report/benchmarks/results/cache-worktree-20261003/test_render_comparisons.py"
+    ],
+    "test_returncode": 0,
+    "test_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.047s\n\nOK\n",
+    "comparisons": {
+      "reference": {
+        "csv_byte_identical": true,
+        "markdown_only_removed_trailing_blank_line": true
+      },
+      "legacy": {
+        "csv_byte_identical": true,
+        "markdown_only_removed_trailing_blank_line": true
+      }
+    }
+  }
+}
