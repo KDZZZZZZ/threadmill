@@ -1,0 +1,353 @@
+package main
+
+import (
+	"archive/tar"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	osexec "os/exec"
+	"path"
+	"path/filepath"
+	"sort"
+	"time"
+
+	"github.com/KDZZZZZZ/threadmill/internal/vfs"
+)
+
+type node struct {
+	Kind       string `json:"kind"`
+	Value      string `json:"value,omitempty"`
+	Executable bool   `json:"executable,omitempty"`
+}
+type tree map[string]node
+
+type auditReport struct {
+	Version                 int       `json:"version"`
+	RuntimeCommit           string    `json:"runtime_commit"`
+	FixtureCommit           string    `json:"fixture_commit"`
+	TraceSHA256             string    `json:"trace_sha256"`
+	ReplaySHA256            string    `json:"replay_report_sha256"`
+	LowerTreeSHA256         string    `json:"lower_tree_sha256"`
+	AuditNS                 int64     `json:"audit_ns"`
+	CheckpointCount         int       `json:"checkpoint_count"`
+	CheckpointOverlayProofs int       `json:"checkpoint_overlay_proofs"`
+	Passed                  bool      `json:"passed"`
+	Errors                  int       `json:"errors"`
+	Error                   string    `json:"error,omitempty"`
+	VFS                     vfs.Stats `json:"vfs"`
+}
+
+// audit restores old persistent checkpoints after the runner has saved disk
+// samples. It never invents a missing checkpoint by allowing Materialize to
+// create one from the lower tree; the pinned old state paths must exist first.
+func audit(opt options) (out auditReport, retErr error) {
+	started := time.Now()
+	out = auditReport{Version: 1, RuntimeCommit: runtimeCommit}
+	defer func() { out.AuditNS = time.Since(started).Nanoseconds() }()
+	if opt.ReplayReport == "" {
+		return out, fmt.Errorf("audit-only requires replay-report")
+	}
+	rawReport, err := os.ReadFile(opt.ReplayReport)
+	if err != nil {
+		return out, err
+	}
+	if err := replayFields(rawReport); err != nil {
+		return out, err
+	}
+	var replay report
+	if err := json.Unmarshal(rawReport, &replay); err != nil {
+		return out, err
+	}
+	trace, rawTrace, err := input(opt)
+	if err != nil {
+		return out, err
+	}
+	out.FixtureCommit, out.TraceSHA256, out.ReplaySHA256 = trace.Fixture.Commit, digest(rawTrace), digest(rawReport)
+	if replay.Version != 1 || replay.Backend != "threadmill-historical98-overlay-external" ||
+		replay.Serial != trace.Serial || replay.WallNS <= 0 ||
+		replay.RuntimeCommit != runtimeCommit || replay.FixtureCommit != trace.Fixture.Commit ||
+		replay.TraceSHA256 != out.TraceSHA256 || replay.Agents != len(trace.Agents) ||
+		replay.Errors != 0 || replay.Error != "" || replay.CheckpointOverlayProofs != len(trace.Agents) ||
+		len(replay.CheckpointIDs) != len(trace.Agents) || replay.CheckpointCloseProofErrors != 0 ||
+		replay.FinalCloseErrors != 0 || replay.FinalCloseNS < 0 {
+		return out, fmt.Errorf("replay identity, errors, or checkpoint proof count is invalid")
+	}
+	if err := terminal(replay.Execution, replay.VFS); err != nil {
+		return out, err
+	}
+	if err := layout(opt); err != nil {
+		return out, err
+	}
+	base, err := archiveTree(opt.Repo, trace.Fixture.Commit)
+	if err != nil {
+		return out, err
+	}
+	lower, err := readTree(opt.Lower)
+	if err != nil {
+		return out, err
+	}
+	if err := equalTree(base, lower); err != nil {
+		return out, fmt.Errorf("lower differs from fixture git archive: %w", err)
+	}
+	out.LowerTreeSHA256 = treeDigest(base)
+	byID := make(map[string]traceAgent)
+	for _, agent := range trace.Agents {
+		byID["checkpoint-"+agent.ID] = agent
+	}
+	seen := make(map[string]bool)
+	for _, id := range replay.CheckpointIDs {
+		if _, ok := byID[id]; !ok || seen[id] {
+			return out, fmt.Errorf("unexpected or repeated checkpoint %q", id)
+		}
+		seen[id] = true
+		// Paths are private in the old VFS API. This observer is explicitly pinned
+		// to its sha256 naming; it neither creates nor edits old persistent state.
+		state := filepath.Join(opt.Live, ".overlay-"+digest([]byte(id)))
+		for _, name := range []string{state, filepath.Join(state, "upper"), filepath.Join(state, "work"), filepath.Join(opt.Live, digest([]byte(id)))} {
+			info, err := os.Lstat(name)
+			if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return out, errors.Join(err, fmt.Errorf("missing or invalid retained OverlayFS directory: %s", name))
+			}
+		}
+	}
+	store, err := vfs.NewPersistentStoreWithOptions(opt.Lower, opt.Live, vfs.Options{Overlay: true})
+	if err != nil {
+		return out, err
+	}
+	defer func() {
+		retErr = errors.Join(retErr, store.Close())
+		if retErr != nil {
+			out.Passed = false
+		}
+	}()
+	if stats := store.Stats(); !stats.OverlayAvailable || stats.OverlayBackend != "native-overlayfs" {
+		return out, fmt.Errorf("native OverlayFS unavailable during restore")
+	}
+	for _, id := range replay.CheckpointIDs {
+		live, err := store.Materialize(id)
+		if err != nil {
+			return out, fmt.Errorf("restore %s: %w", id, err)
+		}
+		if err := requireOverlay(live); err != nil {
+			return out, err
+		}
+		actual, err := readTree(live)
+		if err != nil {
+			return out, err
+		}
+		want, err := expectedTree(base, byID[id])
+		if err != nil {
+			return out, err
+		}
+		if err := equalTree(want, actual); err != nil {
+			return out, fmt.Errorf("checkpoint %s differs: %w", id, err)
+		}
+		// Bound audit mount count independently of the measured replay. Closing
+		// preserves upper/work state; each ID is restored exactly once.
+		if err := store.Close(); err != nil {
+			return out, err
+		}
+		if err := requireUnmounted(live); err != nil {
+			return out, err
+		}
+		out.CheckpointCount++
+		out.CheckpointOverlayProofs++
+	}
+	out.VFS = store.Stats()
+	if out.VFS.OverlayActive != 0 || out.VFS.MaterializeActive != 0 || out.VFS.AbsorbActive != 0 {
+		return out, fmt.Errorf("nonzero audit terminal VFS state: %+v", out.VFS)
+	}
+	out.Passed = out.CheckpointCount == len(trace.Agents)
+	if !out.Passed {
+		return out, fmt.Errorf("incomplete checkpoint audit")
+	}
+	return out, nil
+}
+
+// JSON zero values do not prove that the old terminal counters were present.
+// Missing or null evidence must fail instead of passing a default-zero guard.
+func replayFields(raw []byte) error {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return err
+	}
+	groups := map[string][]string{
+		"":          {"version", "backend", "runtime_commit", "fixture_commit", "trace_sha256", "agents", "serial", "wall_ns", "errors", "checkpoint_ids", "checkpoint_overlay_proofs", "checkpoint_close_proof_errors", "final_close_ns", "final_close_errors"},
+		"execution": {"queued", "active", "heavy_queued", "heavy_active", "tracked_process_groups", "runtime_dirs", "adapter_reap_errors", "adapter_orphan_runtime_dirs", "adapter_runtime_dir_scan_errors"},
+		"vfs":       {"materialize_active", "absorb_active", "overlay_active"},
+	}
+	for group, names := range groups {
+		fields := top
+		if group != "" {
+			fields = nil
+			if err := json.Unmarshal(top[group], &fields); err != nil {
+				return fmt.Errorf("missing %s evidence: %w", group, err)
+			}
+		}
+		for _, name := range names {
+			value, ok := fields[name]
+			if !ok || string(value) == "null" {
+				return fmt.Errorf("missing %s.%s evidence", group, name)
+			}
+		}
+	}
+	return nil
+}
+
+func expectedTree(base tree, agent traceAgent) (tree, error) {
+	out := make(tree, len(base))
+	for name, n := range base {
+		out[name] = n
+	}
+	for _, op := range agent.Operations {
+		if op.Op != "write" {
+			continue
+		}
+		name := path.Clean(op.Path)
+		n, ok := out[name]
+		if !ok || n.Kind != "file" {
+			return nil, fmt.Errorf("registered write must replace a fixture regular file: %s", name)
+		}
+		n.Value = digest([]byte(op.Content))
+		out[name] = n
+	}
+	return out, nil
+}
+
+func archiveTree(repo, commit string) (tree, error) {
+	cmd := osexec.Command("git", "-c", "gc.auto=0", "-C", repo, "archive", commit)
+	reader, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		_ = reader.Close()
+		return nil, err
+	}
+	out, parseErr := tarTree(tar.NewReader(reader))
+	if parseErr == nil {
+		_, parseErr = io.Copy(io.Discard, reader)
+	}
+	closeErr := reader.Close()
+	waitErr := cmd.Wait()
+	return out, errors.Join(parseErr, closeErr, waitErr)
+}
+
+func tarTree(reader *tar.Reader) (tree, error) {
+	out := make(tree)
+	for {
+		h, err := reader.Next()
+		if err == io.EOF {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if h.Typeflag == tar.TypeXGlobalHeader || h.Typeflag == tar.TypeXHeader {
+			continue
+		}
+		name := path.Clean(h.Name)
+		if name == "." && h.Typeflag == tar.TypeDir {
+			continue
+		}
+		if !safePath(name) {
+			return nil, fmt.Errorf("invalid archive path %q", h.Name)
+		}
+		if _, ok := out[name]; ok {
+			return nil, fmt.Errorf("repeated archive path %q", name)
+		}
+		var n node
+		switch h.Typeflag {
+		case tar.TypeDir:
+			n.Kind = "dir"
+		case tar.TypeSymlink:
+			n.Kind, n.Value = "symlink", h.Linkname
+		case tar.TypeReg, tar.TypeRegA:
+			n.Kind, n.Executable = "file", h.Mode&0o111 != 0
+			sum := sha256.New()
+			if _, err := io.Copy(sum, reader); err != nil {
+				return nil, err
+			}
+			n.Value = hex.EncodeToString(sum.Sum(nil))
+		default:
+			return nil, fmt.Errorf("unsupported archive entry %q type %d", name, h.Typeflag)
+		}
+		out[name] = n
+	}
+}
+
+func readTree(root string) (tree, error) {
+	out := make(tree)
+	err := filepath.WalkDir(root, func(name string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, name)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		var n node
+		switch {
+		case info.IsDir():
+			n.Kind = "dir"
+		case info.Mode()&os.ModeSymlink != 0:
+			n.Kind = "symlink"
+			n.Value, err = os.Readlink(name)
+		case info.Mode().IsRegular():
+			n.Kind, n.Executable = "file", info.Mode().Perm()&0o111 != 0
+			var f *os.File
+			f, err = os.Open(name)
+			if err != nil {
+				return err
+			}
+			sum := sha256.New()
+			_, err = io.Copy(sum, f)
+			err = errors.Join(err, f.Close())
+			n.Value = hex.EncodeToString(sum.Sum(nil))
+		default:
+			return fmt.Errorf("unsupported tree node %s", name)
+		}
+		if err != nil {
+			return err
+		}
+		out[filepath.ToSlash(rel)] = n
+		return nil
+	})
+	return out, err
+}
+
+func equalTree(want, actual tree) error {
+	names := make([]string, 0, len(want)+len(actual))
+	seen := make(map[string]bool)
+	for name := range want {
+		seen[name] = true
+		names = append(names, name)
+	}
+	for name := range actual {
+		if !seen[name] {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		w, wok := want[name]
+		a, aok := actual[name]
+		if wok != aok || w != a {
+			return fmt.Errorf("%s: want %+v (exists %t), got %+v (exists %t)", name, w, wok, a, aok)
+		}
+	}
+	return nil
+}
+
+func treeDigest(t tree) string { raw, _ := json.Marshal(t); return digest(raw) }

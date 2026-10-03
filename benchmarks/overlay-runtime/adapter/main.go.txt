@@ -1,0 +1,427 @@
+// Command tmlegacy replays frozen traces through unchanged 98ed7d3 runtime packages.
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	osexec "os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/KDZZZZZZ/threadmill/internal/env"
+	tmexec "github.com/KDZZZZZZ/threadmill/internal/exec"
+	"github.com/KDZZZZZZ/threadmill/internal/vfs"
+)
+
+const runtimeCommit = "98ed7d3d38c0fc956de0bc70c858f4ef65c90e02"
+const overlayMagic = 0x794c7630
+const btrfsMagic = 0x9123683e
+const ext4Magic = 0xef53
+
+type options struct {
+	Trace, Repo, Lower, Live, Output, ReplayReport string
+	Slots                                          int
+	Audit                                          bool
+}
+type operation struct {
+	Agent        string `json:"agent"`
+	Index        int    `json:"index"`
+	Op           string `json:"op"`
+	DurationNS   int64  `json:"duration_ns"`
+	ExitCode     int    `json:"exit_code"`
+	Output       string `json:"output,omitempty"`
+	OutputSHA256 string `json:"output_sha256,omitempty"`
+	Error        string `json:"error,omitempty"`
+}
+type latency struct {
+	Count int   `json:"count"`
+	P50   int64 `json:"p50_ns"`
+	P95   int64 `json:"p95_ns"`
+}
+type execution struct {
+	tmexec.Stats
+	// Old Reap returns cleanup failures. These are adapter observations, not a
+	// backport of the newer runtime counter. The original Stats remain embedded.
+	ReapErrors           int `json:"adapter_reap_errors"`
+	OrphanRuntimeDirs    int `json:"adapter_orphan_runtime_dirs"`
+	RuntimeDirScanErrors int `json:"adapter_runtime_dir_scan_errors"`
+}
+type report struct {
+	Version                    int                `json:"version"`
+	Backend                    string             `json:"backend"`
+	RuntimeCommit              string             `json:"runtime_commit"`
+	FixtureCommit              string             `json:"fixture_commit"`
+	TraceSHA256                string             `json:"trace_sha256"`
+	Agents                     int                `json:"agents"`
+	Serial                     bool               `json:"serial"`
+	SetupNS                    int64              `json:"setup_ns"`
+	WallNS                     int64              `json:"wall_ns"`
+	CommandsPS                 float64            `json:"commands_per_second"`
+	Errors                     int                `json:"errors"`
+	Error                      string             `json:"error,omitempty"`
+	Operations                 []operation        `json:"operations"`
+	Latency                    map[string]latency `json:"latency"`
+	Execution                  execution          `json:"execution"`
+	VFS                        vfs.Stats          `json:"vfs"`
+	CheckpointIDs              []string           `json:"checkpoint_ids"`
+	CheckpointOverlayProofs    int                `json:"checkpoint_overlay_proofs"`
+	CheckpointCloseProofErrors int                `json:"checkpoint_close_proof_errors"`
+	CheckpointAudit            string             `json:"checkpoint_audit"`
+	FinalCloseNS               int64              `json:"final_close_ns"`
+	FinalCloseErrors           int                `json:"final_close_errors"`
+}
+
+func main() {
+	var opt options
+	flag.StringVar(&opt.Trace, "trace-in", "", "exact existing stage-3 trace")
+	flag.StringVar(&opt.Repo, "repo", "", "clean committed fixture")
+	flag.StringVar(&opt.Lower, "lower", "", "read-only ext4 git-archive of fixture commit")
+	flag.StringVar(&opt.Live, "live-root", "", "dedicated Btrfs upper/work/live state")
+	flag.StringVar(&opt.Output, "json-out", "", "new output path")
+	flag.StringVar(&opt.ReplayReport, "replay-report", "", "replay JSON consumed by audit-only")
+	flag.IntVar(&opt.Slots, "slots", 8, "registered execution slots")
+	flag.BoolVar(&opt.Audit, "audit-only", false, "audit retained state after disk samples are saved")
+	flag.Parse()
+	if opt.Trace == "" || opt.Repo == "" || opt.Lower == "" || opt.Live == "" || opt.Output == "" || opt.Slots < 1 {
+		fmt.Fprintln(os.Stderr, "trace-in/repo/lower/live-root/json-out and positive slots are required")
+		os.Exit(1)
+	}
+	if opt.Audit {
+		out, err := audit(opt)
+		if err != nil {
+			out.Errors++
+			out.Error = err.Error()
+			out.Passed = false
+		}
+		err = errors.Join(err, writeJSON(opt.Output, out))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	out, err := replay(opt)
+	if err != nil {
+		if out.Errors == 0 {
+			out.Errors = 1
+		}
+		out.Error = err.Error()
+	}
+	err = errors.Join(err, writeJSON(opt.Output, out))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func input(opt options) (loadTrace, []byte, error) {
+	raw, err := os.ReadFile(opt.Trace)
+	if err != nil {
+		return loadTrace{}, nil, err
+	}
+	trace, err := decodeTrace(bytes.NewReader(raw))
+	if err != nil {
+		return trace, raw, err
+	}
+	head, err := git(opt.Repo, "rev-parse", "HEAD")
+	if err != nil || head != trace.Fixture.Commit {
+		return trace, raw, errors.Join(err, fmt.Errorf("fixture HEAD differs from trace"))
+	}
+	dirty, err := git(opt.Repo, "status", "--porcelain", "--untracked-files=all")
+	if err != nil || dirty != "" {
+		return trace, raw, errors.Join(err, fmt.Errorf("fixture must be clean"))
+	}
+	// Full lower/checkpoint hashing belongs to audit-only after disk sampling.
+	// Doing it before each replay would prewarm only this group's entire tree.
+	return trace, raw, nil
+}
+
+func layout(opt options) error {
+	var lower, upper syscall.Statfs_t
+	if err := syscall.Statfs(opt.Lower, &lower); err != nil {
+		return err
+	}
+	if err := syscall.Statfs(opt.Live, &upper); err != nil {
+		return err
+	}
+	if uint64(lower.Type) != ext4Magic || uint64(upper.Type) != btrfsMagic {
+		return fmt.Errorf("historical layout requires ext4 lower and Btrfs upper")
+	}
+	if uint64(lower.Flags)&1 == 0 {
+		return fmt.Errorf("lower mount must be read-only (ST_RDONLY)")
+	}
+	if vfs.ReflinkCloneable(opt.Lower, opt.Live) {
+		return fmt.Errorf("old selector would disable OverlayFS")
+	}
+	return nil
+}
+
+func replay(opt options) (out report, retErr error) {
+	out = report{Version: 1, Backend: "threadmill-historical98-overlay-external", RuntimeCommit: runtimeCommit,
+		Latency: make(map[string]latency), CheckpointAudit: "pending; must pass audit-only before acceptance",
+		FinalCloseNS: -1, FinalCloseErrors: -1,
+		Execution: execution{OrphanRuntimeDirs: -1, RuntimeDirScanErrors: -1}}
+	setup := time.Now()
+	if err := os.MkdirAll(opt.Live, 0o700); err != nil {
+		return out, err
+	}
+	entries, err := os.ReadDir(opt.Live)
+	if err != nil {
+		return out, err
+	}
+	if len(entries) != 0 {
+		return out, fmt.Errorf("live-root must be fresh and empty")
+	}
+	if err := layout(opt); err != nil {
+		return out, err
+	}
+	trace, raw, err := input(opt)
+	if err != nil {
+		return out, err
+	}
+	out.FixtureCommit, out.TraceSHA256 = trace.Fixture.Commit, digest(raw)
+	out.Agents, out.Serial = len(trace.Agents), trace.Serial
+	store, err := vfs.NewPersistentStoreWithOptions(opt.Lower, opt.Live, vfs.Options{Overlay: true})
+	if err != nil {
+		return out, err
+	}
+	closeCalled := false
+	defer func() {
+		if !closeCalled {
+			retErr = errors.Join(retErr, store.Close())
+		}
+	}()
+	if stats := store.Stats(); !stats.OverlayAvailable || stats.OverlayBackend != "native-overlayfs" {
+		return out, fmt.Errorf("historical native OverlayFS is unavailable: %+v", stats)
+	}
+	sched := tmexec.New(tmexec.Config{Slots: opt.Slots, Timeout: 120 * time.Second,
+		ExternalSandbox: true, HeavyThreshold: 24 * time.Hour})
+	out.SetupNS = time.Since(setup).Nanoseconds()
+	var mu sync.Mutex
+	reapErrors := 0
+	record := func(row operation) {
+		mu.Lock()
+		defer mu.Unlock()
+		out.Operations = append(out.Operations, row)
+		if row.Error != "" {
+			out.Errors++
+		}
+	}
+	work := func(agent traceAgent) {
+		started := time.Now()
+		err := store.Fork("", agent.ID)
+		record(row(agent.ID, -1, "fork", started, err))
+		defer func() {
+			started := time.Now()
+			reapErr := sched.Reap(agent.ID)
+			if reapErr != nil {
+				mu.Lock()
+				reapErrors++
+				mu.Unlock()
+			}
+			err := errors.Join(reapErr, store.Release(agent.ID), store.Discard(agent.ID))
+			record(row(agent.ID, len(agent.Operations)+1, "release", started, err))
+		}()
+		if err != nil {
+			return
+		}
+		view, x := store.View(agent.ID), sched.View(agent.ID, store)
+		for i, op := range agent.Operations {
+			started := time.Now()
+			err = nil
+			var result env.ExecResult
+			switch op.Op {
+			case "think":
+				time.Sleep(time.Duration(op.DurationNS))
+			case "read":
+				_, err = view.Read(op.Path)
+			case "list":
+				_, err = view.List(op.Path)
+			case "write":
+				err = view.Write(op.Path, []byte(op.Content))
+			case "bash":
+				result, err = x.Run(context.Background(), env.Cmd{Command: op.Command, Timeout: 120 * time.Second})
+				if err == nil && result.ExitCode != op.ExpectedExit {
+					err = fmt.Errorf("exit %d, want %d", result.ExitCode, op.ExpectedExit)
+				}
+			}
+			r := row(agent.ID, i, op.Op, started, err)
+			if op.Op == "bash" {
+				r.ExitCode, r.Output, r.OutputSHA256 = result.ExitCode, result.Output, digest([]byte(result.Output))
+			}
+			record(r)
+		}
+		started = time.Now()
+		checkpoint := "checkpoint-" + agent.ID
+		// Even a read-only logical agent needs a durable retained checkpoint.
+		// Materialize is an existing old API and its cost stays in collect.
+		live, err := store.Materialize(agent.ID)
+		if err == nil {
+			err = requireOverlay(live)
+		}
+		if err == nil {
+			err = store.Absorb(agent.ID)
+		}
+		if err == nil {
+			err = store.Handoff(agent.ID, checkpoint)
+		}
+		if err == nil {
+			live, err = store.Materialize(checkpoint)
+			if err == nil {
+				err = requireOverlay(live)
+			}
+		}
+		if err == nil {
+			mu.Lock()
+			out.CheckpointIDs = append(out.CheckpointIDs, checkpoint)
+			out.CheckpointOverlayProofs++
+			mu.Unlock()
+		}
+		record(row(agent.ID, len(agent.Operations), "collect", started, err))
+	}
+	started := time.Now()
+	if trace.Serial {
+		for _, agent := range trace.Agents {
+			work(agent)
+		}
+	} else {
+		var wg sync.WaitGroup
+		for _, agent := range trace.Agents {
+			wg.Add(1)
+			go func(agent traceAgent) { defer wg.Done(); work(agent) }(agent)
+		}
+		wg.Wait()
+	}
+	closeStarted := time.Now()
+	closeCalled = true
+	closeErr := store.Close() // Unmount all retained checkpoints while preserving old upper/work state.
+	out.FinalCloseErrors = 0
+	if closeErr != nil {
+		out.FinalCloseErrors++
+	}
+	out.FinalCloseNS = time.Since(closeStarted).Nanoseconds()
+	out.WallNS = time.Since(started).Nanoseconds()
+	out.Execution = execution{Stats: sched.Stats(), ReapErrors: reapErrors, OrphanRuntimeDirs: -1}
+	out.VFS = store.Stats()
+	entries, err = os.ReadDir(opt.Live)
+	if err != nil {
+		out.Execution.RuntimeDirScanErrors++
+	} else {
+		out.Execution.OrphanRuntimeDirs = 0
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), ".threadmill-exec-") {
+				out.Execution.OrphanRuntimeDirs++
+			}
+		}
+	}
+	retErr = errors.Join(closeErr, err, terminal(out.Execution, out.VFS))
+	for _, id := range out.CheckpointIDs {
+		live := filepath.Join(opt.Live, digest([]byte(id)))
+		if err := requireUnmounted(live); err != nil {
+			out.CheckpointCloseProofErrors++
+			retErr = errors.Join(retErr, err)
+		}
+	}
+	if len(out.CheckpointIDs) != len(trace.Agents) {
+		retErr = errors.Join(retErr, fmt.Errorf("missing retained checkpoints"))
+	}
+	if retErr != nil {
+		out.Errors++
+	}
+	for _, op := range []string{"fork", "think", "read", "list", "write", "bash", "collect", "release"} {
+		var ns []int64
+		for _, r := range out.Operations {
+			if r.Op == op {
+				ns = append(ns, r.DurationNS)
+			}
+		}
+		if len(ns) != 0 {
+			sort.Slice(ns, func(i, j int) bool { return ns[i] < ns[j] })
+			out.Latency[op] = latency{len(ns), ns[len(ns)/2], ns[len(ns)*95/100]}
+		}
+	}
+	if out.WallNS > 0 {
+		out.CommandsPS = float64(out.Latency["bash"].Count) * 1e9 / float64(out.WallNS)
+	}
+	sort.Strings(out.CheckpointIDs)
+	sort.Slice(out.Operations, func(i, j int) bool {
+		a, b := out.Operations[i], out.Operations[j]
+		if a.Agent != b.Agent {
+			return a.Agent < b.Agent
+		}
+		return a.Index < b.Index
+	})
+	if out.Errors != 0 {
+		retErr = errors.Join(retErr, fmt.Errorf("%d legacy replay errors", out.Errors))
+	}
+	return out, retErr
+}
+
+func requireOverlay(live string) error {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(live, &stat); err != nil {
+		return err
+	}
+	if uint64(stat.Type) != overlayMagic {
+		return fmt.Errorf("live workspace is not native OverlayFS: %x", stat.Type)
+	}
+	return nil
+}
+
+func requireUnmounted(live string) error {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(live, &stat); err != nil {
+		return err
+	}
+	if uint64(stat.Type) == overlayMagic {
+		return fmt.Errorf("checkpoint still mounted after Close: %s", live)
+	}
+	return nil
+}
+
+func terminal(e execution, v vfs.Stats) error {
+	if e.Active != 0 || e.Queued != 0 || e.HeavyActive != 0 || e.HeavyQueued != 0 ||
+		e.TrackedProcessGroups != 0 || e.RuntimeDirs != 0 || e.ReapErrors != 0 || e.OrphanRuntimeDirs != 0 ||
+		e.RuntimeDirScanErrors != 0 ||
+		v.MaterializeActive != 0 || v.AbsorbActive != 0 || v.OverlayActive != 0 {
+		return fmt.Errorf("nonzero terminal state: execution=%+v vfs=%+v", e, v)
+	}
+	return nil
+}
+
+func row(agent string, index int, op string, start time.Time, err error) operation {
+	r := operation{Agent: agent, Index: index, Op: op, DurationNS: time.Since(start).Nanoseconds()}
+	if err != nil {
+		r.Error = err.Error()
+	}
+	return r
+}
+func digest(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
+func git(repo string, args ...string) (string, error) {
+	cmd := osexec.Command("git", append([]string{"-c", "gc.auto=0", "-C", repo}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git %v: %w: %s", args, err, out)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+func writeJSON(name string, value any) error {
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	err = json.NewEncoder(f).Encode(value)
+	return errors.Join(err, f.Close())
+}

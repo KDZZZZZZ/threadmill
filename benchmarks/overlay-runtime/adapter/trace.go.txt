@@ -1,0 +1,112 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"path"
+	"regexp"
+	"strings"
+)
+
+// This is the registered stage-3 Trace v1 seam, not a new runtime API.
+type loadTrace struct {
+	Version int   `json:"version"`
+	Seed    int64 `json:"seed"`
+	Fixture struct {
+		Kind      string `json:"kind"`
+		Files     int    `json:"files"`
+		FileBytes int    `json:"file_bytes"`
+		Commit    string `json:"commit"`
+	} `json:"fixture"`
+	Serial bool         `json:"serial,omitempty"`
+	Agents []traceAgent `json:"agents"`
+}
+
+type traceAgent struct {
+	ID         string    `json:"id"`
+	Operations []traceOp `json:"operations"`
+}
+
+type traceOp struct {
+	Op            string `json:"op"`
+	DurationNS    int64  `json:"duration_ns,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Content       string `json:"content,omitempty"`
+	Command       string `json:"command,omitempty"`
+	ExpectedExit  int    `json:"expected_exit,omitempty"`
+	ExpectedCache *bool  `json:"expected_cache,omitempty"`
+}
+
+var agentID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+var commitID = regexp.MustCompile(`^[0-9a-f]{40}$`)
+var stage3Sleep = regexp.MustCompile(`^sleep [0-9]+\.[0-9]{6}$`)
+
+func safePath(name string) bool {
+	clean := path.Clean(name)
+	if name == "" || path.IsAbs(name) || clean == ".." || clean == ".git" || strings.HasPrefix(clean, ".git/") {
+		return false
+	}
+	for _, part := range strings.Split(name, "/") {
+		if part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func decodeTrace(r io.Reader) (loadTrace, error) {
+	d := json.NewDecoder(r)
+	d.DisallowUnknownFields()
+	var trace loadTrace
+	if err := d.Decode(&trace); err != nil {
+		return trace, err
+	}
+	if err := d.Decode(new(any)); err != io.EOF {
+		return trace, fmt.Errorf("trace needs one JSON object")
+	}
+	if trace.Version != 1 || len(trace.Agents) == 0 || !commitID.MatchString(trace.Fixture.Commit) {
+		return trace, fmt.Errorf("Trace v1 needs agents and a full fixture commit")
+	}
+	if trace.Fixture.Kind != "repository" && trace.Fixture.Kind != "synthetic" {
+		return trace, fmt.Errorf("invalid fixture kind")
+	}
+	seen := make(map[string]bool)
+	for _, agent := range trace.Agents {
+		if !agentID.MatchString(agent.ID) || seen[agent.ID] || agent.Operations == nil {
+			return trace, fmt.Errorf("invalid agent %q", agent.ID)
+		}
+		seen[agent.ID] = true
+		for i, op := range agent.Operations {
+			if op.ExpectedCache != nil {
+				return trace, fmt.Errorf("cache scripts are outside this stage-3 adapter")
+			}
+			switch op.Op {
+			case "think":
+				if op.DurationNS < 0 {
+					return trace, fmt.Errorf("negative think duration")
+				}
+			case "read", "write", "list":
+				if !safePath(op.Path) {
+					return trace, fmt.Errorf("unsafe path %q", op.Path)
+				}
+			case "bash":
+				// Full checkpoint expectations are derived from the known write ops.
+				// Reject new shell semantics instead of silently losing shell writes.
+				known := op.Command == "true" || op.Command == "ls . >/dev/null" ||
+					op.Command == "find . -maxdepth 1 -type f | wc -l >/dev/null" || stage3Sleep.MatchString(op.Command)
+				if !known || op.ExpectedExit != 0 {
+					return trace, fmt.Errorf("%s op %d: unsupported stage-3 command %q", agent.ID, i, op.Command)
+				}
+			default:
+				return trace, fmt.Errorf("unknown operation %q", op.Op)
+			}
+		}
+	}
+	for _, agent := range trace.Agents {
+		if seen["checkpoint-"+agent.ID] {
+			return trace, fmt.Errorf("agent/checkpoint namespace collision: %s", agent.ID)
+		}
+	}
+	return trace, nil
+}

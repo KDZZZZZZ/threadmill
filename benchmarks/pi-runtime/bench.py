@@ -59,7 +59,7 @@ def check_terminal_state(row):
         row["errors"] += 1
 
 
-def summarize(rows, required_repeats=None):
+def summarize(rows, required_repeats=None, terminal_errors=terminal_state_errors):
     """The rule is frozen in docs/cache-worktree-benchmark-protocol.md before runs."""
     out = {}
     for backend in sorted({row["backend"] for row in rows}):
@@ -70,7 +70,7 @@ def summarize(rows, required_repeats=None):
             samples = [row for row in selected if row["agents"] == width]
             tier = {"agents": width, "repeats": len(samples),
                     "wall_ns_median": statistics.median(row["wall_ns"] for row in samples),
-                    "errors": sum(max(row["errors"], bool(terminal_state_errors(row))) for row in samples)}
+                    "errors": sum(max(row["errors"], bool(terminal_errors(row))) for row in samples)}
             for field, values in {
                 "commands_per_second_median": [row.get("commands_per_second") for row in samples],
                 "physical_peak_delta_bytes_median": [row.get("physical_disk", {}).get("peak_delta_bytes") for row in samples],
@@ -186,7 +186,8 @@ def physical_sample(root, detailed=False):
     return sample
 
 
-def measure(argv, root, output, sample_interval=0.2):
+def measure(argv, root, output, sample_interval=0.2,
+            terminal_check=check_terminal_state, measured_output=None):
     temporary = Path(root) / "tmp"
     temporary.mkdir()
     before = physical_sample(root, detailed=True)
@@ -194,10 +195,14 @@ def measure(argv, root, output, sample_interval=0.2):
     with Path(output).with_suffix(".log").open("w") as log:
         process = subprocess.Popen([str(arg) for arg in argv], stdout=log, stderr=subprocess.STDOUT,
                                    env={**os.environ, "TMPDIR": str(temporary)})
-        while process.poll() is None:
-            samples.append(physical_sample(root))
-            time.sleep(sample_interval)
-        code = process.wait()
+        try:
+            while process.poll() is None:
+                samples.append(physical_sample(root))
+                time.sleep(sample_interval)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            code = process.wait()
     after = physical_sample(root, detailed=True)
     samples.append(after)
     peak = max(samples, key=lambda sample: sample["df_used_bytes"])
@@ -211,10 +216,10 @@ def measure(argv, root, output, sample_interval=0.2):
     else:
         result = {"errors": 1, "wall_ns": 0, "operations": [], "latency": {}}
     result["physical_disk"], result["process_exit"] = disk, code
-    check_terminal_state(result)
+    terminal_check(result)
     if code and not result.get("errors"):
         result["errors"] = 1
-    dump(output, result)
+    dump(measured_output or output, result)
     return result
 
 
