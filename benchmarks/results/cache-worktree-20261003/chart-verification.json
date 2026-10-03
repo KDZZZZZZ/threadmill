@@ -1,0 +1,20 @@
+{
+  "verified_utc": "2026-10-03T17:53:25.558483+00:00",
+  "gnuplot": "gnuplot 6.0 patchlevel 0",
+  "svg_byte_identical_after_regeneration": true,
+  "visual_review": "PNG previews inspected: axes, labels, legend and limitation footnotes are visible; matching axis ranges across fixtures and logarithmic P95 axis are explicit.",
+  "files": {
+    "primary.gnuplot": "4174c2245538b3ebf3cab2272395fa5ce3b00c428a09f17bbe4a985313b4f69c",
+    "write-latency.gnuplot": "02e460aee425ea1f3704f090d1f7bc1978d7f9aef42ec067d3e5c28e547b48b1",
+    "primary-runtime.svg": "3abbe92d6b270d5b6e295b5ca286edb9af8d2b4f0c0b71cd7fa8669a132e171f",
+    "write-latency.svg": "d47ba1c30ee51d85cd16cc4d610326aea10b7019e08dc2d47ad67dd24c2567f4"
+  },
+  "inputs": {
+    "ipython-pi-worktree.csv": "3a32fa91a357aecf3b4543bde1879c51f9ffc0a42ae8aec04f9392c7bfee23c9",
+    "ipython-threadmill-bwrap.csv": "f494fa8321b44d6c7c5532927fdeb86f3eee6d304ac482736bede90eaa4df06c",
+    "ipython-threadmill-external.csv": "3748f4c80e42e2d95672f6f9e65b9361346e984976918700df05f98d8b2aa4a6",
+    "synthetic-pi-worktree.csv": "7bc6a1fe151d472439442418cac1f1ee47d61511aaa02b54af9c07214c47fea5",
+    "synthetic-threadmill-bwrap.csv": "7c89a9af113f4b531d50c931b64191fa6b1f1844671992b062ec5ad701b10691",
+    "synthetic-threadmill-external.csv": "9321be625340b31318ca7d254ff134c9fc80f8f37213aba5a9c1cecaad1015e6"
+  }
+}
