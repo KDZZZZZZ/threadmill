@@ -1,0 +1,764 @@
+[
+  {
+    "archive": "raw/primary-synthetic-pi-worktree.tar.gz",
+    "sha256": "aa1a40ef50792ded938efa3caf4c23d7fafb2d04286514caa41bc53b8727161f",
+    "bytes": 10373253,
+    "files": [
+      {
+        "path": "synthetic/pi-worktree-w64-r1.json",
+        "sha256": "3d54e87bb91208485e5aafb30c7b88b3f9f78acacdc6974afbd9192dbc3a4fb3",
+        "bytes": 1165631
+      },
+      {
+        "path": "synthetic/pi-worktree-w64-r2.json",
+        "sha256": "d22c0a1de38b94244dd8efaaaea2300ee0059a297dfb76e6fc9b50e95d1c8e34",
+        "bytes": 1165709
+      },
+      {
+        "path": "synthetic/pi-worktree-w64-r3.json",
+        "sha256": "fe56cb9d249107b90b55b61ba3efe757da0344f31bffe8884bb9c8953859828c",
+        "bytes": 1165665
+      },
+      {
+        "path": "synthetic/pi-worktree-w128-r1.json",
+        "sha256": "be2676fb3265c64339ef4241160355b92e8135286a89b900bf3ea5305651b60c",
+        "bytes": 2310168
+      },
+      {
+        "path": "synthetic/pi-worktree-w128-r2.json",
+        "sha256": "8c96b6564436157766323384edec60c0733a336e61a296a61c87aed227138073",
+        "bytes": 2311362
+      },
+      {
+        "path": "synthetic/pi-worktree-w128-r3.json",
+        "sha256": "a4b55e3ffe00adbd65db41d461d0656244957e5cb5c69fc06a205ad545cd4e2e",
+        "bytes": 2311062
+      },
+      {
+        "path": "synthetic/pi-worktree-w192-r1.json",
+        "sha256": "aa3df058014aa685fc472021fecaaa8491f12bbef24498e54502bbb0a775a065",
+        "bytes": 3456448
+      },
+      {
+        "path": "synthetic/pi-worktree-w192-r2.json",
+        "sha256": "23b807b644d4a652158c2f72165ad5b682382fb2a0c66726fe1eccd3be145b51",
+        "bytes": 3457582
+      },
+      {
+        "path": "synthetic/pi-worktree-w192-r3.json",
+        "sha256": "3c0f6313395dc2dfe308c410e0cb2a26855b7ecfe3b87d95d50e88b75ee56e90",
+        "bytes": 3457280
+      },
+      {
+        "path": "synthetic/pi-worktree-w256-r1.json",
+        "sha256": "08e6dbf1ff0ead0f50ab1121421f361146181d94cbb552c748541ef2721a9b16",
+        "bytes": 4631367
+      },
+      {
+        "path": "synthetic/pi-worktree-w256-r2.json",
+        "sha256": "15f3ecd6a711036e457c9861a7c2abba1082ca605760c367754d586c6de8d8b1",
+        "bytes": 4626937
+      },
+      {
+        "path": "synthetic/pi-worktree-w256-r3.json",
+        "sha256": "5765466668dc0903d35a8ab060bec3b463235f8c9e0ca4ec71b64033da802915",
+        "bytes": 4633119
+      },
+      {
+        "path": "synthetic/pi-worktree-w384-r1.json",
+        "sha256": "4a8657868305a02fba4571f91e7904f46c8e4470310992363381b9b8a81a1cd0",
+        "bytes": 6960151
+      },
+      {
+        "path": "synthetic/pi-worktree-w384-r2.json",
+        "sha256": "ea5493203f6a25989c25a7d2e4aed62967f5baa4c9744693be81dc617757964f",
+        "bytes": 6955362
+      },
+      {
+        "path": "synthetic/pi-worktree-w384-r3.json",
+        "sha256": "62fac4fdb2502ec82d49cae679177b3d2a0f2f69673df47ec78abb49a889f972",
+        "bytes": 6961044
+      },
+      {
+        "path": "synthetic/pi-worktree-w448-r1.json",
+        "sha256": "fce26eeaf0974264f067234af103ea79f8120034677b297032e3d95d4dba2e77",
+        "bytes": 8141706
+      },
+      {
+        "path": "synthetic/pi-worktree-w448-r2.json",
+        "sha256": "2b8cc179520912f1c96a4b98dff64f4b2d14d629441775b12a2993882e4297e2",
+        "bytes": 8140720
+      },
+      {
+        "path": "synthetic/pi-worktree-w448-r3.json",
+        "sha256": "80f1484b0b01f2017df73ee711abb2483517695c69749efcbb620e273b418945",
+        "bytes": 8144401
+      },
+      {
+        "path": "synthetic/pi-worktree-w500-r1.json",
+        "sha256": "4a29b30de32c2f291635bd203a6d9b9b4d48d8f49e25bf2d31730bf90899728c",
+        "bytes": 9092109
+      },
+      {
+        "path": "synthetic/pi-worktree-w500-r2.json",
+        "sha256": "67c02a9e36355f96f0ad3a751ca31a784e062dd936b170e45a567d913f3d6045",
+        "bytes": 9088219
+      },
+      {
+        "path": "synthetic/pi-worktree-w500-r3.json",
+        "sha256": "abff26656b8d602a758395350929d07844d01e4d249b74c8f0b6d0713f1cdf27",
+        "bytes": 9091702
+      },
+      {
+        "path": "synthetic/pi-worktree-w576-r1.json",
+        "sha256": "5acc932a2d34e413db6cc343492807c038d2f1ac3bda6973b5d22c2f0dce00fc",
+        "bytes": 10494101
+      },
+      {
+        "path": "synthetic/pi-worktree-w576-r2.json",
+        "sha256": "e34783f057641960817c2d2fab6b6a1f786baf27c99bc86dfee2c9cb966eeb3b",
+        "bytes": 10494431
+      },
+      {
+        "path": "synthetic/pi-worktree-w576-r3.json",
+        "sha256": "aad1d949de21522aabe46a252bca4cdfa0b75ac708557f70cd153ca18dfb6c6a",
+        "bytes": 10494497
+      }
+    ]
+  },
+  {
+    "archive": "raw/primary-synthetic-threadmill-external.tar.gz",
+    "sha256": "a7223450fbb9719eb29e19c4957831dc2c18933899b6c0c7bd16bfed0954cc85",
+    "bytes": 10350221,
+    "files": [
+      {
+        "path": "synthetic/threadmill-external-w64-r1.json",
+        "sha256": "b77877f383cc4cd019535f7967e3b6a4b5e76d876318c94ed81c196e6e950ed6",
+        "bytes": 1052704
+      },
+      {
+        "path": "synthetic/threadmill-external-w64-r2.json",
+        "sha256": "9de8c17c35e00083eae89cef721565923b865c0a4455ac8432bfc369b156caec",
+        "bytes": 1048098
+      },
+      {
+        "path": "synthetic/threadmill-external-w64-r3.json",
+        "sha256": "51bc515a28c8e9be9ed414a4d49349a1410d8962dc029f1ca58a67879c083292",
+        "bytes": 1048622
+      },
+      {
+        "path": "synthetic/threadmill-external-w128-r1.json",
+        "sha256": "0f02a40f0edef52c256607a437035c84f6a70bf9b3ca92235c6c2b4c4101920e",
+        "bytes": 2090793
+      },
+      {
+        "path": "synthetic/threadmill-external-w128-r2.json",
+        "sha256": "e3cb9b06d63c59e6300572e5d555303279d75248006b87eeec5a8dbe58051ca1",
+        "bytes": 2092059
+      },
+      {
+        "path": "synthetic/threadmill-external-w128-r3.json",
+        "sha256": "05f87b085aae8545414d3b2ed301a10092e1af00bdea65dc1f69b12b46ce5d77",
+        "bytes": 2091937
+      },
+      {
+        "path": "synthetic/threadmill-external-w192-r1.json",
+        "sha256": "cd650d4cbcd83d232fed6cf0af2a2939115545a81db1b66cfd30577535d2125b",
+        "bytes": 3136512
+      },
+      {
+        "path": "synthetic/threadmill-external-w192-r2.json",
+        "sha256": "e7f8a7fec146cb597f00449c56723499b76e81815541b1f2bdd48519014c5cf6",
+        "bytes": 3137682
+      },
+      {
+        "path": "synthetic/threadmill-external-w192-r3.json",
+        "sha256": "c915456e9e7424fe4680a42a5cf773d6ac8ce181af3d8707fde9f77473e17c03",
+        "bytes": 3137088
+      },
+      {
+        "path": "synthetic/threadmill-external-w256-r1.json",
+        "sha256": "79b3f9b74e9c236e9f575c7b25cf762ebe25bfde18ce116a7513cb22fc2deff7",
+        "bytes": 4205287
+      },
+      {
+        "path": "synthetic/threadmill-external-w256-r2.json",
+        "sha256": "06711fa34da8bc2a01dbb34c3a4705aa4ddb7dc812b448b86ed6269f329ce577",
+        "bytes": 4206478
+      },
+      {
+        "path": "synthetic/threadmill-external-w256-r3.json",
+        "sha256": "f5baec045ac787ae88e7f8e37d316820f947d59b3c57955f44dad9b6fd75c89c",
+        "bytes": 4203698
+      },
+      {
+        "path": "synthetic/threadmill-external-w384-r1.json",
+        "sha256": "2810cf16540b612687061a1e7bf9cc051e7ee65917179eef432cb6bcdb1d42cb",
+        "bytes": 6326140
+      },
+      {
+        "path": "synthetic/threadmill-external-w384-r2.json",
+        "sha256": "aee7a24ad1123b1f5c001ba7345152bd4a0699bcc8fd6382df5f7960eba994a3",
+        "bytes": 6357710
+      },
+      {
+        "path": "synthetic/threadmill-external-w384-r3.json",
+        "sha256": "8cba4c2d66e7c24e43377ab19062a1ecab6eb6ec97c948a48c4a12649acf35b6",
+        "bytes": 6331979
+      },
+      {
+        "path": "synthetic/threadmill-external-w448-r1.json",
+        "sha256": "6dc86b7e83abe077354a1047cbf9c0b63644e8c641c2d0bc7f71bcd22d57829d",
+        "bytes": 7433076
+      },
+      {
+        "path": "synthetic/threadmill-external-w448-r2.json",
+        "sha256": "141ec88ecf2cbce35117a951546738eff747c4b55593c379de99a7d304a60a48",
+        "bytes": 7413342
+      },
+      {
+        "path": "synthetic/threadmill-external-w448-r3.json",
+        "sha256": "3eaef8085147a0b20cc1186a66dd222a7891b0de7a7416106bd9f531ae6ef38e",
+        "bytes": 7441499
+      },
+      {
+        "path": "synthetic/threadmill-external-w500-r1.json",
+        "sha256": "999522625f16630d706872eaea6aeb4519f255c8eaa4c105aec10a7009174545",
+        "bytes": 8306083
+      },
+      {
+        "path": "synthetic/threadmill-external-w500-r2.json",
+        "sha256": "128cef3cc6eed20ccfd444e47a814374304a9d05e3c4455235378926fd287149",
+        "bytes": 8297308
+      },
+      {
+        "path": "synthetic/threadmill-external-w500-r3.json",
+        "sha256": "bf4ff3d88451b3a2502b36ef44d0885d7add004d9108737c4160c7c6ceec301c",
+        "bytes": 8322439
+      },
+      {
+        "path": "synthetic/threadmill-external-w576-r1.json",
+        "sha256": "1103cad30ab4c95c7375c279fdefc499e6a5a1f033484d5b6f273a42846368d7",
+        "bytes": 9648446
+      },
+      {
+        "path": "synthetic/threadmill-external-w576-r2.json",
+        "sha256": "d8edd5a04e9c8beb531ae0a8f0082e9e02d6b15ca017da83ab81878cf2e88642",
+        "bytes": 9610640
+      },
+      {
+        "path": "synthetic/threadmill-external-w576-r3.json",
+        "sha256": "71671539e6fd410b1c997fc4a99a75913797488b205cc8ba80a09e70622c0c34",
+        "bytes": 9647742
+      }
+    ]
+  },
+  {
+    "archive": "raw/primary-synthetic-threadmill-bwrap.tar.gz",
+    "sha256": "0fc2a3d5c1ba100a2fc2b8d36abbcfcd4166404a3735aa8eb628fb663fd28a9d",
+    "bytes": 10406105,
+    "files": [
+      {
+        "path": "synthetic/threadmill-bwrap-w64-r1.json",
+        "sha256": "5c55be9d38cf037f6c1e0b112b9bf14348bfee041f37d0d3f1ec90ec4bd312b8",
+        "bytes": 1050303
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w64-r2.json",
+        "sha256": "3c051893c42cbcef95b07970dcd4910a76a03baa829d734a9dbc351166ae42f0",
+        "bytes": 1050563
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w64-r3.json",
+        "sha256": "429ca6d3403b7d8650b6248334772939fe9202af8559a9ae241ec102dae5d02d",
+        "bytes": 1051018
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w128-r1.json",
+        "sha256": "d3addf68db559f429a2fc5550cd0fb16f81e58e7bab8b46d7e832653d35c2f2f",
+        "bytes": 2097739
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w128-r2.json",
+        "sha256": "bd039c2a2c36c53d0cc5eeb8ecdcb7a1cf696fc38112ddd87c824c8e58d980fa",
+        "bytes": 2097887
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w128-r3.json",
+        "sha256": "bcf34e9f906fdd997b9557e458c71ec8103fe759c864a0bb18b1c2cceff873fb",
+        "bytes": 2098259
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w192-r1.json",
+        "sha256": "d292fce79095ee32407b528c92821bdfd2d6cd6d138f36b430895d335cb1dd15",
+        "bytes": 3148156
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w192-r2.json",
+        "sha256": "98d8b2cf60878328471b532ce03fc737663401f4ac060ffaeb1ae15d1ffc0675",
+        "bytes": 3149257
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w192-r3.json",
+        "sha256": "c9f85ee00aaa002b555e56bf5cd2587c3025f14823a4fff693903c9d6e657062",
+        "bytes": 3147405
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w256-r1.json",
+        "sha256": "95bc6762ba92afdbbd0f8cd96fae20898ef1517bd00f426ed7f67d3b505ec382",
+        "bytes": 4219317
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w256-r2.json",
+        "sha256": "0449fbaa8a48432038c403cb022764e80b61d1e2d1ba40566fb5a1ce8b53822d",
+        "bytes": 4218125
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w256-r3.json",
+        "sha256": "c9328033dfe13e2ba4bc46d5d26afe3f9dd7f7a9028e11b5a924a7af4df4f8a5",
+        "bytes": 4221603
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w384-r1.json",
+        "sha256": "bf4cccddfb7b24ff7fd023d8fb25d89cb6016e30792adb071dbe48c848bac154",
+        "bytes": 6344339
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w384-r2.json",
+        "sha256": "b1d237616ae7f4049da8fed1df84bf135a0ef57f14c957d2f35864fe0c3f3ff3",
+        "bytes": 6359645
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w384-r3.json",
+        "sha256": "327de06076a65e492291dc76ba3fa9985333232b1e514be074dd7c0fd722a184",
+        "bytes": 6347214
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w448-r1.json",
+        "sha256": "2d93d4b1132d74230bf540e6708b617da2ed023cf20c3663540039981279d793",
+        "bytes": 7429623
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w448-r2.json",
+        "sha256": "289bd8b622f3b28ed2cca0ff19ddf390dafe3fdc1df9f2e2aa566f5f9cc9ff3b",
+        "bytes": 7430708
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w448-r3.json",
+        "sha256": "0394b8d5b36b8e75cc97961d2b2ba1c5e76caa59b93b5422ab6bb2878382ac2d",
+        "bytes": 7454237
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w500-r1.json",
+        "sha256": "c0bf2451629ce56736faab5ee8af380bfee7a3eff341caa3bb88ac6b8b33a0a8",
+        "bytes": 8318477
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w500-r2.json",
+        "sha256": "7b1bfb826091dd64d3f928510c313c3f0ed409ae1bd45f3c2fda625f50f28dde",
+        "bytes": 8321410
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w500-r3.json",
+        "sha256": "21bf2f0281c31066c14a11ff011d46eb471b817843ef615ced0261cc73084211",
+        "bytes": 8329329
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w576-r1.json",
+        "sha256": "8115bf750c040076a5d6409f33ce65c70a02621dbb793db21d3978d1ce573ce2",
+        "bytes": 9628492
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w576-r2.json",
+        "sha256": "45c288b9a6e19f9286dcbc648079cf884598264fcbdffa0b802a2c4a326d2852",
+        "bytes": 9647620
+      },
+      {
+        "path": "synthetic/threadmill-bwrap-w576-r3.json",
+        "sha256": "93637e79fa2629f8c9bade00ad8b4c3f9e9db6f2d89ff540d9e499f53a848593",
+        "bytes": 9656175
+      }
+    ]
+  },
+  {
+    "archive": "raw/primary-ipython-pi-worktree.tar.gz",
+    "sha256": "19b9307ba9e5c2b8f5ac77095175e75b7270bcee76dbba2274b6c74257da7402",
+    "bytes": 11049332,
+    "files": [
+      {
+        "path": "ipython/pi-worktree-w64-r1.json",
+        "sha256": "82cd8600613231f10993554ef3374065eb43953f36466ea102458f93fc19dbc0",
+        "bytes": 1161793
+      },
+      {
+        "path": "ipython/pi-worktree-w64-r2.json",
+        "sha256": "8dc464fe0e4f0c2557f43cc24df830038f23d7e1c0f2167cc8f524da65c28517",
+        "bytes": 1161192
+      },
+      {
+        "path": "ipython/pi-worktree-w64-r3.json",
+        "sha256": "111f180324d712038621d9ddc6eb30b5d66a778b27d292def8cd04740b706ba3",
+        "bytes": 1161455
+      },
+      {
+        "path": "ipython/pi-worktree-w128-r1.json",
+        "sha256": "777bab29e9ddbc4022f623814cd8b0495c48eed53e59d3c7a2806a9eec2cfb17",
+        "bytes": 2315285
+      },
+      {
+        "path": "ipython/pi-worktree-w128-r2.json",
+        "sha256": "49bdad16acf6f22552bc1567a49de6eca0ee4fe4a25986e9d37a4138617b58be",
+        "bytes": 2315351
+      },
+      {
+        "path": "ipython/pi-worktree-w128-r3.json",
+        "sha256": "9f411671dd5e8bea8d93b37968dbfdd2528c5aec4ba3e6725591475e9634a238",
+        "bytes": 2314477
+      },
+      {
+        "path": "ipython/pi-worktree-w192-r1.json",
+        "sha256": "5bd422dbd66195ea4a7c850205dd962d9b62b5f37c9e4d7b2f01f16e494f1990",
+        "bytes": 3479435
+      },
+      {
+        "path": "ipython/pi-worktree-w192-r2.json",
+        "sha256": "a357818489ee58ae41a55f932c3f7577272b90e97215a0bc4041fd713349e8c8",
+        "bytes": 3476816
+      },
+      {
+        "path": "ipython/pi-worktree-w192-r3.json",
+        "sha256": "525560ac49c03501ed807a21ccce16e6cbdcaf6fbf47a43b8fbfffed46df18a9",
+        "bytes": 3477208
+      },
+      {
+        "path": "ipython/pi-worktree-w256-r1.json",
+        "sha256": "d5369ef9e31f811bcc51c8a1194a96c824074ff4a163c72b8c56dd489fe9c402",
+        "bytes": 4660313
+      },
+      {
+        "path": "ipython/pi-worktree-w256-r2.json",
+        "sha256": "e8dceeb99e8943b199638bd1c6003dde9a97fe599d11eff39876b2bc818f3407",
+        "bytes": 4664631
+      },
+      {
+        "path": "ipython/pi-worktree-w256-r3.json",
+        "sha256": "d539282bfbd0fff57148798d23efa688d13a2328f3455cd27fe93dcff57a5511",
+        "bytes": 4665233
+      },
+      {
+        "path": "ipython/pi-worktree-w384-r1.json",
+        "sha256": "9b50c473ef1c163eade11c9a51115e3d8dc979fa46921478c58b6874d43bbc23",
+        "bytes": 7008960
+      },
+      {
+        "path": "ipython/pi-worktree-w384-r2.json",
+        "sha256": "b8162cb9c4b7233312dd2d87e4e65910a63a218210c304e540502257b0912909",
+        "bytes": 7010349
+      },
+      {
+        "path": "ipython/pi-worktree-w384-r3.json",
+        "sha256": "5e809d932207fc5ce812654c2f1f657235b493e993ab47f6bd5ec7c914f9c0f8",
+        "bytes": 7006598
+      },
+      {
+        "path": "ipython/pi-worktree-w448-r1.json",
+        "sha256": "0a048083e3af4f908a5a6dec29b088fcef2d18aeb08aeaf4575afd9f0fc8fbf6",
+        "bytes": 8202627
+      },
+      {
+        "path": "ipython/pi-worktree-w448-r2.json",
+        "sha256": "57d5bf8bd2dc18118d788244008f9852825932e7275c0fba47bc04b280330bfe",
+        "bytes": 8199397
+      },
+      {
+        "path": "ipython/pi-worktree-w448-r3.json",
+        "sha256": "4c4370a539e2dcb17f74350f242b4affde822c2a25567b156d929f397a396503",
+        "bytes": 8197556
+      },
+      {
+        "path": "ipython/pi-worktree-w500-r1.json",
+        "sha256": "c11bb53158cc5ef2a4cf90b158c184a9cad2bddde64c9078a8a29ccd0ea75360",
+        "bytes": 9149158
+      },
+      {
+        "path": "ipython/pi-worktree-w500-r2.json",
+        "sha256": "ecdfddd09462996d06cd73b581bf2c109ac8e118c26a4ebda95d367a2fecba2c",
+        "bytes": 9155735
+      },
+      {
+        "path": "ipython/pi-worktree-w500-r3.json",
+        "sha256": "383c4ef2c7ad7eeec951a52e181ba919264100bb64a6f72b2364fb45c6e57a71",
+        "bytes": 9153431
+      },
+      {
+        "path": "ipython/pi-worktree-w576-r1.json",
+        "sha256": "fc69c6208a2a7473d4ac27d1e0a813d9097ea088d113544a358a3e1f78fce283",
+        "bytes": 10558499
+      },
+      {
+        "path": "ipython/pi-worktree-w576-r2.json",
+        "sha256": "fb8924782f925a849b41d378e59ae44712ca8dc0a72694fad4b503a5f1050359",
+        "bytes": 10558313
+      },
+      {
+        "path": "ipython/pi-worktree-w576-r3.json",
+        "sha256": "41f5f29a8e5abba0e6f2bf44656d12fd6fe17aff356868c7d65bcb5ca1422e90",
+        "bytes": 10557802
+      }
+    ]
+  },
+  {
+    "archive": "raw/primary-ipython-threadmill-external.tar.gz",
+    "sha256": "1d3f0ad2362d9d6ad9f742e265d9c5a95a6e2aaf220482f6f1107dac4109ea45",
+    "bytes": 9964158,
+    "files": [
+      {
+        "path": "ipython/threadmill-external-w64-r1.json",
+        "sha256": "cd188becec0d22d3f7398385d560f79257320bfc86227eed74f8c8416b12d737",
+        "bytes": 1041164
+      },
+      {
+        "path": "ipython/threadmill-external-w64-r2.json",
+        "sha256": "9b36b275f4b5ec835373b65b763f51e353db85c5ed9139b49f0ce00f29e77245",
+        "bytes": 1041145
+      },
+      {
+        "path": "ipython/threadmill-external-w64-r3.json",
+        "sha256": "81c685753c3083a35ffad320e295f7b00c7e4273a0fd20ba8590f1199642453e",
+        "bytes": 1041121
+      },
+      {
+        "path": "ipython/threadmill-external-w128-r1.json",
+        "sha256": "69d84316d0a5a2874b4dc6bd7bd5129c9e6035254ac43fd1d3ebc999457a4541",
+        "bytes": 2076600
+      },
+      {
+        "path": "ipython/threadmill-external-w128-r2.json",
+        "sha256": "273781cf7cea858d9294e41d563e7126e087b9273d2a568dbd65667fe908c596",
+        "bytes": 2076678
+      },
+      {
+        "path": "ipython/threadmill-external-w128-r3.json",
+        "sha256": "82dc1761074de2061099adf8bc8f934d2c37590fd320bed5c0baa36959182ed1",
+        "bytes": 2076862
+      },
+      {
+        "path": "ipython/threadmill-external-w192-r1.json",
+        "sha256": "7e7b72a831ea1f5ed8ac8da0ec428cd29f1b3cc7ce3900f386d16718d06d8833",
+        "bytes": 3116698
+      },
+      {
+        "path": "ipython/threadmill-external-w192-r2.json",
+        "sha256": "d75ab544e519cc0374b2558b141d41323366310ddc20470a76b86621e76591a8",
+        "bytes": 3116783
+      },
+      {
+        "path": "ipython/threadmill-external-w192-r3.json",
+        "sha256": "1c6027c1ad5d881a83db2e32215fdc909e86e81ee4711436386f2c180bd201f1",
+        "bytes": 3116838
+      },
+      {
+        "path": "ipython/threadmill-external-w256-r1.json",
+        "sha256": "684d7cb9bd2858066823dee5d2f191d61cb64e6726e3700b3e85a9c9e2f38609",
+        "bytes": 4175101
+      },
+      {
+        "path": "ipython/threadmill-external-w256-r2.json",
+        "sha256": "ff97fd528ed6812c35015c6149e7af1b56317c9f255952c902c4658517fcd3b0",
+        "bytes": 4174243
+      },
+      {
+        "path": "ipython/threadmill-external-w256-r3.json",
+        "sha256": "ce593f0db51e404038d530fee3f3633ccc50ea1bb06e211b31c80af6912a5566",
+        "bytes": 4174319
+      },
+      {
+        "path": "ipython/threadmill-external-w384-r1.json",
+        "sha256": "241620548b8990f8e807c58bc391269f44c0734544a0b8c71c5e34c2013d41de",
+        "bytes": 6273491
+      },
+      {
+        "path": "ipython/threadmill-external-w384-r2.json",
+        "sha256": "3dc5a8ebdc852fba30dc3984c66579e2f4ba29cb0987d73f613927d62c1a0632",
+        "bytes": 6272866
+      },
+      {
+        "path": "ipython/threadmill-external-w384-r3.json",
+        "sha256": "f3e6222b67217a1b5b606f5361f518f8414c63d68e901ce5552744263780b51c",
+        "bytes": 6273274
+      },
+      {
+        "path": "ipython/threadmill-external-w448-r1.json",
+        "sha256": "45ccad4fbd8650e4c43bafc356567fb9dcad03fb05312ef13fa470c1965ce363",
+        "bytes": 7337629
+      },
+      {
+        "path": "ipython/threadmill-external-w448-r2.json",
+        "sha256": "acafa92a0b2422e35a4b71fd70bccddd7eb538b6efda49d2e3f87c7c5da98644",
+        "bytes": 7337656
+      },
+      {
+        "path": "ipython/threadmill-external-w448-r3.json",
+        "sha256": "b9e62962e438546a9c002c794b2fbe2f15c5d9e51fce1ee113ea95fb3459ee7b",
+        "bytes": 7338468
+      },
+      {
+        "path": "ipython/threadmill-external-w500-r1.json",
+        "sha256": "ce5b51777d07fe5f8541bc57a828b08baee70e1c50120f62fcc0d7ead8a1e133",
+        "bytes": 8192356
+      },
+      {
+        "path": "ipython/threadmill-external-w500-r2.json",
+        "sha256": "84f2c91f26a7d4d3dff721abe1c0d39c67c059a4f7a9135f9d9fe665652a6dbe",
+        "bytes": 8192038
+      },
+      {
+        "path": "ipython/threadmill-external-w500-r3.json",
+        "sha256": "d3bfe713e654f2107e1ed02edcbd6d6cc14bd179d6d047d2570183ef905c9e02",
+        "bytes": 8192542
+      },
+      {
+        "path": "ipython/threadmill-external-w576-r1.json",
+        "sha256": "e170c57e64349b01f608a47a10ad343abca28e1a221ead9f426814f75a318c3f",
+        "bytes": 9450891
+      },
+      {
+        "path": "ipython/threadmill-external-w576-r2.json",
+        "sha256": "8dd32ad6b044fd5e85dcd53b706d99ea903d6945e810d54e9b716453856edaac",
+        "bytes": 9452560
+      },
+      {
+        "path": "continuation-20261003/ipython/threadmill-external-w576-r3.json",
+        "sha256": "4bb027045e7db08b44861d37355b9b4da1ad8b189e53ac1abe32e97f231247ab",
+        "bytes": 9454191
+      }
+    ]
+  },
+  {
+    "archive": "raw/primary-ipython-threadmill-bwrap.tar.gz",
+    "sha256": "9aa8bb348e8e8a9b78f370179d38e269698ff68d5046cb0fd4baca11614de9cc",
+    "bytes": 9997532,
+    "files": [
+      {
+        "path": "ipython/threadmill-bwrap-w64-r1.json",
+        "sha256": "7017ef1de92fea096c8783f7f09e9b1766420a488bcff18cbb602060075047f8",
+        "bytes": 1043290
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w64-r2.json",
+        "sha256": "e1ce282df8e9e13a37a8a7ca1c5c8089abd6a7487356aac92a1f2ebd357a11aa",
+        "bytes": 1042906
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w64-r3.json",
+        "sha256": "9b3aec8f2a154da62f02a46f525074f3a9cce0495b95558ba552ea45cf7af2e9",
+        "bytes": 1042764
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w128-r1.json",
+        "sha256": "378a83ad519dfaee462ec72a0ff8a99421ce4a3b9bde7be1935a0f8d9658a32d",
+        "bytes": 2081510
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w128-r2.json",
+        "sha256": "227d3cb5d87866ce8f510b88139258944da39d041e34e5f7ae017b18481bca28",
+        "bytes": 2082384
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w128-r3.json",
+        "sha256": "a75a09c4c24273f879da50b2493ed99e2ab07aa926c65b8ed261497f479fbb1c",
+        "bytes": 2081799
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w192-r1.json",
+        "sha256": "864e328720abe21580af7d861d3fd4cee3fd36939e09763f51aa9deb878edd50",
+        "bytes": 3123831
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w192-r2.json",
+        "sha256": "b5f32693e95ea1db6f1796a883c004154683b3ce5460c56101a7e0376cd83d25",
+        "bytes": 3123524
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w192-r3.json",
+        "sha256": "7f7b442955706565b084f63d32d9f6b6035a32f9d375102f1c9b54545367d2f7",
+        "bytes": 3124138
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w256-r1.json",
+        "sha256": "5fc165b137c1acf9b83bed5c498e2ca6fe996414100b877b0cb7997e3dc941a3",
+        "bytes": 4184019
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w256-r2.json",
+        "sha256": "fa439a68c9273d68f84837edba073634b98261c6d64d8d0d63227d6786427469",
+        "bytes": 4184068
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w256-r3.json",
+        "sha256": "b75f93e41888f303b9b1f2e600fa30a34d69ffc25b1f5b1470bd7a091cbfce20",
+        "bytes": 4184090
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w384-r1.json",
+        "sha256": "50d20f435e0d5d065321b86d8ab7ee2fe462962b6c4ed98fa03f75944e8b1e67",
+        "bytes": 6287911
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w384-r2.json",
+        "sha256": "57000fa9760813029a601b6690692958c4898a346c809beccdef718930b9986f",
+        "bytes": 6289885
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w384-r3.json",
+        "sha256": "e9c0db306e087f82da0b61ed0d8c93df0b3bf18b668457db43443a7a40767082",
+        "bytes": 6287186
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w448-r1.json",
+        "sha256": "8fe0486d193236ac80913b4e4887ffd2a40d9ee6c627bd3ba1c57cf2f601db89",
+        "bytes": 7353673
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w448-r2.json",
+        "sha256": "77c33e54142d0de8c6d7312d2e4e1a8409f0794c7172e5ec605f00a9d59db51d",
+        "bytes": 7355322
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w448-r3.json",
+        "sha256": "b3ac731fbe9deef05e659f929eb89c9f588c6ceecfe2749cd18aa9af9948bfd6",
+        "bytes": 7354033
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w500-r1.json",
+        "sha256": "1f45ac0ae61cbc83ef8dac28bf7086c693745fa953a2154b8303249e6419af10",
+        "bytes": 8209911
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w500-r2.json",
+        "sha256": "1461c501552afaa0a2ad0d89f49f8121e7121546b4aa134540ca13cbe088fcb7",
+        "bytes": 8211300
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w500-r3.json",
+        "sha256": "713f4ee4c43ab328aa923cdd7f6b9d8ab09846aeaea19445563d73fa02bc9f81",
+        "bytes": 8209833
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w576-r1.json",
+        "sha256": "33b3975d2e09b437c8d187c54407ed2828794de49fe64423a863f054c9ec3462",
+        "bytes": 9472352
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w576-r2.json",
+        "sha256": "d1c9da4bfe99209144926f82ef5be63d78c82142b57a41364b6ebe40a6a98030",
+        "bytes": 9472493
+      },
+      {
+        "path": "ipython/threadmill-bwrap-w576-r3.json",
+        "sha256": "4353e715e12cff04de60f0cae1579ce404dafc2a6237ed1b989bb08f2a6625b3",
+        "bytes": 9472754
+      }
+    ]
+  }
+]
